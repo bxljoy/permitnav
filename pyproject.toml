@@ -10,6 +10,12 @@ dependencies = [
     "psycopg[binary]>=3.2",
 ]
 
+[project.optional-dependencies]
+# Self-hosted embeddings (D15). Heavy (PyTorch); install locally with `uv sync --extra embed`.
+embed = [
+    "sentence-transformers>=3.3",
+]
+
 [project.scripts]
 permitnav = "permitnav.cli:main"
 

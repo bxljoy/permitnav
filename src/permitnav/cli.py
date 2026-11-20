@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from permitnav import db
+from permitnav.corpus.chunking import STRATEGIES
 
 # Statutes in scope for the first version (D1).
 STATUTES = {
@@ -79,6 +80,42 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return status
 
 
+def cmd_index(args: argparse.Namespace) -> int:
+    import resource
+    import time
+
+    from permitnav.corpus.indexing import build_chunks, embed_chunks
+
+    with db.connect() as conn:
+        for strategy in args.strategy:
+            print(f"chunks ({strategy}): {build_chunks(conn, strategy):,} new")
+        if args.no_embed:
+            return 0
+        from permitnav.embedding.bge_m3 import BgeM3Embedder
+
+        started = time.perf_counter()
+        try:
+            embedder = BgeM3Embedder()  # imports torch and sentence-transformers here
+        except ImportError:
+            print("bge-m3 needs the embed extra: uv sync --extra embed")
+            return 1
+        loaded_in = time.perf_counter() - started
+        print(f"loaded {embedder.model_id} on {embedder.device} in {loaded_in:.1f}s")
+        started = time.perf_counter()
+
+        def progress(done: int, total: int) -> None:
+            print(f"\r  embedded {done:,}/{total:,}", end="", flush=True)
+
+        count = embed_chunks(conn, embedder, on_batch=progress)
+        elapsed = time.perf_counter() - started
+        # ru_maxrss is in bytes on macOS and in kilobytes on Linux.
+        unit = 1024 * 1024 if sys.platform == "darwin" else 1024
+        peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / unit
+        rate = f", {count / elapsed:.1f} chunks/s" if count and elapsed else ""
+        print(f"\nembedded {count:,} chunks in {elapsed:.1f}s{rate}; peak memory {peak_mb:,.0f} MB")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="permitnav")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -89,6 +126,10 @@ def main(argv: list[str] | None = None) -> int:
     ingest = sub.add_parser("ingest", help="parse the latest downloads and store them")
     ingest.add_argument("sfs", nargs="*", help="SFS numbers (default: all in scope)")
     ingest.set_defaults(run=cmd_ingest)
+    index = sub.add_parser("index", help="build chunks and embeddings for stored versions")
+    index.add_argument("--strategy", nargs="+", default=list(STRATEGIES), choices=list(STRATEGIES))
+    index.add_argument("--no-embed", action="store_true", help="only build chunks")
+    index.set_defaults(run=cmd_index)
     args = parser.parse_args(argv)
     return args.run(args)
 

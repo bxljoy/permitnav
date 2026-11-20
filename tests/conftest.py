@@ -44,3 +44,22 @@ def conn(database_url: str) -> Iterator[psycopg.Connection]:
         with connection.transaction(force_rollback=True):
             connection.execute("SET CONSTRAINTS ALL IMMEDIATE")
             yield connection
+
+
+@pytest.fixture
+def fresh_database_url() -> Iterator[str]:
+    """A migrated database of its own, for tests that check what is really committed."""
+    base = os.environ.get("DATABASE_URL")
+    if not base:
+        pytest.skip("DATABASE_URL not set; start Postgres with `docker compose up -d`")
+    name = f"permitnav_fresh_{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(base, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    url = make_conninfo(base, dbname=name)
+    try:
+        with psycopg.connect(url) as connection:
+            db.migrate(connection)
+        yield url
+    finally:
+        with psycopg.connect(base, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
