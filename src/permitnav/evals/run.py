@@ -35,11 +35,14 @@ def run_retrieval(
     retriever: Retriever,
     existing_units: dict[str, str],
     applying_on: Callable[[date], set[str]],
+    same_text: Callable[[str, date], set[str]] | None = None,
 ) -> RetrievalRun:
     """Score every item whose required groups can all be found; record why others can't.
 
     `existing_units` maps each unit id in the corpus to its document; `applying_on(d)` gives
-    the units with a wording that applies on date d (the only ones search can return).
+    the units with a wording that applies on date d (the only ones search can return);
+    `same_text(unit, d)` gives units whose wording on d is identical to that unit's. Search
+    shows one of a set of identical sections, so any of them counts as finding the expected one.
 
     - An expected unit from an indexed statute that is not in the corpus is a golden-set
       error (a typo or a wrong section number), reported, never counted as a miss.
@@ -48,6 +51,7 @@ def run_retrieval(
       only when some group has no findable alternative left.
     """
     indexed_statutes = {doc for doc in existing_units.values() if doc.startswith("sfs:")}
+    indexed_pages = {u.split("#", 1)[0] for u in existing_units if u.startswith("web:")}
     run = RetrievalRun()
 
     def skip(reason: str, item: GoldenItem) -> None:
@@ -61,9 +65,11 @@ def run_retrieval(
         unknown = [
             u
             for u in units
-            if u.startswith("sfs:")
-            and u.split("/", 1)[0] in indexed_statutes
-            and u not in existing_units
+            if u not in existing_units
+            and (
+                (u.startswith("sfs:") and u.split("/", 1)[0] in indexed_statutes)
+                or (u.startswith("web:") and u.split("#", 1)[0] in indexed_pages)
+            )
         ]
         if unknown:
             run.unknown_units[item.id] = unknown
@@ -89,9 +95,17 @@ def run_retrieval(
             continue
         hits = retriever.search(item.question, as_of=item.as_of, k=K_MAX)
         retrieved = tuple(h.unit_id for h in hits)
+        expected = item.expected
+        if same_text is not None:
+            expected = tuple(
+                tuple(
+                    dict.fromkeys([*group, *(e for u in group for e in same_text(u, item.as_of))])
+                )
+                for group in item.expected
+            )
         run.results.append(
             ItemResult(
-                item=item, retrieved=retrieved, ranks=tuple(group_ranks(item.expected, retrieved))
+                item=item, retrieved=retrieved, ranks=tuple(group_ranks(expected, retrieved))
             )
         )
     return run

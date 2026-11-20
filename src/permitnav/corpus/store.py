@@ -27,13 +27,14 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 
 import psycopg
 
 from permitnav.parsing.statute import Statute
 from permitnav.parsing.types import ParsedUnit
-from permitnav.sources.riksdagen import RawFetch
+from permitnav.parsing.webpage import Page
+from permitnav.sources.raw import RawFetch
 
 
 @dataclass
@@ -60,6 +61,15 @@ class _Stored:
     valid_to: date | None
     pending: str | None
     dates_estimated: bool
+    time_basis: str
+
+
+@dataclass(frozen=True)
+class _Context:
+    """What the source says beyond its units: repeals and amending acts' in-force dates."""
+
+    repealed: dict[str, str]
+    in_force: dict[str, date]
 
 
 def text_hash(text: str) -> str:
@@ -67,17 +77,63 @@ def text_hash(text: str) -> str:
 
 
 def ingest_statute(conn: psycopg.Connection, raw: RawFetch, statute: Statute) -> IngestReport:
+    context = _Context(repealed=statute.repealed, in_force=statute.in_force)
+    report = _ingest(conn, raw, statute.units, context, statute.conflicts)
+    with conn.transaction():
+        report.links = _link_transitional(conn, statute)
+    return report
+
+
+def ingest_page(conn: psycopg.Connection, raw: RawFetch, page: Page) -> IngestReport:
+    """Store a Migrationsverket page's sections. Pages are dated by observation only (D5):
+    a section that disappears is closed with `observed_to`, never with legal dates."""
+    report = _ingest(conn, raw, page.units, _Context(repealed={}, in_force={}), [])
+    with conn.transaction():
+        for language, url in page.translations.items():
+            if language != page.language and url != page.url:  # never the page itself
+                conn.execute(
+                    "INSERT INTO page_translation (document, language, translation)"
+                    " VALUES (%s, %s, %s) ON CONFLICT (document, language)"
+                    " DO UPDATE SET translation = EXCLUDED.translation",
+                    (page.url, page.language, url),
+                )
+    return report
+
+
+def close_documents(conn: psycopg.Connection, keep: set[str], at: datetime) -> int:
+    """Close the still-observed sections of web pages not in `keep` (pages that disappeared
+    from the site or its sitemap). Returns the number of sections closed."""
+    with conn.transaction():
+        cur = conn.execute(
+            """
+            UPDATE unit_version v SET observed_to = %(at)s
+            FROM unit u
+            WHERE u.id = v.unit_id AND u.source_type = 'web_page'
+              AND v.observed_to IS NULL AND NOT (u.document = ANY(%(keep)s))
+            """,
+            {"at": at, "keep": list(keep)},
+        )
+        return cur.rowcount
+
+
+def _ingest(
+    conn: psycopg.Connection,
+    raw: RawFetch,
+    units: list[ParsedUnit],
+    context: _Context,
+    conflicts: list[str],
+) -> IngestReport:
     with conn.transaction():
         # Versions are rewritten in any order; the overlap rule is checked once at the end.
         conn.execute("SET CONSTRAINTS one_wording_per_day DEFERRED")
         download_id, already = _record_download(conn, raw)
         report = IngestReport(
-            download_id=download_id, already_recorded=already, conflicts=list(statute.conflicts)
+            download_id=download_id, already_recorded=already, conflicts=list(conflicts)
         )
-        _upsert_units(conn, statute.units)
+        _upsert_units(conn, units)
 
         parsed_by_unit: dict[str, list[ParsedUnit]] = {}
-        for unit in statute.units:
+        for unit in units:
             parsed_by_unit.setdefault(unit.unit_id, []).append(unit)
         report.units = len(parsed_by_unit)
         stored_by_unit: dict[str, list[_Stored]] = {}
@@ -93,11 +149,9 @@ def ingest_statute(conn: psycopg.Connection, raw: RawFetch, statute: Statute) ->
                 raw,
                 download_id,
                 seen_on,
-                statute,
+                context,
                 report,
             )
-
-        report.links = _link_transitional(conn, statute)
         conn.execute("SET CONSTRAINTS one_wording_per_day IMMEDIATE")  # check now, not at commit
     return report
 
@@ -141,7 +195,7 @@ def _apply_unit(
     raw: RawFetch,
     download_id: int,
     seen_on: date,
-    statute: Statute,
+    context: _Context,
     report: IngestReport,
 ) -> None:
     # Match one-to-one by text, in order; identical texts with different dates stay distinct.
@@ -162,7 +216,8 @@ def _apply_unit(
     # A new wording with no start date (and not waiting for a decision) replaces a gone
     # current wording now: both ends of the change are estimated as the day it was seen.
     undated_replacement = any(
-        w.valid_from is None
+        w.time_basis == "valid"
+        and w.valid_from is None
         and w.pending != "starts"
         and (w.valid_to is None or w.valid_to > seen_on)
         for w in new
@@ -170,7 +225,7 @@ def _apply_unit(
     estimated_change = False
     for gone in unmatched_stored:
         estimated_change |= _close(
-            conn, gone, new, undated_replacement, raw, seen_on, statute, report
+            conn, gone, new, undated_replacement, raw, seen_on, context, report
         )
     if estimated_change:
         report.estimated.append(stored[0].unit_id)
@@ -178,6 +233,7 @@ def _apply_unit(
     for wording in new:
         estimate = (
             estimated_change
+            and wording.time_basis == "valid"
             and wording.valid_from is None
             and wording.pending != "starts"
             and (wording.valid_to is None or wording.valid_to > seen_on)
@@ -225,11 +281,16 @@ def _close(
     undated_replacement: bool,
     raw: RawFetch,
     seen_on: date,
-    statute: Statute,
+    context: _Context,
     report: IngestReport,
 ) -> bool:
     """Close a wording that is no longer in the text. Returns True if the date is estimated."""
     report.closed_versions += 1
+    if gone.time_basis == "observed":  # a web page section: only the observation ends
+        conn.execute(
+            "UPDATE unit_version SET observed_to = %s WHERE id = %s", (raw.fetched_at, gone.id)
+        )
+        return False
     if gone.pending == "starts":  # never took effect; just no longer announced
         conn.execute(
             "UPDATE unit_version SET observed_to = %s, withdrawn = true WHERE id = %s",
@@ -254,8 +315,8 @@ def _close(
         ]
         if later_starts:
             valid_to = min(later_starts)
-        elif (act := statute.repealed.get(gone.unit_id)) and act in statute.in_force:
-            valid_to = statute.in_force[act]
+        elif (act := context.repealed.get(gone.unit_id)) and act in context.in_force:
+            valid_to = context.in_force[act]
         else:
             valid_to, estimated = seen_on, True
 
@@ -328,7 +389,7 @@ def _open_versions(conn: psycopg.Connection, url: str) -> list[_Stored]:
     rows = conn.execute(
         """
         SELECT v.id, v.unit_id, v.text_hash, v.valid_from, v.valid_to, v.pending,
-               v.dates_estimated
+               v.dates_estimated, v.time_basis
         FROM unit_version v JOIN download d ON d.id = v.download_id
         WHERE d.url = %s AND v.observed_to IS NULL
         ORDER BY v.id

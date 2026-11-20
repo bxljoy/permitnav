@@ -178,3 +178,72 @@ def test_results_are_sliced_by_authority(conn: psycopg.Connection, retriever: Re
         lambda d: units_applying_on(conn, d),
     )
     assert "authority: law" in {s.name for s in slices(run)}
+
+
+def test_interleaving_keeps_law_in_the_results_when_pages_match_better(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    from permitnav.corpus.store import ingest_page
+    from permitnav.parsing.webpage import parse_page
+    from tests.test_webpage import FIXTURE as PAGE
+    from tests.test_webpage import SV, raw_page
+
+    ingest_page(conn, raw_page(PAGE, 20), parse_page(PAGE, SV))
+    build_chunks(conn, "structure")
+    embed_chunks(conn, FAKE)
+    query = "arbetstillstånd lönekravet månadslön kronor försäkringar"
+    mixed = retriever.search(query, as_of=date(2026, 11, 21), k=4)
+    kinds = [h.authority for h in mixed]
+    assert "web_page" in kinds and "law" in kinds
+    assert kinds[0] != kinds[1]  # alternating
+    flat = Retriever(conn, FAKE, RetrievalConfig(mix="none")).search(
+        query, as_of=date(2026, 11, 21), k=4
+    )
+    assert len(flat) == 4
+
+
+def test_identical_sections_appear_once_and_count_for_each_other(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    from permitnav.corpus.store import ingest_page
+    from permitnav.parsing.webpage import parse_page
+    from permitnav.retrieval.retriever import units_with_same_text
+    from tests.test_webpage import FIXTURE as PAGE
+    from tests.test_webpage import SV, raw_page
+
+    copy_url = SV.replace("/anstalld.html", "/artist.html")
+    ingest_page(conn, raw_page(PAGE, 20), parse_page(PAGE, SV))
+    ingest_page(conn, raw_page(PAGE, 20, url=copy_url), parse_page(PAGE, copy_url))
+    build_chunks(conn, "structure")
+    embed_chunks(conn, FAKE)
+    hits = retriever.search(
+        "fackförbund erbjudandet anställning yttra", as_of=date(2026, 11, 21), k=10
+    )
+    anchor = "#fackforbundetfarmojlighetattyttrasig"
+    assert len([h for h in hits if h.unit_id.endswith(anchor)]) == 1  # the copy takes no slot
+    original = "web:sv/du-vill-ansoka/arbeta/anstalld-eller-egen-foretagare/anstalld" + anchor
+    copy = original.replace("/anstalld#", "/artist#")
+    assert units_with_same_text(conn, original, date(2026, 11, 21)) == {copy}
+
+
+def test_source_types_outside_the_named_groups_can_still_be_found(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    conn.execute("UPDATE unit SET source_type = 'ruling' WHERE id = 'sfs:2005:716/6kap/2§'")
+    hits = retriever.search("lönen medianlönen procent lönekravet", as_of=date(2026, 11, 20), k=5)
+    assert "sfs:2005:716/6kap/2§" in {h.unit_id for h in hits}
+
+
+def test_a_mistyped_page_section_is_a_golden_set_error(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    from permitnav.corpus.store import ingest_page
+    from permitnav.parsing.webpage import parse_page
+    from tests.test_webpage import BASE, SV, raw_page
+    from tests.test_webpage import FIXTURE as PAGE
+
+    ingest_page(conn, raw_page(PAGE, 20), parse_page(PAGE, SV))
+    existing = dict(conn.execute("SELECT id, document FROM unit").fetchall())
+    typo = item("typo", "x", [[f"{BASE}#lonekrav"]])
+    run = run_retrieval([typo], retriever, existing, lambda d: units_applying_on(conn, d))
+    assert run.unknown_units == {"typo": [f"{BASE}#lonekrav"]}

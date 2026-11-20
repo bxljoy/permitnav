@@ -38,45 +38,124 @@ def cmd_migrate(_: argparse.Namespace) -> int:
 
 def cmd_fetch(args: argparse.Namespace) -> int:
     from permitnav.sources.http import LiveHttp
-    from permitnav.sources.riksdagen import fetch_statute
 
     http = LiveHttp(user_agent=_user_agent())
-    for sfs in args.sfs or STATUTES:
-        fetched = fetch_statute(http, sfs, _raw_dir())
-        print(f"{sfs}: {len(fetched.content):,} bytes -> {fetched.storage_path}")
-    return 0
+    if args.source in ("riksdagen", "all"):
+        from permitnav.sources.riksdagen import fetch_statute
+
+        for sfs in args.sfs or STATUTES:
+            statute_fetch = fetch_statute(http, sfs, _raw_dir())
+            size = len(statute_fetch.content)
+            print(f"{sfs}: {size:,} bytes -> {statute_fetch.storage_path}")
+    failed: list[str] = []
+    if args.source in ("migrationsverket", "all"):
+        from permitnav.parsing.webpage import parse_page
+        from permitnav.sources.migrationsverket import (
+            FetchError,
+            discover,
+            fetch_page,
+            finish_crawl,
+            load_robots,
+        )
+
+        robots = load_robots(http)
+        found = discover(http)
+        swedish = [u for u in found if robots.allowed(u)]
+        print(
+            f"migrationsverket: {len(swedish)} Swedish pages in scope"
+            f" ({len(found) - len(swedish)} skipped: disallowed by robots.txt)"
+        )
+        fetched: list[str] = []
+        gone = 0
+        for n, url in enumerate(swedish, start=1):
+            target = url  # the URL being fetched, so a failure is recorded against the right page
+            try:
+                page = fetch_page(http, robots, target, _raw_dir())
+                fetched.append(target)
+                english = parse_page(page.content.decode("utf-8"), url).translations.get("en")
+                if english and english != url and robots.allowed(english):
+                    target = english
+                    fetch_page(http, robots, target, _raw_dir())
+                    fetched.append(target)
+            except FetchError as error:
+                if error.gone:
+                    gone += 1  # not in `fetched`: ingest closes its sections
+                else:
+                    failed.append(target)
+                print(f"\n  {'gone' if error.gone else 'failed'}: {error}")
+            except (PermissionError, ValueError) as error:
+                failed.append(target)
+                print(f"\n  failed: {error}")
+            print(f"\r  {n}/{len(swedish)} pages (with English versions)", end="", flush=True)
+        finish_crawl(_raw_dir(), fetched, failed)
+        print(f"\nmigrationsverket: {len(fetched)} fetched, {gone} gone, {len(failed)} failed")
+    return 1 if failed else 0
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    from permitnav.corpus.store import ingest_statute
+    from permitnav.corpus.store import ingest_page, ingest_statute
     from permitnav.parsing.statute import parse_statute
     from permitnav.sources.riksdagen import latest_fetch
 
     status = 0
     with db.connect() as conn:
-        for sfs in args.sfs or STATUTES:
-            raw = latest_fetch(_raw_dir(), sfs)
-            if raw is None:
-                print(f"{sfs}: nothing downloaded yet; run `permitnav fetch` first")
-                status = 1
-                continue
-            statute = parse_statute(raw.content.decode("utf-8"), url=raw.url)
-            if statute.warnings:
-                print(f"{sfs}: parser could not place {len(statute.warnings)} blocks; not ingested")
-                for warning in statute.warnings[:10]:
-                    print(f"  {warning}")
-                status = 1
-                continue
-            report = ingest_statute(conn, raw, statute)
+        if args.source in ("riksdagen", "all"):
+            for sfs in args.sfs or STATUTES:
+                raw = latest_fetch(_raw_dir(), sfs)
+                if raw is None:
+                    print(f"{sfs}: nothing downloaded yet; run `permitnav fetch` first")
+                    status = 1
+                    continue
+                statute = parse_statute(raw.content.decode("utf-8"), url=raw.url)
+                if statute.warnings:
+                    print(
+                        f"{sfs}: {len(statute.warnings)} blocks could not be placed; not ingested"
+                    )
+                    for warning in statute.warnings[:10]:
+                        print(f"  {warning}")
+                    status = 1
+                    continue
+                report = ingest_statute(conn, raw, statute)
+                print(
+                    f"{sfs} {statute.title}: {report.units} units, {report.new_versions} new, "
+                    f"{report.updated_versions} updated, {report.unchanged_versions} unchanged, "
+                    f"{report.closed_versions} closed versions, {report.links} links"
+                )
+                notes = report.conflicts + [f"estimated change date: {u}" for u in report.estimated]
+                for line in notes:
+                    print(f"  note: {line}")
+        if args.source in ("migrationsverket", "all"):
+            from permitnav.parsing.webpage import parse_page
+            from permitnav.sources.migrationsverket import saved_pages
+
+            totals = {"pages": 0, "units": 0, "new": 0, "unchanged": 0, "closed": 0, "failed": 0}
+            for raw in saved_pages(_raw_dir()):
+                try:
+                    page = parse_page(raw.content.decode("utf-8"), raw.url)
+                except ValueError as error:
+                    totals["failed"] += 1
+                    print(f"  not ingested: {error}")
+                    continue
+                report = ingest_page(conn, raw, page)
+                totals["pages"] += 1
+                totals["units"] += report.units
+                totals["new"] += report.new_versions
+                totals["unchanged"] += report.unchanged_versions
+                totals["closed"] += report.closed_versions
+            from permitnav.corpus.store import close_documents
+            from permitnav.sources.migrationsverket import load_crawl
+
+            crawl = load_crawl(_raw_dir())
+            if crawl is not None:  # pages the latest crawl no longer found
+                totals["closed"] += close_documents(
+                    conn, set(crawl.fetched) | set(crawl.failed), crawl.finished_at
+                )
             print(
-                f"{sfs} {statute.title}: {report.units} units, {report.new_versions} new, "
-                f"{report.updated_versions} updated, {report.unchanged_versions} unchanged, "
-                f"{report.closed_versions} closed versions, {report.links} links"
+                f"migrationsverket: {totals['pages']} pages, {totals['units']} sections, "
+                f"{totals['new']} new, {totals['unchanged']} unchanged, {totals['closed']} closed, "
+                f"{totals['failed']} failed"
             )
-            for line in report.conflicts + [
-                f"estimated change date: {u}" for u in report.estimated
-            ]:
-                print(f"  note: {line}")
+            status = status or (1 if totals["failed"] else 0)
     return status
 
 
@@ -121,7 +200,12 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
     from permitnav.evals.golden import load_golden
     from permitnav.evals.run import run_retrieval, slices
-    from permitnav.retrieval.retriever import RetrievalConfig, Retriever, units_applying_on
+    from permitnav.retrieval.retriever import (
+        RetrievalConfig,
+        Retriever,
+        units_applying_on,
+        units_with_same_text,
+    )
 
     items = load_golden(Path(args.file))
     drafts = [i for i in items if i.review == "draft"]
@@ -148,7 +232,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 cache[d] = units_applying_on(conn, d)
             return cache[d]
 
-        run = run_retrieval(items, retriever, existing, applying_on)
+        run = run_retrieval(
+            items, retriever, existing, applying_on, lambda u, d: units_with_same_text(conn, u, d)
+        )
 
     label = (
         "DEVELOPMENT RUN, includes drafts, not reportable"
@@ -199,11 +285,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="permitnav")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="apply database migrations").set_defaults(run=cmd_migrate)
-    fetch = sub.add_parser("fetch", help="download statutes from the riksdagen API")
+    sources = ["riksdagen", "migrationsverket", "all"]
+    fetch = sub.add_parser("fetch", help="download statutes and Migrationsverket pages")
     fetch.add_argument("sfs", nargs="*", help="SFS numbers, e.g. 2005:716 (default: all in scope)")
+    fetch.add_argument("--source", default="all", choices=sources)
     fetch.set_defaults(run=cmd_fetch)
     ingest = sub.add_parser("ingest", help="parse the latest downloads and store them")
     ingest.add_argument("sfs", nargs="*", help="SFS numbers (default: all in scope)")
+    ingest.add_argument("--source", default="all", choices=sources)
     ingest.set_defaults(run=cmd_ingest)
     index = sub.add_parser("index", help="build chunks and embeddings for stored versions")
     index.add_argument("--strategy", nargs="+", default=list(STRATEGIES), choices=list(STRATEGIES))
