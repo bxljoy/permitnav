@@ -1,0 +1,20 @@
+# Local development database. The app itself runs natively (on a Mac, so bge-m3 can use the GPU).
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: permitnav
+      POSTGRES_PASSWORD: permitnav   # local development only
+      POSTGRES_DB: permitnav
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U permitnav"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:

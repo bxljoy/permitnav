@@ -6,6 +6,7 @@ Usage: python3 scripts/validate_golden.py evals/golden.dev.jsonl [more.jsonl ...
 Exits non-zero if any item is invalid. Prints a coverage table by type and language.
 Standard library only.
 """
+
 import json
 import re
 import sys
@@ -98,7 +99,9 @@ def check_item(item, line):
     try:
         as_of = date.fromisoformat(item["as_of"])
         if as_of < HISTORY_START:
-            err("as_of %s is before %s, the start of rebuilt history (D10)" % (as_of, HISTORY_START))
+            err(
+                "as_of %s is before %s, the start of rebuilt history (D10)" % (as_of, HISTORY_START)
+            )
         if as_of > FUTURE_LIMIT:
             err("as_of %s is more than 2 years ahead (D9)" % as_of)
     except ValueError:
@@ -121,7 +124,13 @@ def check_item(item, line):
         for unit in group:
             if not isinstance(unit, str) or not unit_ok(unit):
                 err("expected[%d]: '%s' is not a valid unit ID (see evals/README.md)" % (g, unit))
-    placeholders = [u for g in groups if isinstance(g, list) for u in g if isinstance(u, str) and PLACEHOLDER.match(u)]
+    placeholders = [
+        u
+        for g in groups
+        if isinstance(g, list)
+        for u in g
+        if isinstance(u, str) and PLACEHOLDER.match(u)
+    ]
     if placeholders and item["review"] == "checked":
         err("checked items cannot have placeholder sources: %s" % ", ".join(placeholders))
     if item["type"] == "multi-source" and len(groups) < 2:
@@ -170,11 +179,17 @@ def main(paths):
         if orig is None:
             errors.append("%s: translation_of '%s' not found" % (item.get("id"), t))
         elif orig.get("translation_of") is not None:
-            errors.append("%s: translation_of must point at an original, not another translation" % item.get("id"))
+            errors.append(
+                "%s: translation_of must point at an original, not another translation"
+                % item.get("id")
+            )
         elif orig.get("original_language") == item.get("original_language"):
             errors.append("%s: translation has the same language as its original" % item.get("id"))
         elif orig.get("type") != item.get("type") or orig.get("expected") != item.get("expected"):
-            errors.append("%s: translation must have the same type and expected sources as '%s'" % (item.get("id"), t))
+            errors.append(
+                "%s: translation must have the same type and expected sources as '%s'"
+                % (item.get("id"), t)
+            )
     originals = {i["id"] for i in items if i.get("translation_of") is None}
     translated = {i.get("translation_of") for i in items if i.get("translation_of")}
     missing = sorted(originals - translated)
@@ -183,13 +198,25 @@ def main(paths):
     counts = Counter((i.get("type"), i.get("original_language")) for i in items)
     checked = sum(1 for i in items if i.get("review") == "checked")
     kinds = Counter(i.get("authority", "unset") for i in items)
-    pending = sum(1 for i in items if any(isinstance(u, str) and PLACEHOLDER.match(u) for g in i.get("expected", []) if isinstance(g, list) for u in g))
+    pending = sum(
+        1
+        for i in items
+        if any(
+            isinstance(u, str) and PLACEHOLDER.match(u)
+            for g in i.get("expected", [])
+            if isinstance(g, list)
+            for u in g
+        )
+    )
     print("%-18s %4s %4s %6s" % ("type", "en", "sv", "total"))
     for t in TYPES:
         en, sv = counts[(t, "en")], counts[(t, "sv")]
         print("%-18s %4d %4d %6d" % (t, en, sv, en + sv))
     print("%-18s %4s %4s %6d" % ("all", "", "", len(items)))
-    print("\nauthority (D22): " + ", ".join("%s %d" % (k, kinds[k]) for k in ("law", "agency", "both", "unset")))
+    print(
+        "\nauthority (D22): "
+        + ", ".join("%s %d" % (k, kinds[k]) for k in ("law", "agency", "both", "unset"))
+    )
     print("reviewed: %d of %d (drafts are excluded from reported results)" % (checked, len(items)))
     if pending:
         print("waiting for web units (web:tbd/...): %d" % pending)
