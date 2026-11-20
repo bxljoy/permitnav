@@ -38,14 +38,14 @@ Chunks record which unit they belong to. Metrics, citations and the golden set u
 
 ```
 unit            stable identity: id, source_type, authority_level, law/chapter/section, language
- └─ unit_version   one row per wording: text, valid_from, valid_to, status, amended_by, evidence
+ └─ unit_version   one row per wording: text, valid_from, valid_to, amended_by, evidence
      └─ chunk         built from a unit_version: text, embedding, tsvector
 ```
 
 - **`unit`:** the stable ID from D2, plus fields that never change: source type, authority level (law / ordinance / position paper / ruling / web page) and language.
 - **`unit_version`:** the text as it reads in one period.
   - `valid_from` and `valid_to` (empty while current).
-  - `status`: `in_force`, `upcoming` (passed but not yet in force), `repealed` or `expired`.
+  - No stored status: whether a wording is upcoming, applies or no longer applies depends on the date asked about, so it is computed from `valid_from` / `valid_to` (changed 2026-11-20 after the time-model prototype; see Phase 1 internals).
   - `amended_by`: the SFS number of the act that introduced this wording.
   - `evidence`: a reference to the raw fetch it came from.
 - **`chunk`:** always built from a `unit_version`, never from a unit directly. When a unit gets a new version, its new chunks are built and the old ones remain attached to the old version.
@@ -334,7 +334,7 @@ class ParsedUnit:          # one citable unit as read from one fetch (D2)
     language: str          # sv | en
     heading: str           # chapter and section title, or page heading path
     text: str
-    status: str            # in_force | upcoming | repealed | expired
+    time_basis: str        # valid | observed
     valid_from: date | None
     valid_to: date | None
     amended_by: str | None # "2026:295"
@@ -380,14 +380,15 @@ class LLM(Protocol):
 
 ### Database schema
 
-The three layers from D3 plus the evidence table. Two kinds of time are kept apart: **valid time** (`valid_from` / `valid_to`, when a wording applied in law) and **observed time** (`observed_from` / `observed_to`, when the crawler saw it), which is all a web page has (D5).
+The three layers from D3 plus the evidence table (`download`). Two kinds of time are kept apart: **valid time** (`valid_from` / `valid_to`, when a wording applied in law) and **observed time** (`observed_from` / `observed_to`, when the crawler saw it), which is all a web page has (D5).
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 -- Evidence: every download, raw bytes in object storage (data/raw locally).
-CREATE TABLE fetch (
+-- (Not called "fetch": that is a reserved word in Postgres.)
+CREATE TABLE download (
   id            bigserial PRIMARY KEY,
   source        text        NOT NULL,
   url           text        NOT NULL,
@@ -415,17 +416,23 @@ CREATE TABLE unit_version (
   unit_id        text NOT NULL REFERENCES unit(id),
   text           text NOT NULL,
   text_hash      text NOT NULL,
-  status         text NOT NULL,            -- in_force | upcoming | repealed | expired
-  valid_from     date,                     -- NULL = not known (history before 2023, web pages)
+  time_basis     text NOT NULL CHECK (time_basis IN ('valid', 'observed')),
+                                           -- 'valid': legal sources, dated by valid_from/valid_to
+                                           -- 'observed': web pages, dated only by when they were seen (D5)
+  valid_from     date,                     -- NULL = start not known (before rebuilt history, D10)
   valid_to       date,                     -- NULL = still applies
   amended_by     text,                     -- '2026:295'
-  observed_from  timestamptz NOT NULL,     -- first fetch that showed this wording
+  observed_from  timestamptz NOT NULL,     -- first download that showed this wording
   observed_to    timestamptz,              -- NULL = still seen
-  fetch_id       bigint NOT NULL REFERENCES fetch(id),
-  -- No two wordings of a unit may apply on the same day.
-  EXCLUDE USING gist (unit_id WITH =, daterange(valid_from, valid_to) WITH &&)
-    WHERE (valid_from IS NOT NULL)
+  download_id    bigint NOT NULL REFERENCES download(id),
+  -- No two wordings of a legal unit may apply on the same day. An unknown
+  -- start counts as "since forever", so it is checked too.
+  CONSTRAINT one_wording_per_day
+    EXCLUDE USING gist (unit_id WITH =, daterange(valid_from, valid_to) WITH &&)
+    WHERE (time_basis = 'valid')
 );
+-- No stored status: "upcoming", "applies" and "no longer applies" depend on
+-- the date asked about, so they are computed from the dates at query time.
 
 -- Links between units: transitional provisions both ways (D4), rulings' cited units (D7).
 CREATE TABLE unit_link (
@@ -458,7 +465,8 @@ CREATE INDEX ON chunk_embedding_bge_m3 USING hnsw (embedding vector_cosine_ops);
 
 Notes:
 - **One embedding table per model,** because models have different dimensions and pgvector indexes are per column. A larger model in phase 2 (e.g. 4096 dimensions) needs `halfvec`, since pgvector's HNSW index covers `vector` only up to 2,000 dimensions; check this against the pgvector version used.
-- **The `as_of` filter** (D8) for legal sources: `valid_from <= as_of` (or unknown) and `valid_to` empty or after `as_of`. For web pages: `observed_from <= as_of` (D5).
+- **The `as_of` filter** (D8) for legal sources: `valid_from <= as_of` (or unknown) and `valid_to` empty or after `as_of`. For web pages: `observed_from <= as_of` and `observed_to` empty or after `as_of` (D5).
+- **Context for a version also follows its transitional provisions back** (D4, D11): add the provisions linked to the version that applies, *and* the older version each of them ended. Transitional provisions usually say "the older wording still applies to…", so the answer needs that older text, not just the provision.
 - **The golden set stays in JSONL files,** versioned in git, not in the database.
 - **Migrations** are plain SQL files applied in order; no ORM.
 
@@ -496,6 +504,22 @@ scripts/validate_golden.py  moves into evals/golden.py once the package exists
 4. **`Retriever.search`** (vector only) with `as_of` filtering, and **the retrieval eval** on the golden items that cite statutes only. This gives the first recall@k number, before any LLM is involved.
 5. **Migrationsverket page fetcher and parser,** so the `web:tbd/…` placeholders in the golden set get real unit IDs.
 6. **`Answerer` with the OpenRouter `LLM`** and the D21 prompt; `permitnav ask` on the command line; the API last.
+
+### What the time-model prototype showed
+
+Tested 2026-11-20 with a throwaway script against Postgres 17 + pgvector, using real text from the riksdagen API: two wordings of 6 kap. 4 § (one in force, one from 2028-01-01), the current 6 kap. 2 § (changed by SFS 2026:295 from 2026-06-01), and the transitional provisions of 2026:295 and 2026:1687.
+
+| Check | Result |
+|---|---|
+| The `as_of` filter returns the right wording on 2026-05-01, 2026-11-20 and 2028-02-01 | Works |
+| A second wording overlapping a known one is rejected | Works |
+| A second wording with an *unknown* start date is rejected | **Failed** in the first schema (the rule skipped unknown starts); fixed with `time_basis` |
+| Several versions of a web page, dated only by when they were seen, are accepted | Works after the fix |
+| A stored `status` stays correct over time | **Failed**: an "upcoming" wording was still "upcoming" after its start date; status is now computed |
+| A version-dependent question ("extension registered before 1 Dec 2026 for a permit granted before 1 June 2026") gets the right context | Works only when context also follows transitional provisions back to the older wording; now part of the design |
+| Table named `fetch` | **Failed**: reserved word; renamed `download` |
+
+One more finding: the older wording of 6 kap. 2 § (before 2026-06-01) is **not** in the riksdagen API text, yet transitional provision 2026:295 punkt 2 says it still governs some extensions decided now. So rebuilding history (D10, phase 4) matters for current questions too, not only historical ones. For 6 kap. 2 § in particular, consider rebuilding its older wording already in phase 1.
 
 ### Known open points
 

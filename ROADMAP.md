@@ -36,7 +36,7 @@ The consolidated statute text on riksdagen.se is a convenience version, not the 
 - Each section ends with the amending law that last changed it, e.g. "Lag (2026:385)".
 - It does **not** give past in-force dates per amendment. Take those from SFSR or the SFS PDF.
 
-So `status`, `valid_from` and `valid_to` (phase 1) and upcoming changes (phase 4) can be filled largely from these markers, with SFSR for the history.
+So `valid_from` and `valid_to` (phase 1) and upcoming changes (phase 4) can be filled largely from these markers, with SFSR for the history.
 
 Crawling manners:
 - **Prefer APIs and feeds over crawling:** the riksdagen API, the SFS RSS feed, the Lifos RSS feed and the Sök rättspraxis API.
@@ -113,7 +113,7 @@ Goal: understand every moving part before a framework hides it.
    - law number, chapter and section (kap., §) where it applies
    - language
    - URL and **fetched_at**
-   - **Time fields:** `valid_from`, `valid_to` (empty while current), `amended_by` (the SFS number shown after each section in consolidated statutes, e.g. "Lag (2023:…)"), and `status` (in force / passed but not yet in force / repealed)
+   - **Time fields:** `valid_from`, `valid_to` (empty while current), `amended_by` (the SFS number shown after each section in consolidated statutes, e.g. "Lag (2023:…)"). Whether a wording is upcoming, applies or no longer applies is computed from these dates, not stored (see DESIGN.md, Phase 1 internals)
    - **Transitional provisions** (övergångsbestämmelser) stored as their own units, linked automatically to both the versions their act introduced and the versions it ended (D4)
 4. **Chunking, two strategies to compare:**
    - fixed size (e.g. 500 tokens, 15% overlap) as the baseline
@@ -191,7 +191,7 @@ Freshness:
 
 Time handling:
 1. **`as_of` per conversation** (D8), defaulting to today. Retrieval returns only the versions that apply on `as_of`, so repealed text is never cited as current.
-2. **Upcoming changes and future dates:** ingest amending laws that are passed but not yet in force, with `status` and `valid_from`. Answers on an affected topic mention the coming change and its date. A future `as_of` up to 2 years ahead uses these versions, with a "more changes may still be decided" note (D9).
+2. **Upcoming changes and future dates:** ingest amending laws that are passed but not yet in force, with their `valid_from`. Answers on an affected topic mention the coming change and its date. A future `as_of` up to 2 years ahead uses these versions, with a "more changes may still be decided" note (D9).
 3. **Transitional provisions:** linked both ways (D4) and always included in the context when either version is retrieved.
 4. **Version selection:** when a transitional provision depends on the application or decision date, the assistant asks for that date, then answers from the version that applies and says so.
 5. **Rebuild history back to 1 January 2023** for the in-scope sections of utlänningslagen and utlänningsförordningen, walking the SFSR register and the amending acts backwards from today's text. Test rebuilt versions against lagen.nu; never cite it. For an earlier `as_of`, say the period isn't covered (D10).
