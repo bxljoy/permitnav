@@ -119,8 +119,9 @@ def versions_on(conn: psycopg.Connection, unit_id: str, as_of: date) -> list[dic
               AND (valid_from IS NULL OR valid_from <= %(d)s)
               AND (valid_to IS NULL OR valid_to > %(d)s))
             OR (time_basis = 'observed'
-              AND observed_from::date <= %(d)s
-              AND (observed_to IS NULL OR observed_to::date > %(d)s))
+              AND (observed_from AT TIME ZONE 'Europe/Stockholm')::date <= %(d)s
+              AND (observed_to IS NULL
+                   OR (observed_to AT TIME ZONE 'Europe/Stockholm')::date > %(d)s))
           )
         ORDER BY valid_from NULLS FIRST, id
         """,

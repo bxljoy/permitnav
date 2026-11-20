@@ -116,6 +116,85 @@ def cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    import json
+
+    from permitnav.evals.golden import load_golden
+    from permitnav.evals.run import run_retrieval, slices
+    from permitnav.retrieval.retriever import RetrievalConfig, Retriever, units_applying_on
+
+    items = load_golden(Path(args.file))
+    drafts = [i for i in items if i.review == "draft"]
+    if not args.include_drafts:
+        items = [i for i in items if i.review == "checked"]
+        if not items:
+            print(f"no checked items in {args.file} ({len(drafts)} drafts); see evals/README.md,")
+            print("or run with --include-drafts for a development (not reportable) run")
+            return 1
+    try:
+        from permitnav.embedding.bge_m3 import BgeM3Embedder
+
+        embedder = BgeM3Embedder()
+    except ImportError:
+        print("bge-m3 needs the embed extra: uv sync --extra embed")
+        return 1
+    with db.connect() as conn:
+        existing = dict(conn.execute("SELECT id, document FROM unit").fetchall())
+        retriever = Retriever(conn, embedder, RetrievalConfig(strategy=args.strategy))
+        cache: dict = {}
+
+        def applying_on(d):
+            if d not in cache:
+                cache[d] = units_applying_on(conn, d)
+            return cache[d]
+
+        run = run_retrieval(items, retriever, existing, applying_on)
+
+    label = (
+        "DEVELOPMENT RUN, includes drafts, not reportable"
+        if args.include_drafts
+        else "checked items"
+    )
+    print(f"\nRetrieval eval: {args.file}, strategy={args.strategy}, mode=vector ({label})")
+    columns = ("R@1", "R@5", "95% CI", "R@10", "MRR", "nDCG@5")
+    widths = (5, 5, 13, 5, 5, 6)
+    header = " ".join(f"{c:>{w}}" for c, w in zip(columns, widths, strict=True))
+    print(f"{'slice':<28} {'n':>3} {header}")
+    for s in slices(run):
+        low, high = s.recall_5_ci
+        print(
+            f"{s.name:<28} {s.n:>3} {s.recall_1:>5.2f} {s.recall_5:>5.2f}"
+            f" {f'[{low:.2f}, {high:.2f}]':>13} {s.recall_10:>5.2f} {s.mrr:>5.2f} {s.ndcg_5:>6.2f}"
+        )
+    for reason, ids in run.skipped.items():
+        print(f"skipped {len(ids)}: {reason}")
+    for item_id, units in run.unknown_units.items():
+        print(f"GOLDEN-SET ERROR {item_id}: expected units not in the corpus: {', '.join(units)}")
+    if args.verbose:
+        print()
+        for r in run.results:
+            ranks = ", ".join("-" if x is None else str(x) for x in r.ranks)
+            print(f"{r.item.id:<48} group ranks [{ranks}]  top: {', '.join(r.retrieved[:3])}")
+    if args.out:
+        Path(args.out).write_text(
+            json.dumps(
+                [
+                    {"id": r.item.id, "ranks": r.ranks, "retrieved": r.retrieved}
+                    for r in run.results
+                ],
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    if run.unknown_units:
+        return 2  # golden-set errors must be fixed, not ignored
+    if not run.results:
+        print("no items could be scored")
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="permitnav")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -130,6 +209,13 @@ def main(argv: list[str] | None = None) -> int:
     index.add_argument("--strategy", nargs="+", default=list(STRATEGIES), choices=list(STRATEGIES))
     index.add_argument("--no-embed", action="store_true", help="only build chunks")
     index.set_defaults(run=cmd_index)
+    ev = sub.add_parser("eval", help="run the retrieval eval on a golden-set file")
+    ev.add_argument("--file", default="evals/golden.dev.jsonl")
+    ev.add_argument("--strategy", default="structure", choices=list(STRATEGIES))
+    ev.add_argument("--include-drafts", action="store_true", help="development run; not reportable")
+    ev.add_argument("--verbose", "-v", action="store_true", help="show each item's ranks")
+    ev.add_argument("--out", help="write per-item results as JSON")
+    ev.set_defaults(run=cmd_eval)
     args = parser.parse_args(argv)
     return args.run(args)
 
