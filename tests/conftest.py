@@ -32,11 +32,15 @@ def database_url() -> Iterator[str]:
 
 @pytest.fixture
 def conn(database_url: str) -> Iterator[psycopg.Connection]:
-    """A migrated database; each test's changes are rolled back afterwards."""
+    """A migrated database; each test runs in a transaction that is always rolled back.
+
+    Code under test that opens its own transaction gets a savepoint inside it. Deferred
+    constraints are made immediate so violations show up in the test, not at a commit
+    that never happens.
+    """
     with psycopg.connect(database_url) as connection:
         db.migrate(connection)
         connection.commit()
-        try:
+        with connection.transaction(force_rollback=True):
+            connection.execute("SET CONSTRAINTS ALL IMMEDIATE")
             yield connection
-        finally:
-            connection.rollback()
