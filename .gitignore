@@ -1,0 +1,23 @@
+# The private eval hold-out, unsanitised questions, and anything else that must not be published
+private/
+
+# Crawled content: the repo ships the crawler, not the pages
+data/raw/
+data/cache/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.tfvars
+!example.tfvars
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Python / Node / OS
+__pycache__/
+.venv/
+node_modules/
+dist/
+.DS_Store
