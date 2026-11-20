@@ -37,7 +37,8 @@ REQUIRED = {
     "expects_out_of_scope": bool,
     "review": str,
 }
-OPTIONAL = {"translation_of", "notes"}
+OPTIONAL = {"translation_of", "notes", "authority"}
+AUTHORITY = {"law", "agency", "both"}  # D22
 
 HISTORY_START = date(2023, 1, 1)  # D10
 FUTURE_LIMIT = date.today() + timedelta(days=2 * 365)  # D9
@@ -89,6 +90,8 @@ def check_item(item, line):
         err("type must be one of %s" % TYPES)
     if item["review"] not in REVIEW:
         err("review must be one of %s" % sorted(REVIEW))
+    if "authority" in item and item["authority"] not in AUTHORITY:
+        err("authority must be one of %s" % sorted(AUTHORITY))
 
     try:
         as_of = date.fromisoformat(item["as_of"])
@@ -174,12 +177,14 @@ def main(paths):
     # Coverage table
     counts = Counter((i.get("type"), i.get("original_language")) for i in items)
     checked = sum(1 for i in items if i.get("review") == "checked")
+    kinds = Counter(i.get("authority", "unset") for i in items)
     print("%-18s %4s %4s %6s" % ("type", "en", "sv", "total"))
     for t in TYPES:
         en, sv = counts[(t, "en")], counts[(t, "sv")]
         print("%-18s %4d %4d %6d" % (t, en, sv, en + sv))
     print("%-18s %4s %4s %6d" % ("all", "", "", len(items)))
-    print("\nreviewed: %d of %d (drafts are excluded from reported results)" % (checked, len(items)))
+    print("\nauthority (D22): " + ", ".join("%s %d" % (k, kinds[k]) for k in ("law", "agency", "both", "unset")))
+    print("reviewed: %d of %d (drafts are excluded from reported results)" % (checked, len(items)))
     if missing:
         print("originals without a translation (D20): %s" % ", ".join(missing))
 

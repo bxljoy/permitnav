@@ -11,7 +11,7 @@ The first version covers work permits (including the EU Blue Card), family membe
 ## Documents
 
 - [`ROADMAP.md`](ROADMAP.md): what gets built, in 8 phases, each with a "done when" check.
-- [`docs/DESIGN.md`](docs/DESIGN.md): the design decisions (D1–D21) and why.
+- [`docs/DESIGN.md`](docs/DESIGN.md): the design decisions (D1–D23) and why.
 - [`docs/research/source-facts.md`](docs/research/source-facts.md): facts about the sources (APIs, formats, copyright, crawling rules, the EU AI Act), checked against primary sources.
 
 ## Licence

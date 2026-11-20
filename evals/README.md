@@ -42,6 +42,7 @@ One JSON object per line.
   "expects_follow_up": false,
   "expects_not_settled": false,
   "expects_out_of_scope": false,
+  "authority": "law",
   "review": "draft",
   "notes": "…"
 }
@@ -60,8 +61,9 @@ One JSON object per line.
 | `expects_follow_up` | The right first response is a question back (D14). |
 | `expects_not_settled` | The sources don't settle it; the assistant must say so. |
 | `expects_out_of_scope` | Asylum, protection or deportation; the assistant must decline and point to Migrationsverket (D18). |
+| `authority` | Optional. Which kind of source answers it (D22): `law` (a legal requirement), `agency` (Migrationsverket practice the law doesn't set) or `both`. Results are reported per kind. |
 | `review` | `draft` or `checked`. |
-| `notes` | Optional. Why the item exists, what makes it hard, what the source says. |
+| `notes` | Optional. Why the item exists, what makes it hard, what the source says. What people were told by Migrationsverket's phone service or emails goes here, never into `expected` (D23). |
 
 ### Types
 
@@ -76,7 +78,7 @@ One JSON object per line.
 | `not-settled` | Discretionary; the sources don't decide it. |
 | `out-of-scope` | Asylum, protection, deportation. |
 
-Target for the dev set: at least 6 items of each type except `version-dependent`, plus 6–8 out-of-scope items, with every original in both languages.
+Target for the dev set: at least 6 items of each type except `version-dependent`, plus 6–8 out-of-scope items, with every original in both languages. At least a third of the in-scope items should be `agency` or `both` (D22).
 
 ## Unit IDs
 

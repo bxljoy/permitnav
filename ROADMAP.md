@@ -2,14 +2,14 @@
 
 **PermitNav (working name) is a question-answering assistant over Swedish immigration rules.** The first version covers work permits (including the EU Blue Card), family members of work-permit holders, permanent residence (PUT) and EU long-term resident status. Study permits and citizenship come later; asylum, protection and deportation are out of scope entirely. Every answer cites the law section or Migrationsverket page it came from, with the date that source was last checked and the date the rule took effect.
 
-How the key parts work, and why, is in [`docs/DESIGN.md`](docs/DESIGN.md) (decisions D1–D21). Facts about the sources are in [`docs/research/source-facts.md`](docs/research/source-facts.md).
+How the key parts work, and why, is in [`docs/DESIGN.md`](docs/DESIGN.md) (decisions D1–D23). Facts about the sources are in [`docs/research/source-facts.md`](docs/research/source-facts.md).
 
 The work is split into **8 phases**, done in order at whatever pace suits. Each phase builds on the one before and ends with a "done when" check; move on when the check passes. Phases 1–7 end in a free public beta (roughly 70–90 hours in total). Phase 8, fine-tuning, starts once the beta has produced real questions to train and test on. The hour figures are rough estimates for spotting a phase that is growing out of hand, not deadlines.
 
 ## Why this corpus
 
 - **The test questions come from real cases.** Real questions make wrong answers easy to notice and rule changes easy to spot, so the test set is real instead of invented.
-- It is harder than a static corpus in four ways worth showing: **the rules change often**, **which version applies can depend on when you applied**, **the best sources are in Swedish**, and **the sources have a hierarchy** (law beats position paper beats web page).
+- It is harder than a static corpus in four ways worth showing: **the rules change often**, **which version applies can depend on when you applied**, **the best sources are in Swedish**, and **the sources have a hierarchy** for legal requirements (law beats position paper beats web page), while much of the actual process (advertising, union statements, required insurances, processing times) is set by Migrationsverket's own guidance rather than by law (D22).
 
 **What it will not do:** predict the outcome of an individual case. Where the rules leave the decision to Migrationsverket's judgment, no system can know the result. It can find the exact section, position paper and ruling that apply, and say plainly when the sources don't settle the question. It carries a visible "not legal advice" notice and tells users they are talking to an AI.
 
@@ -28,7 +28,7 @@ The work is split into **8 phases**, done in order at whatever pace suits. Each 
 | Migrationsverket web pages | Swedish + English | Simplified guidance (lowest) | migrationsverket.se |
 | EU directives: long-term residents (2003/109/EC), family reunification (2003/86/EC), Blue Card ((EU) 2021/1883), single permit | English + Swedish | Background for some rules | EUR-Lex |
 
-Start small: Utlänningslagen, Utlänningsförordningen and the English + Swedish Migrationsverket pages for work permits and PUT. Add position papers and rulings in phase 3, the rest later.
+Start small: Utlänningslagen, Utlänningsförordningen and the English + Swedish Migrationsverket pages for the in-scope topics, including the employer pages, FAQs and processing times (D22). Add position papers and rulings in phase 3, the rest later.
 
 The consolidated statute text on riksdagen.se is a convenience version, not the official one. Use it for the current wording, and the published amending laws for dates and transitional provisions. What the API text already contains, and what the parser must handle:
 - **Versions not yet in force** ("/Träder i kraft I:YYYY-MM-DD/") and **versions about to lapse** ("/Upphör att gälla U:YYYY-MM-DD/") appear inline, so one section number can appear twice.
@@ -107,7 +107,7 @@ Goal: understand every moving part before a framework hides it.
      - **not settled by the sources** (discretionary decisions, individual edge cases). The assistant must say so
      - **out of scope** (6–8 items on asylum, protection and deportation, including spårbyte near-misses), where the assistant must decline and point to Migrationsverket (D18)
      - the same question in English and in Swedish, to test cross-language retrieval. Record which language is the original (D20)
-2. **Ingestion:** fetch the statutes from riksdagen.se and a first set of Migrationsverket pages. Store the raw HTML locally with the fetch date and a content hash.
+2. **Ingestion:** fetch the statutes from riksdagen.se and the in-scope Migrationsverket pages, for applicants and for employers, in English and Swedish (D22). Store the raw HTML locally with the fetch date and a content hash.
 3. **Data model: unit → unit version → chunk** (DESIGN.md D2–D3). A source is a citable unit (a statute section, a heading section, a ruling), each wording of it is a `unit_version`, and chunks are built from versions. The fields below live on the unit or the version, not copied onto every chunk:
    - source type and **authority level** (law / ordinance / position paper / ruling / web page)
    - law number, chapter and section (kap., §) where it applies
@@ -138,7 +138,7 @@ Goal: a results table that holds up to scrutiny.
 3. **Hybrid retrieval:** add keyword search (Postgres full-text search with the `swedish` configuration, or `rank_bm25`) and fuse it with the vector results using **Reciprocal Rank Fusion**. Watch "6 kap. 2 §"-style questions improve.
 4. **Cross-language experiments:** keyword search can't match an English question to Swedish text. Try translating the query to Swedish first, and compare with vector-only for English questions. Swedish compound words ("arbetstillstånd", "uppehållstillstånd") are a second thing to test.
 5. **Reranking:** retrieve top 30–50, then rerank to top 5 with a multilingual reranker (`bge-reranker-v2-m3` locally, or Cohere's multilingual rerank). Measure the gain *and* the added latency. Measure both ways of serving it, because the choice sizes the phase 3 VM: a hosted rerank API (no memory cost, per-call price) or the local model (a few GB of memory, and possibly seconds per query on CPU).
-6. **Authority-aware ranking:** when a law section and a web page both match, prefer the law for the citation and use the web page for the plain-language explanation. Add test questions where the web page is simplified and the law has the full condition.
+6. **Authority-aware ranking (D22):** when a law section and a web page cover the same legal requirement, prefer the law for the citation and use the web page for the plain-language explanation. For agency-practice questions (steps, union statement, insurances, processing times) the Migrationsverket page is the primary source. Add test questions of both kinds, including ones where the web page is simplified and the law has the full condition, and report results per kind.
 7. **Generation evals:** faithfulness (is every claim supported by the retrieved text?), answer correctness, citation accuracy, refusal rate on the "not settled" questions, and whether it asks a follow-up when it should. Use RAGAS *or* a custom LLM judge from a different model family than the answer model, calibrated on ~30 hand-labelled answers, with at least 85% agreement before its scores count (D19).
 8. **Experiment grid:** chunking (2) × retrieval (vector / hybrid / hybrid+rerank). Log every run to **MLflow** (local file store): parameters (chunking, retriever, k, model versions), metrics with confidence intervals, and the golden-set version as a tag.
 

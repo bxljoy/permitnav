@@ -2,7 +2,7 @@
 
 The design decisions behind [`ROADMAP.md`](../ROADMAP.md). The roadmap says what gets built and in what order; this file says how the key parts work and why. Facts about the sources (formats, APIs, copyright, crawling rules, the AI Act) are in [`research/source-facts.md`](research/source-facts.md).
 
-Decided 2026-11-19. Each decision has an ID (D1–D21) so code, issues and commits can refer to it. To change a decision, edit it here and add the date and the reason.
+Decided 2026-11-19. Each decision has an ID (D1–D23) so code, issues and commits can refer to it. To change a decision, edit it here and add the date and the reason.
 
 ---
 
@@ -236,3 +236,32 @@ The phase 2 plain-RAG baseline is given the same instructions as the phase 5 age
 - it may decline out-of-scope questions
 
 The phase 5 comparison then measures only what the agent adds: the loop, the tools, session memory and the verifier.
+
+---
+
+## Sources and authority
+
+Added 2026-11-20, after working through the first real case for the golden set: most of a first work-permit application is governed by Migrationsverket's own requirements, not by the law.
+
+### D22. Legal requirements and agency practice are different kinds of claims
+
+Every claim in an answer is one of two kinds:
+
+| Kind | Examples | Authority | On a disagreement |
+|---|---|---|---|
+| **Legal requirement** | the salary requirement, 4 of the last 7 years for PUT, applying before entry | Law, then ordinance, then MIGRFS, then rulings and position papers | The law wins; the verifier flags the web page (D13) |
+| **Agency practice** | the application steps, advertising the job, the union statement, the list of required insurances, what happens when the union doesn't answer, processing times | Migrationsverket's published guidance (web pages, position papers) | The more specific and more recent Migrationsverket source wins; the answer says the guidance has changed if it can see that |
+
+Consequences:
+
+- **Answers say which kind a claim is.** Agency practice is stated as "Migrationsverket requires…", not as law. When the law is silent, the answer says so rather than inventing a legal basis.
+- **Authority-aware ranking prefers the law only when the law and a web page cover the same claim.** For practice questions the web page is the primary source, not a fallback.
+- **Migrationsverket's site is indexed broadly for the in-scope topics** from phase 1: the pages for applicants *and* for employers, FAQs and processing times, in both English and Swedish. English-speaking users read the English pages, so they matter even where the Swedish page wins on a disagreement (D6).
+- **The golden set covers both kinds.** Items record which kind of source answers them (`authority`: `law`, `agency` or `both`; see `evals/README.md`), and results are reported per kind.
+
+### D23. What people learn from Migrationsverket's phone service and emails
+
+Answers from Migrationsverket's phone service, emails and individual case officers are real but unpublished, so a user can't check them.
+
+- **They are used only to write test items:** in golden-set `notes` and reference answers, as "what actually happens". They are never retrieved, quoted or shown as a source.
+- **Revisit after the beta.** A "reported practice" source (written by the project, labelled unofficial, dated, lowest authority) may be worth adding once several independent reports agree on a claim. Until then, a wrong or outdated note shown to users is exactly the harm the verifier exists to prevent.
