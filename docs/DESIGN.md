@@ -287,3 +287,217 @@ Answers from Migrationsverket's phone service, emails and individual case office
 
 - **They are used only to write test items:** in golden-set `notes` and reference answers, as "what actually happens". They are never retrieved, quoted or shown as a source.
 - **Revisit after the beta.** A "reported practice" source (written by the project, labelled unofficial, dated, lowest authority) may be worth adding once several independent reports agree on a claim. Until then, a wrong or outdated note shown to users is exactly the harm the verifier exists to prevent.
+
+---
+
+## Phase 1 internals
+
+Added 2026-11-20. How the concepts above become code for phase 1 (baseline RAG), designed so that phases 2–5 add behaviour behind the same interfaces instead of changing them.
+
+### Modules and seams
+
+Each module hides a lot behind a small interface. A **seam** (a swappable dependency with more than one implementation) exists only where something really varies; everything else is a plain module.
+
+| Module | Interface (what callers use) | What it hides | Depends on | Seam? |
+|---|---|---|---|---|
+| `sources` | `fetch(ref) -> RawFetch` | Per-source discovery and URLs, robots rules, rate limit (1 req/s), user agent, caching, content hash | HTTP | **Yes: `Http`.** Live HTTP, and a fixture adapter that serves saved files, so tests never touch the network. |
+| `parsing` | `parse(raw) -> list[ParsedUnit]` | Statute parser (chapters, sections, "Lag (…)" markers, duplicated sections with "/Träder i kraft/" and "/Upphör att gälla/", transitional provisions); web page parser (split by heading, strip menus) | Nothing (pure) | No. Tested directly on real files. |
+| `corpus` | `ingest(raw, units) -> IngestReport`, `rebuild_chunks(strategy)` | Versioning per unit (D3): compare text hashes, open new versions, close old ones; transitional links (D4); chunking; embedding new chunks | Postgres, `Embedder` | Postgres: no (tested against a real Postgres in Docker). |
+| `embedding` | `embed_documents(texts)`, `embed_query(text)`, `model_id`, `dims` | Model loading, device (Mac GPU or CPU), batching, input length cap, fp16 | `bge-m3` weights | **Yes: `Embedder`.** `bge-m3` (local), a deterministic fake for tests; phase 2 adds a second real model for comparison. |
+| `retrieval` | `search(query, as_of, k, filters) -> list[Hit]` | Query embedding, `as_of` filtering (D8, D5), vector search; from phase 2 also keyword search, fusion (RRF), reranking and authority-aware ranking (D22) | Postgres, `Embedder` | No. One backend; phase 2's variants are a config setting (`mode`), not separate implementations. |
+| `llm` | `complete(request) -> Completion` | Provider HTTP, retries, token and cost accounting | OpenRouter | **Yes: `LLM`.** OpenRouter, and a scripted fake for tests; from the beta, Bedrock EU or Mistral (D15). |
+| `answering` | `answer(question, as_of=None) -> Answer` | Context assembly (D11), the prompt (D21), translation of quotes (D12), parsing citations and checking they point at retrieved units, mapping the outcome to answered / follow-up / not settled / out of scope | `retrieval`, `llm` | No. |
+| `evals` | `run_retrieval(golden, retriever)`, later `run_generation(golden, answerer, judge)` | Loading and validating golden files, the metrics (recall@k, MRR, nDCG by required groups, D16), bootstrap intervals, MLflow logging | `retrieval`, `answering`, `llm` | No. |
+| `api` | `POST /ask` | FastAPI wiring | `answering` | No. Thin by design. |
+
+What this buys:
+- **The eval harness and the API call the same two interfaces** (`Retriever.search`, `Answerer.answer`), so what is measured is what users get.
+- **Phase 2 changes configuration, not callers:** chunking strategy, retrieval mode, embedding model and answer model are all settings.
+- **The hard logic is testable without a network:** parsers on saved files, versioning against a local Postgres, answering with the fake LLM.
+
+### Key types
+
+```python
+@dataclass(frozen=True)
+class RawFetch:            # one downloaded document, stored as evidence
+    source: str            # "riksdagen" | "migrationsverket" | ...
+    url: str
+    fetched_at: datetime
+    content: bytes
+    content_hash: str      # sha256 of content
+
+@dataclass(frozen=True)
+class ParsedUnit:          # one citable unit as read from one fetch (D2)
+    unit_id: str           # e.g. "sfs:2005:716/6kap/2§"
+    source_type: str       # statute | ordinance | transitional | position_paper | ruling | web_page
+    authority: str         # law | ordinance | regulation | ruling | position_paper | web_page
+    language: str          # sv | en
+    heading: str           # chapter and section title, or page heading path
+    text: str
+    status: str            # in_force | upcoming | repealed | expired
+    valid_from: date | None
+    valid_to: date | None
+    amended_by: str | None # "2026:295"
+    links: list[tuple[str, str]]   # (kind, target unit_id), e.g. ("transitional_for", ...)
+
+@dataclass(frozen=True)
+class Hit:                 # one retrieved chunk, with what citations and the verifier need
+    unit_id: str
+    version_id: int
+    chunk_id: int
+    text: str
+    score: float
+    authority: str
+    heading: str
+    url: str
+    valid_from: date | None
+    valid_to: date | None
+    fetched_at: datetime
+
+@dataclass(frozen=True)
+class Answer:
+    kind: str              # answered | follow_up | not_settled | out_of_scope
+    text: str
+    citations: list[Citation]   # unit_id, version_id, Swedish quote, valid_from, fetched_at
+    usage: Usage           # tokens and cost, for the evals and the spend cap
+```
+
+```python
+class Embedder(Protocol):
+    model_id: str
+    dims: int
+    def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
+    def embed_query(self, text: str) -> list[float]: ...
+    # Two methods because several candidate models (e5, Qwen3) embed queries
+    # differently from documents; bge-m3 treats them the same.
+
+class LLM(Protocol):
+    def complete(self, request: CompletionRequest) -> Completion: ...
+    # CompletionRequest: model, system, messages, max_tokens.
+    # Completion: text, model, input_tokens, output_tokens, cost_usd.
+    # No sampling parameters: current Claude models reject them.
+```
+
+### Database schema
+
+The three layers from D3 plus the evidence table. Two kinds of time are kept apart: **valid time** (`valid_from` / `valid_to`, when a wording applied in law) and **observed time** (`observed_from` / `observed_to`, when the crawler saw it), which is all a web page has (D5).
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+-- Evidence: every download, raw bytes in object storage (data/raw locally).
+CREATE TABLE fetch (
+  id            bigserial PRIMARY KEY,
+  source        text        NOT NULL,
+  url           text        NOT NULL,
+  fetched_at    timestamptz NOT NULL,
+  content_hash  text        NOT NULL,
+  storage_path  text        NOT NULL,
+  http_status   int         NOT NULL
+);
+
+-- Stable identity of a citable unit (D2).
+CREATE TABLE unit (
+  id              text PRIMARY KEY,        -- 'sfs:2005:716/6kap/2§'
+  source_type     text NOT NULL,
+  authority       text NOT NULL,
+  language        text NOT NULL,           -- 'sv' | 'en'
+  document        text NOT NULL,           -- 'sfs:2005:716', page URL, 'mig:2023:1'
+  heading         text NOT NULL,
+  url             text NOT NULL,
+  translation_of  text REFERENCES unit(id) -- linked translations (D6)
+);
+
+-- One row per wording of a unit (D3).
+CREATE TABLE unit_version (
+  id             bigserial PRIMARY KEY,
+  unit_id        text NOT NULL REFERENCES unit(id),
+  text           text NOT NULL,
+  text_hash      text NOT NULL,
+  status         text NOT NULL,            -- in_force | upcoming | repealed | expired
+  valid_from     date,                     -- NULL = not known (history before 2023, web pages)
+  valid_to       date,                     -- NULL = still applies
+  amended_by     text,                     -- '2026:295'
+  observed_from  timestamptz NOT NULL,     -- first fetch that showed this wording
+  observed_to    timestamptz,              -- NULL = still seen
+  fetch_id       bigint NOT NULL REFERENCES fetch(id),
+  -- No two wordings of a unit may apply on the same day.
+  EXCLUDE USING gist (unit_id WITH =, daterange(valid_from, valid_to) WITH &&)
+    WHERE (valid_from IS NOT NULL)
+);
+
+-- Links between units: transitional provisions both ways (D4), rulings' cited units (D7).
+CREATE TABLE unit_link (
+  from_unit_id    text   NOT NULL REFERENCES unit(id),
+  to_version_id   bigint NOT NULL REFERENCES unit_version(id),
+  kind            text   NOT NULL,         -- transitional_introduced | transitional_ended | cites
+  PRIMARY KEY (from_unit_id, to_version_id, kind)
+);
+
+-- Chunks are built from a version, per chunking strategy (phase 2 compares two).
+CREATE TABLE chunk (
+  id          bigserial PRIMARY KEY,
+  version_id  bigint   NOT NULL REFERENCES unit_version(id),
+  strategy    text     NOT NULL,           -- 'structure' | 'fixed500'
+  ordinal     int      NOT NULL,
+  text        text     NOT NULL,           -- with heading prepended
+  ts_config   regconfig NOT NULL,          -- 'swedish' | 'english'
+  tsv         tsvector GENERATED ALWAYS AS (to_tsvector(ts_config, text)) STORED,
+  UNIQUE (version_id, strategy, ordinal)
+);
+CREATE INDEX ON chunk USING gin (tsv);     -- keyword half of hybrid search (phase 2)
+
+-- Embeddings per model, so phase 2 can compare models side by side.
+CREATE TABLE chunk_embedding_bge_m3 (
+  chunk_id   bigint PRIMARY KEY REFERENCES chunk(id),
+  embedding  vector(1024) NOT NULL
+);
+CREATE INDEX ON chunk_embedding_bge_m3 USING hnsw (embedding vector_cosine_ops);
+```
+
+Notes:
+- **One embedding table per model,** because models have different dimensions and pgvector indexes are per column. A larger model in phase 2 (e.g. 4096 dimensions) needs `halfvec`, since pgvector's HNSW index covers `vector` only up to 2,000 dimensions; check this against the pgvector version used.
+- **The `as_of` filter** (D8) for legal sources: `valid_from <= as_of` (or unknown) and `valid_to` empty or after `as_of`. For web pages: `observed_from <= as_of` (D5).
+- **The golden set stays in JSONL files,** versioned in git, not in the database.
+- **Migrations** are plain SQL files applied in order; no ORM.
+
+### Layout
+
+```
+pyproject.toml              Python 3.12, managed with uv
+docker-compose.yml          Postgres + pgvector (the app runs natively on the Mac, for the GPU)
+.env.example                DATABASE_URL, OPENROUTER_API_KEY, ANSWER_MODEL, EMBEDDING_MODEL
+migrations/                 001_schema.sql, …
+prompts/                    answer.md, … (in git, D15)
+src/permitnav/
+  sources/                  http.py (Http seam), riksdagen.py, migrationsverket.py
+  parsing/                  statute.py, webpage.py, types.py
+  corpus/                   store.py, versioning.py, chunking.py
+  embedding/                port.py, bge_m3.py, fake.py
+  retrieval/                retriever.py
+  llm/                      port.py, openrouter.py, fake.py
+  answering/                answerer.py, context.py, citations.py
+  evals/                    golden.py, retrieval_metrics.py, run.py
+  api/                      app.py
+  cli.py                    permitnav fetch | ingest | ask | eval
+tests/
+  fixtures/                 short statute and page excerpts, with source and fetch date
+  …                         tests per module, through its interface
+evals/                      golden.dev.jsonl, README.md
+scripts/validate_golden.py  moves into evals/golden.py once the package exists
+```
+
+### Build order for phase 1
+
+1. **Statute parser,** test-first on the fetched utlänningslagen and utlänningsförordningen text: units, headings, amendment markers, duplicated sections, transitional provisions.
+2. **Schema and `corpus.ingest`:** versions, links, re-ingesting the same fetch changes nothing, a changed section gets a new version.
+3. **`bge-m3` embedder and chunking;** measure memory and speed on the Mac.
+4. **`Retriever.search`** (vector only) with `as_of` filtering, and **the retrieval eval** on the golden items that cite statutes only. This gives the first recall@k number, before any LLM is involved.
+5. **Migrationsverket page fetcher and parser,** so the `web:tbd/…` placeholders in the golden set get real unit IDs.
+6. **`Answerer` with the OpenRouter `LLM`** and the D21 prompt; `permitnav ask` on the command line; the API last.
+
+### Known open points
+
+- **LangGraph (phase 5)** works with its own chat-model wrappers. The `LLM` interface either gets a LangGraph adapter then, or the agent calls `Retriever` and `Answerer` as tools and keeps the `LLM` interface for the plain-RAG baseline. Decide in phase 5; nothing in phase 1 depends on it.
+- **OpenRouter model IDs** for Claude Haiku 5.5 and the Mistral judge are configuration values, to be confirmed against OpenRouter's model list at setup.
