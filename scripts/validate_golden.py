@@ -51,6 +51,8 @@ UNIT_PATTERNS = [
     re.compile(r"^mig:\d{4}:\d+$"),
     re.compile(r"^web:(sv|en)/[a-z0-9\-/]+(#[a-z0-9\-]+)?$"),
 ]
+# A Migrationsverket page that answers the item but is not indexed yet. Allowed only in draft items.
+PLACEHOLDER = re.compile(r"^web:tbd/[a-z0-9\-]+$")
 
 # Sanitising heuristics (public files only). These catch obvious leaks, not all of them.
 PII_PATTERNS = {
@@ -62,7 +64,7 @@ PII_PATTERNS = {
 
 
 def unit_ok(unit):
-    return any(p.match(unit) for p in UNIT_PATTERNS)
+    return any(p.match(unit) for p in UNIT_PATTERNS) or bool(PLACEHOLDER.match(unit))
 
 
 def check_item(item, line):
@@ -119,6 +121,9 @@ def check_item(item, line):
         for unit in group:
             if not isinstance(unit, str) or not unit_ok(unit):
                 err("expected[%d]: '%s' is not a valid unit ID (see evals/README.md)" % (g, unit))
+    placeholders = [u for g in groups if isinstance(g, list) for u in g if isinstance(u, str) and PLACEHOLDER.match(u)]
+    if placeholders and item["review"] == "checked":
+        err("checked items cannot have placeholder sources: %s" % ", ".join(placeholders))
     if item["type"] == "multi-source" and len(groups) < 2:
         err("type 'multi-source' needs at least 2 required groups")
 
@@ -178,6 +183,7 @@ def main(paths):
     counts = Counter((i.get("type"), i.get("original_language")) for i in items)
     checked = sum(1 for i in items if i.get("review") == "checked")
     kinds = Counter(i.get("authority", "unset") for i in items)
+    pending = sum(1 for i in items if any(isinstance(u, str) and PLACEHOLDER.match(u) for g in i.get("expected", []) if isinstance(g, list) for u in g))
     print("%-18s %4s %4s %6s" % ("type", "en", "sv", "total"))
     for t in TYPES:
         en, sv = counts[(t, "en")], counts[(t, "sv")]
@@ -185,6 +191,8 @@ def main(paths):
     print("%-18s %4s %4s %6d" % ("all", "", "", len(items)))
     print("\nauthority (D22): " + ", ".join("%s %d" % (k, kinds[k]) for k in ("law", "agency", "both", "unset")))
     print("reviewed: %d of %d (drafts are excluded from reported results)" % (checked, len(items)))
+    if pending:
+        print("waiting for web units (web:tbd/...): %d" % pending)
     if missing:
         print("originals without a translation (D20): %s" % ", ".join(missing))
 

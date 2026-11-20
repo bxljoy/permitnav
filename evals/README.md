@@ -94,3 +94,5 @@ The citable units from D2. The validator checks these patterns.
 | Migrationsverket page section | `web:<sv\|en>/<path>#<anchor>` | `web:sv/arbeta-i-sverige#krav` |
 
 Chapter and section letters are written without spaces: "5 a kap. 3 b §" is `5akap/3b§`.
+
+**Placeholder for pages not indexed yet:** `web:tbd/<slug>`, e.g. `web:tbd/work-permit-insurances`, marks a Migrationsverket page that answers the item but has no unit ID yet. Replace it with the real `web:` ID once the page is ingested (phase 1). Only `draft` items may contain placeholders.
