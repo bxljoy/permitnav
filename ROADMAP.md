@@ -118,9 +118,9 @@ Goal: understand every moving part before a framework hides it.
 4. **Chunking, two strategies to compare:**
    - fixed size (e.g. 500 tokens, 15% overlap) as the baseline
    - **structure-aware:** one chunk per section (§) for laws, one per heading for web pages, with the chapter and page title prepended. Expect this to win
-5. **Embeddings + vector store:** **pgvector** with a multilingual embedding model. `text-embedding-3-small` handles Swedish; compare with an open multilingual model such as `bge-m3` later.
+5. **Embeddings + vector store:** **pgvector** with **`bge-m3`**, self-hosted through a Python library behind the embedding interface (D15). It runs natively on the developer's machine (Docker on a Mac can't use the GPU, so only Postgres runs in Docker during development).
 6. **Generation:** answer in the user's language, cite the source per claim (section number or page title, with the fetch date), quote the Swedish original with an unofficial translation (D12), state from when the cited rule applies, and refuse when the context doesn't contain the answer. What text goes to the model is in D11. The baseline prompt already allows one follow-up question, "not settled" and declining out-of-scope questions (D21).
-7. **Choose the answer model's provider** on EU processing and retention (D15).
+7. **Set up the answer model:** Claude through Amazon Bedrock's EU profile with retention turned off (D15).
 
 ✅ Done when: a question in English gets an answer cited to Swedish law text, `docker compose up` works from a clean clone, and both golden files exist.
 
@@ -150,7 +150,7 @@ Effort: about 6–8 hours.
 
 Goal: the same system running on a public URL, traceable and reproducible from code. This phase is small on purpose; if phase 2 ran long, this is where the time comes back.
 
-1. **Hosting:** one small VM in an **EU region** running the same Docker Compose file, with a reverse proxy for TLS (e.g. Caddy). Fixed, low monthly cost and nothing new to learn. Size it from the phase 2 reranker measurement: a small VM if reranking goes through a hosted API, a larger one if the model runs locally. Provision it from code (Terraform or a short setup script).
+1. **Hosting:** one small VM in an **EU region** running the same Docker Compose file, with a reverse proxy for TLS (e.g. Caddy). Fixed, low monthly cost and nothing new to learn. It also runs the self-hosted `bge-m3` (about 2–3 GB of memory), so plan for **8 GB of RAM**; add more if the phase 2 reranker runs locally too. No GPU is needed at this volume. Avoid serverless hosting, which would reload the model on every cold start. Provision it from code (Terraform or a short setup script).
 2. **Database:** Postgres with pgvector on the same VM, with a nightly dump to object storage. Raw HTML goes to the same storage, one version per fetch.
 3. **CI/CD (GitHub Actions):** merging to main deploys. Evals run at two levels:
    - **Every pull request, no API key needed:** unit tests and the retrieval evals, using query embeddings cached in the repo. This works for pull requests from forks, which cannot read secrets.

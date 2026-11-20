@@ -164,10 +164,25 @@ A claim that hasn't passed the verifier is never shown.
 
 ### D15. Model choice
 
-- The answer model's provider is chosen in phase 1, on two criteria: processing in the EU, and whether retention for abuse monitoring can be turned off. No provider's EU options have been checked yet.
-- **Recommended:** Claude Sonnet 5.5 for answers, and Claude Haiku 5.5 for cheap steps such as query translation and routing. If Claude can't meet the EU requirement, use another provider with EU hosting.
-- The judge comes from a different model family (D19).
-- Embeddings are chosen separately, in phases 1–2 (multilingual: `text-embedding-3-small` vs `bge-m3`).
+Updated 2026-11-20 from [`research/providers.md`](research/providers.md).
+
+**Criteria for any provider that receives user questions:**
+- **Must:** a data processing agreement, no training on API data, retention of 30 days or less, and a valid transfer basis (processing in the EU, or a provider certified under the EU–US Data Privacy Framework). No provider that processes or stores data in China.
+- **Preferred now, required before a paid launch:** processing in the EU, and zero retention.
+
+**Answer model:**
+- **Claude through Amazon Bedrock's EU cross-region profile,** with model-invocation logging and retention turned off in the account. Anthropic's own API has no EU-only option. Google Cloud's `eu` region is the alternative (its abuse-logging terms for Claude are unverified).
+- **Sonnet 5.5 vs Haiku 5.5 is decided in phase 2 on the golden set.** Haiku costs a twentieth as much per token; the answer model, not embeddings, dominates running cost. Haiku handles cheap steps such as query translation either way.
+- **Mistral** (EU-hosted by default) is the fallback answer model.
+- **Not DeepSeek** for anything that touches user data: it processes and stores data in China and offers no data processing agreement.
+
+**Judge:** a different model family from the answer model (D19); Mistral is the default candidate.
+
+**Embeddings:**
+- **`bge-m3`, self-hosted with a Python library** (`sentence-transformers` or `FlagEmbedding`) behind the embedding interface. It runs on the developer's machine and on the phase 3 VM, so user questions never leave the server. On public Swedish benchmarks it matches `text-embedding-3-large`; `text-embedding-3-small` is the weakest model checked and is dropped.
+- **Phase 2 compares it with one stronger model** on the golden set, e.g. `Qwen3-Embedding-8B` through OpenRouter or `text-embedding-3-large`, and keeps `bge-m3` unless the gain is clear.
+- **OpenRouter only for offline experiments** on the corpus, never in the path of user questions.
+- Embedding cost is negligible for any option (under $6 a month at 100k questions); the decision rests on quality and privacy.
 
 ---
 
