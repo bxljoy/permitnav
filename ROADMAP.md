@@ -171,11 +171,22 @@ Effort: about 16–20 hours, including 6–8 for rebuilding history.
 Goal: answers that stay right when the rules change, and that say which version of a rule they describe.
 
 Freshness:
-1. A scheduled job (cron on the VM, or a scheduled GitHub Action) re-fetches every source and compares content hashes.
-2. Changed documents are re-chunked and re-indexed. The old version is kept in storage with its dates and gets a `valid_to`.
+1. A scheduled job (cron on the VM, or a scheduled GitHub Action) checks every source, on this schedule:
+
+   | Source | Daily | Weekly |
+   |---|---|---|
+   | Statutes (riksdagen API) | Re-fetch the in-scope laws and compare content hashes | — |
+   | Amending acts (SFS) | Read the SFS RSS feed; fetch only new acts | Check the SFSR register for in-force dates |
+   | Position papers (Lifos) | Read the Lifos RSS feed; fetch only new versions | — |
+   | Rulings (Sök rättspraxis) | Ask the API for new MIOD rulings | — |
+   | Migrationsverket pages | Re-fetch pages whose sitemap "last modified" date changed | Re-fetch all in-scope pages, in case the sitemap missed a change |
+
+   Daily is enough: amending acts are published weeks or months before they take effect and are stored as upcoming versions (D9), so a change is usually indexed before it applies. A typical daily run reads feeds and compares hashes, downloading only a handful of documents at 1 request per second; more frequent runs would add load on government sites for little gain.
+2. Changed documents are re-parsed and compared **per unit**: only units whose text changed get a new version, new chunks and new embeddings. The old version is kept with its dates and gets a `valid_to`.
 3. A **"what changed" log** records which page or section changed, when, and a short diff.
 4. The eval suite runs after each re-index. A drop in scores raises an alert.
-5. **Drift check:** re-ask every golden item as of today and list those whose expected units have a newer version since the item's `as_of`. Reviewed items get a fresh copy dated today; the old copy stays as a historical test (D17).
+5. **Crawler failures raise an alert too** (a site down, a changed format, a parser error). The index keeps serving the last good versions, and answers still show their fetch dates.
+6. **Drift check:** re-ask every golden item as of today and list those whose expected units have a newer version since the item's `as_of`. Reviewed items get a fresh copy dated today; the old copy stays as a historical test (D17).
 
 Time handling:
 1. **`as_of` per conversation** (D8), defaulting to today. Retrieval returns only the versions that apply on `as_of`, so repealed text is never cited as current.
