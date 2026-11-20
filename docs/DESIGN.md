@@ -166,22 +166,29 @@ A claim that hasn't passed the verifier is never shown.
 
 Updated 2026-11-20 from [`research/providers.md`](research/providers.md).
 
-**Criteria for any provider that receives user questions:**
+**Criteria for any provider that receives other people's questions** (from the public beta, phase 7, onwards; until then the only questions are the author's own and the golden set):
 - **Must:** a data processing agreement, no training on API data, retention of 30 days or less, and a valid transfer basis (processing in the EU, or a provider certified under the EU–US Data Privacy Framework). No provider that processes or stores data in China.
 - **Preferred now, required before a paid launch:** processing in the EU, and zero retention.
 
-**Answer model:**
-- **Claude through Amazon Bedrock's EU cross-region profile,** with model-invocation logging and retention turned off in the account. Anthropic's own API has no EU-only option. Google Cloud's `eu` region is the alternative (its abuse-logging terms for Claude are unverified).
-- **Sonnet 5.5 vs Haiku 5.5 is decided in phase 2 on the golden set.** Haiku costs a twentieth as much per token; the answer model, not embeddings, dominates running cost. Haiku handles cheap steps such as query translation either way.
-- **Mistral** (EU-hosted by default) is the fallback answer model.
-- **Not DeepSeek** for anything that touches user data: it processes and stores data in China and offers no data processing agreement.
+**Answer model, during development (phases 1–6):**
+- **Through OpenRouter,** one account for every candidate model. Only the author's questions and the golden set are sent, so the criteria above don't apply yet.
+- **Claude Haiku 5.5 is the starting answer model.** It is the cheapest candidate ($0.10 / $0.50 per million tokens, slightly below Mistral Small 4) and good enough to build the pipeline with. Its likely weak spots are multi-source reasoning, transitional provisions, recognising "not settled" questions, and verification.
+- **Phase 2 compares Haiku 5.5, Sonnet 5.5 and one Mistral model** on the golden set, reported per question type, not just overall. A likely result is a mix: Haiku for cheap steps (query translation, intake, simple answers) and Sonnet only where Haiku measurably fails, such as the verifier (D13) or multi-source questions.
+- Switching models is a configuration change, because the LLM client sits behind an interface.
 
-**Judge:** a different model family from the answer model (D19); Mistral is the default candidate.
+**Answer model, from the public beta (phase 7):** the chosen models move to a path that meets the criteria above:
+- **Claude through Amazon Bedrock's EU cross-region profile,** with model-invocation logging and retention turned off in the account. Anthropic's own API has no EU-only option. Google Cloud's `eu` region is the alternative (its abuse-logging terms for Claude are unverified).
+- **Mistral's own API** (EU-hosted by default) if a Mistral model wins.
+- **OpenRouter stays for development and evals only.**
+
+**Never DeepSeek** for anything that touches user data: it processes and stores data in China and offers no data processing agreement.
+
+**Judge:** a different model family from the answer model (D19). While Claude answers, a Mistral model judges, through OpenRouter; if Mistral answers, Claude judges.
 
 **Embeddings:**
 - **`bge-m3`, self-hosted with a Python library** (`sentence-transformers` or `FlagEmbedding`) behind the embedding interface. It runs on the developer's machine and on the phase 3 VM, so user questions never leave the server. On public Swedish benchmarks it matches `text-embedding-3-large`; `text-embedding-3-small` is the weakest model checked and is dropped.
 - **Phase 2 compares it with one stronger model** on the golden set, e.g. `Qwen3-Embedding-8B` through OpenRouter or `text-embedding-3-large`, and keeps `bge-m3` unless the gain is clear.
-- **OpenRouter only for offline experiments** on the corpus, never in the path of user questions.
+- **OpenRouter only for offline experiments** on the corpus, never in the path of user questions once the beta starts.
 - Embedding cost is negligible for any option (under $6 a month at 100k questions); the decision rests on quality and privacy.
 
 ---

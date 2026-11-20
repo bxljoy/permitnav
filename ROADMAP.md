@@ -120,7 +120,7 @@ Goal: understand every moving part before a framework hides it.
    - **structure-aware:** one chunk per section (§) for laws, one per heading for web pages, with the chapter and page title prepended. Expect this to win
 5. **Embeddings + vector store:** **pgvector** with **`bge-m3`**, self-hosted through a Python library behind the embedding interface (D15). It runs natively on the developer's machine (Docker on a Mac can't use the GPU, so only Postgres runs in Docker during development).
 6. **Generation:** answer in the user's language, cite the source per claim (section number or page title, with the fetch date), quote the Swedish original with an unofficial translation (D12), state from when the cited rule applies, and refuse when the context doesn't contain the answer. What text goes to the model is in D11. The baseline prompt already allows one follow-up question, "not settled" and declining out-of-scope questions (D21).
-7. **Set up the answer model:** Claude through Amazon Bedrock's EU profile with retention turned off (D15).
+7. **Set up the answer model through OpenRouter:** Claude Haiku 5.5 to start (D15). Only your own questions and the golden set are sent during development.
 
 ✅ Done when: a question in English gets an answer cited to Swedish law text, `docker compose up` works from a clean clone, and both golden files exist.
 
@@ -140,7 +140,8 @@ Goal: a results table that holds up to scrutiny.
 5. **Reranking:** retrieve top 30–50, then rerank to top 5 with a multilingual reranker (`bge-reranker-v2-m3` locally, or Cohere's multilingual rerank). Measure the gain *and* the added latency. Measure both ways of serving it, because the choice sizes the phase 3 VM: a hosted rerank API (no memory cost, per-call price) or the local model (a few GB of memory, and possibly seconds per query on CPU).
 6. **Authority-aware ranking (D22):** when a law section and a web page cover the same legal requirement, prefer the law for the citation and use the web page for the plain-language explanation. For agency-practice questions (steps, union statement, insurances, processing times) the Migrationsverket page is the primary source. Add test questions of both kinds, including ones where the web page is simplified and the law has the full condition, and report results per kind.
 7. **Generation evals:** faithfulness (is every claim supported by the retrieved text?), answer correctness, citation accuracy, refusal rate on the "not settled" questions, and whether it asks a follow-up when it should. Use RAGAS *or* a custom LLM judge from a different model family than the answer model, calibrated on ~30 hand-labelled answers, with at least 85% agreement before its scores count (D19).
-8. **Experiment grid:** chunking (2) × retrieval (vector / hybrid / hybrid+rerank). Log every run to **MLflow** (local file store): parameters (chunking, retriever, k, model versions), metrics with confidence intervals, and the golden-set version as a tag.
+8. **Answer-model comparison (D15):** run the golden set through Claude Haiku 5.5, Claude Sonnet 5.5 and one Mistral model, judged by a model from a different family. Report per question type, plus cost and latency, and decide which model handles which step (e.g. Haiku for simple steps, Sonnet for the verifier or multi-source questions).
+9. **Experiment grid:** chunking (2) × retrieval (vector / hybrid / hybrid+rerank). Log every run to **MLflow** (local file store): parameters (chunking, retriever, k, model versions), metrics with confidence intervals, and the golden-set version as a tag.
 
 ✅ Done when: a table like "structure-aware + hybrid + rerank: recall@5 0.62 → 0.91 (95% CI …)", with real numbers, split by question language, plus one hold-out row.
 
@@ -230,7 +231,7 @@ Effort: about 10–12 hours.
 3. **Optional question donation, off by default.** A separate switch: "Let my questions be used to improve the assistant." When on, question text only (no answers, no session link, no IP) goes to the same private review queue. This is the only source of real questions for phase 8.
 4. **Privacy:**
    - immigration questions can reveal sensitive personal data (origin, family, health, asylum grounds). No accounts, no question text in logs or traces, no stored situations beyond the session, unless the user saved feedback or switched on question donation
-   - EU region for all processing; check what the LLM provider retains for abuse monitoring and whether that can be turned off
+   - **Move the answer models off OpenRouter** to a path that meets D15's criteria before anyone else uses the service: Claude through Amazon Bedrock's EU profile with retention off, or Mistral's own EU-hosted API. Check what the provider retains for abuse monitoring and turn it off where possible
    - a plain-language privacy page that says all of this
 5. **Safety:**
    - a clear "not legal advice; check with Migrationsverket" notice, an "you are talking to an AI" notice, and the source date on every answer
