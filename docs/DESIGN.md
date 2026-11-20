@@ -524,4 +524,6 @@ One more finding: the older wording of 6 kap. 2 § (before 2026-06-01) is **not*
 ### Known open points
 
 - **LangGraph (phase 5)** works with its own chat-model wrappers. The `LLM` interface either gets a LangGraph adapter then, or the agent calls `Retriever` and `Answerer` as tools and keeps the `LLM` interface for the plain-RAG baseline. Decide in phase 5; nothing in phase 1 depends on it.
+- **Changes "on the day the government decides"** (found by the statute parser): some upcoming wordings have no start date yet, and the wording they replace has no end date. The parser marks them `pending = "starts"` / `"ends"`. The schema needs a way to store a not-yet-dated wording without the `as_of` filter treating its unknown start as "applies since forever"; decide in slice 2 (e.g. a `pending` column excluded from the filter until a date is known).
+- **Inconsistent consolidated text:** the riksdagen text sometimes gives one section two different upcoming wordings from the same day (seen once: 10 kap. 14 § utlänningslagen, 2027-12-01). The parser keeps the later one and reports a conflict; check such cases against the SFS PDF.
 - **OpenRouter model IDs** for Claude Haiku 5.5 and the Mistral judge are configuration values, to be confirmed against OpenRouter's model list at setup.
