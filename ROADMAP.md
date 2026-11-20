@@ -299,3 +299,10 @@ Decide only after seeing real usage. The open-core split in the repo rules means
 - More sources: citizenship rules, study permits, EU directives.
 - A third question language (Chinese) to push the cross-language tests.
 - A managed vector search service, if pgvector stops being enough at the corpus size reached.
+- **Applicants' experience reports** (after the beta). Much of what users care about (real processing times, what case officers ask for, how edge cases are handled) is practice that no official source publishes. Collect it from users of the app, not from social media:
+  - **Not scraped from social media.** Posts reveal sensitive personal data (nationality, family, health, asylum history), platform terms restrict collecting them, their accuracy can't be checked, and quoting them republishes other people's writing.
+  - **Opt-in and structured.** After using the assistant, a user may share their outcome in fixed fields: permit type, month applied, month decided, outcome, whether more documents were requested and about what. No names, no free text.
+  - **Shown only as aggregates**, e.g. "reported by 23 users: median 5 months; 40% were asked about insurances", and only once there are enough reports (e.g. at least 10) that no one can be identified.
+  - **Kept apart from the rules.** A separate, clearly labelled "What other applicants reported" section, dated and marked unofficial. Reports are never retrieved as sources for legal or practice claims, so the verifier's guarantees are unchanged. This is the "reported practice" source that D23 defers.
+  - **Expiring.** Reports older than one to two years drop out, since practice changes.
+  - **Before building:** a lawyer's view on GDPR (legal basis, retention, anonymisation). The aggregated reports stay out of the public repo, like the rest of the service data (see open core in the repo rules).
