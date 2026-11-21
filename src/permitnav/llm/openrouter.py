@@ -50,6 +50,8 @@ class OpenRouterLLM:
             "messages": [{"role": "system", "content": request.system}, *request.messages],
             "usage": {"include": True},  # ask OpenRouter to report the cost
         }
+        if request.reasoning_effort:
+            body["reasoning"] = {"effort": request.reasoning_effort}
         data = json.dumps(body).encode("utf-8")
         for attempt in range(self._retries + 1):
             req = urllib.request.Request(

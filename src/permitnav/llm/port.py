@@ -16,6 +16,9 @@ class CompletionRequest:
     system: str
     messages: list[dict[str, str]]  # [{"role": "user" | "assistant", "content": ...}]
     max_tokens: int = 4000
+    # For reasoning models ("low" | "medium" | "high"): how much hidden thinking they may do
+    # before answering; it counts against max_tokens. None sends nothing (the model's default).
+    reasoning_effort: str | None = None
     # No sampling parameters: current Claude models reject temperature/top_p.
 
 

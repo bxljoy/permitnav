@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from permitnav.answering.answerer import KINDS, Answer, Answerer
 from permitnav.evals.golden import GoldenItem
+from permitnav.evals.judge import CalibrationItem, Verdict
 from permitnav.llm.port import LLMError
 
 
@@ -80,3 +81,73 @@ def kind_table(results: list[AnswerResult]) -> list[KindRow]:
         else:
             row.got[result.kind] += 1
     return [row for row in rows.values() if row.n]
+
+
+def judgeable(result: AnswerResult) -> CalibrationItem | None:
+    """The answer in the shape the judge reads, or None when there is nothing to judge (a
+    decline, or a failed answer)."""
+    if result.kind not in ("answered", "follow_up", "not_settled"):
+        return None
+    return CalibrationItem(
+        id=result.item.id,
+        question=result.item.question,
+        language=result.item.original_language,
+        expected_kind=result.item.expected_kind,
+        reference_answer=result.item.reference_answer,
+        kind=result.kind,
+        answer=result.answer.text,
+        sources=[
+            {
+                "marker": s.marker,
+                "unit_id": s.unit_id,
+                "role": s.role,
+                "heading": s.heading,
+                "dates": s.dates,
+                "text": s.text,
+            }
+            for s in result.answer.sources
+        ],
+    )
+
+
+JUDGED_KINDS = ("answered", "follow_up", "not_settled")  # items that should get an answer
+
+
+@dataclass
+class JudgedRow:
+    expected: str
+    items: int = 0  # every item of this expected kind: the denominator for "correct"
+    n: int = 0  # answers the judge read
+    correct: int = 0
+    partly: int = 0
+    incorrect: int = 0
+    faithful: int = 0  # of the n read
+    unreadable: int = 0  # judged, but the verdict could not be read (or the call failed)
+    not_judged: int = 0  # no answer to judge: declined or failed
+
+    @property
+    def correct_rate(self) -> float:
+        """Correct answers over all items: a declined, failed or unreadable one is not
+        correct, so declining more can never look better."""
+        return self.correct / self.items if self.items else 0.0
+
+
+def judged_summary(results: list[AnswerResult], verdicts: dict[str, Verdict]) -> list[JudgedRow]:
+    """Correctness and faithfulness per expected kind, for items that should be answered
+    (out-of-scope items are scored by the behaviour eval: a decline has nothing to judge)."""
+    rows = {kind: JudgedRow(kind) for kind in JUDGED_KINDS}
+    for r in results:
+        row = rows.get(r.item.expected_kind)
+        if row is None:
+            continue
+        row.items += 1
+        verdict = verdicts.get(r.item.id)
+        if verdict is None:
+            row.not_judged += 1
+        elif verdict.correctness is None or verdict.faithful is None:
+            row.unreadable += 1
+        else:
+            row.n += 1
+            setattr(row, verdict.correctness, getattr(row, verdict.correctness) + 1)
+            row.faithful += verdict.faithful
+    return [row for row in rows.values() if row.items]

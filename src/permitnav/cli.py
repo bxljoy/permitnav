@@ -529,6 +529,8 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
     try:
         llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
         translator = _translator(config.translate)
+        # Built before any answer is paid for, so a missing judge setting fails at once.
+        judge, judge_model, judge_effort = _judge() if args.judge else (None, None, None)
     except LLMError as error:
         print(f"model call failed: {error}")
         return 1
@@ -540,6 +542,18 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
             answerer,
             lambda done, total: print(f"  answered {done}/{total}", end="\r", flush=True),
         )
+
+    verdicts: dict = {}
+    judge_cost = 0.0
+    if judge is not None:
+        from permitnav.evals.answers import judgeable
+
+        for n, r in enumerate(results, start=1):
+            print(f"  judging {n}/{len(results)}", end="\r", flush=True)
+            item = judgeable(r)
+            if item is not None:  # a failed call gives an unreadable verdict, never correct
+                verdicts[r.item.id] = judge.judge(item)
+        judge_cost = sum(c.cost_usd or 0.0 for v in verdicts.values() for c in v.completions)
 
     label = "DEVELOPMENT RUN, includes drafts, not reportable" if args.include_drafts else "checked"
     print(f"\nBehaviour eval: {args.file}, model={model}, floor={floor} ({label})")
@@ -561,6 +575,35 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
         f"declined without a model call: {skipped}; failed: {failed}; cost ${cost:.4f}"
         + (f" (+ {unknown} replies with unknown cost)" if unknown else "")
     )
+    if args.judge:
+        from permitnav.evals.answers import judged_summary
+
+        effort_note = f", reasoning effort {judge_effort}" if judge_effort else ""
+        print(f"\nJudged by {judge_model}{effort_note} (calibrated, D19; blind spots in DESIGN.md)")
+        print(
+            f"{'expected kind':<14} {'n':>3} {'correct':>7} {'partly':>6}"
+            f" {'wrong':>5} {'faithful':>8}"
+        )
+        rows = judged_summary(results, verdicts)
+        for row in rows:
+            gaps = [
+                f"{row.not_judged} not judged (declined or failed)" if row.not_judged else "",
+                f"{row.unreadable} unreadable" if row.unreadable else "",
+            ]
+            extra = "; ".join(g for g in gaps if g)
+            print(
+                f"{row.expected:<14} {row.items:>3} {row.correct:>7} {row.partly:>6}"
+                f" {row.incorrect:>5} {row.faithful:>8}" + (f"  ({extra})" if extra else "")
+            )
+        items = sum(r.items for r in rows)
+        read = sum(r.n for r in rows)
+        if items:
+            correct = sum(r.correct for r in rows)
+            faithful = sum(r.faithful for r in rows)
+            print(
+                f"all            {items:>3} {correct:>7}   correct {correct / items:.0%} of all"
+                f" {items}; faithful {faithful}/{read} judged; judge cost ${judge_cost:.4f}"
+            )
     if args.verbose:
         for r in results:
             if not r.correct:
@@ -577,6 +620,18 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
                         "text": r.answer.text,
                         "sources": [s.unit_id for s in r.answer.sources],
                         "cost_usd": r.cost_usd,
+                        **(
+                            {
+                                "judge": {
+                                    "correctness": verdicts[r.item.id].correctness,
+                                    "faithful": verdicts[r.item.id].faithful,
+                                    "unsupported": list(verdicts[r.item.id].unsupported),
+                                    "reason": verdicts[r.item.id].reason,
+                                }
+                            }
+                            if r.item.id in verdicts
+                            else {}
+                        ),
                         # For failed answers: what the model actually sent back.
                         **(
                             {
@@ -604,6 +659,208 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
     return 0
+
+
+def _judge(model: str | None = None, reasoning_effort: str | None = None):
+    """The LLM judge (D19): JUDGE_MODEL and JUDGE_REASONING_EFFORT unless overridden. A
+    reasoning model gets room for its thinking (it counts against the token limit)."""
+    from permitnav.evals.judge import Judge
+    from permitnav.llm.openrouter import OpenRouterLLM
+
+    effort = reasoning_effort
+    if not model:  # the configured judge: its model and its reasoning effort go together
+        model = os.environ.get("JUDGE_MODEL", "").strip()
+        effort = effort or os.environ.get("JUDGE_REASONING_EFFORT", "").strip() or None
+    if not model:
+        raise SystemExit("JUDGE_MODEL is not set; see .env.example")
+    if effort and effort not in ("low", "medium", "high"):
+        raise SystemExit(f"JUDGE_REASONING_EFFORT must be low, medium or high, not {effort!r}")
+    # More patient retries than answering: judge providers rate-limit in bursts.
+    llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""), retries=5)
+    if effort:
+        return Judge(llm, model, max_tokens=8000, reasoning_effort=effort), model, effort
+    return Judge(llm, model), model, None
+
+
+CALIBRATION_ANSWERS = Path("evals/judge/answers.jsonl")
+CALIBRATION_LABELS = Path("evals/judge/labels.jsonl")
+
+
+def cmd_judge_sample(args: argparse.Namespace) -> int:
+    """Generate the judge's calibration answers (slice 7): 30 in-scope dev items, answered
+    with the current configuration, saved with the sources the answer model was shown."""
+    from permitnav.answering.answerer import BGE_M3_FLOOR, AnswerConfig, Answerer
+    from permitnav.evals.golden import load_golden
+    from permitnav.evals.judge import CalibrationItem, calibration_ids, save_items
+    from permitnav.llm.openrouter import LLMError, OpenRouterLLM
+    from permitnav.retrieval.retriever import Retriever
+
+    model = os.environ.get("ANSWER_MODEL", "").strip()
+    if not model:
+        print("ANSWER_MODEL is not set; see .env.example")
+        return 1
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        print(f"{out} exists; its labels would no longer match. Use --force to replace it.")
+        return 1
+    items = load_golden(Path(args.file))
+    wanted = calibration_ids(items)
+    items = sorted((i for i in items if i.id in wanted), key=lambda i: wanted.index(i.id))
+    try:
+        from permitnav.embedding.bge_m3 import BgeM3Embedder
+
+        embedder = BgeM3Embedder()
+    except ImportError:
+        print("bge-m3 needs the embed extra: uv sync --extra embed")
+        return 1
+    config = _retrieval_config(args)
+    try:
+        llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
+        translator = _translator(config.translate)
+    except LLMError as error:
+        print(f"model call failed: {error}")
+        return 1
+    sample = []
+    failed: list[str] = []
+    with db.connect() as conn:
+        retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
+        answerer = Answerer(conn, retriever, llm, AnswerConfig(model=model, min_score=BGE_M3_FLOOR))
+        for n, item in enumerate(items, start=1):
+            print(f"  answering {n}/{len(items)}", end="\r", flush=True)
+            try:
+                answer = answerer.answer(item.question, as_of=item.as_of)
+            except LLMError as error:  # keep the answers already paid for
+                failed.append(item.id)
+                print(f"\n  {item.id}: model call failed: {error}")
+                continue
+            sample.append(
+                CalibrationItem(
+                    id=item.id,
+                    question=item.question,
+                    language=item.original_language,
+                    expected_kind=item.expected_kind,
+                    reference_answer=item.reference_answer,
+                    kind=answer.kind,
+                    answer=answer.text,
+                    sources=[
+                        {
+                            "marker": src.marker,
+                            "unit_id": src.unit_id,
+                            "role": src.role,
+                            "heading": src.heading,
+                            "dates": src.dates,
+                            "url": src.url,
+                            "text": src.text,
+                        }
+                        for src in answer.sources
+                    ],
+                )
+            )
+    save_items(out, sample)
+    if failed:
+        print(
+            f"\n{len(failed)} answers failed and are missing: {', '.join(failed)};"
+            " rerun with --force to regenerate the sample"
+        )
+    kinds = ", ".join(
+        f"{k} {sum(i.kind == k for i in sample)}" for k in sorted({i.kind for i in sample})
+    )
+    print(f"\nsaved {len(sample)} answers to {out} ({kinds}); answer model {model}")
+    return 0
+
+
+def cmd_judge_calibrate(args: argparse.Namespace) -> int:
+    """Run the judge on the calibration answers and compare with the hand labels (D19)."""
+    import json
+
+    from permitnav.evals.judge import (
+        THRESHOLD,
+        agreement,
+        load_items,
+        load_labels,
+        load_seeded,
+    )
+    from permitnav.llm.openrouter import LLMError
+
+    items = {i.id: i for i in load_items(Path(args.answers))}
+    labels = load_labels(Path(args.labels))
+    seeded_ids: set[str] = set()
+    if args.seeded and Path(args.seeded).exists():
+        seeded, seeded_labels = load_seeded(Path(args.seeded), items)
+        items.update({i.id: i for i in seeded})
+        labels.update(seeded_labels)
+        seeded_ids = set(seeded_labels)
+    missing = sorted(items.keys() - labels.keys())
+    if missing:
+        more = "…" if len(missing) > 5 else ""
+        print(f"{len(missing)} answers have no label yet: {', '.join(missing[:5])}{more}")
+    orphans = sorted(labels.keys() - items.keys())
+    if orphans:
+        more = "…" if len(orphans) > 5 else ""
+        print(f"{len(orphans)} labels have no answer (stale ids?): {', '.join(orphans[:5])}{more}")
+    to_judge = sorted(items.keys() & labels.keys())
+    try:
+        judge, model, effort_used = _judge(args.model, args.reasoning_effort)
+    except LLMError as error:
+        print(f"model call failed: {error}")
+        return 1
+    verdicts = {}
+    for n, i in enumerate(to_judge, start=1):
+        print(f"  judging {n}/{len(to_judge)}", end="\r", flush=True)
+        verdicts[i] = judge.judge(items[i])  # a failed call: unreadable, never agreement
+    failed = sum(v.reason.startswith("model call failed") for v in verdicts.values())
+    if failed:
+        print(f"\n{failed} verdicts failed (model call errors); they count as disagreements")
+    result = agreement(labels, verdicts)
+    verdict_word = "PASSES" if result.passes() else "does not pass"
+    effort = f", reasoning effort {effort_used}" if effort_used else ""
+    print(
+        f"\nJudge {model}{effort} on {result.n} labelled answers"
+        f" ({verdict_word} the {THRESHOLD:.0%} bar)"
+    )
+    print(
+        f"  correctness agreement  {result.correctness:.0%}"
+        f" (exact level: {result.correctness_exact:.0%})"
+    )
+    print(f"  faithfulness agreement {result.faithfulness:.0%}")
+    if seeded_ids:
+        for name, subset in (
+            ("real answers", {k: v for k, v in labels.items() if k not in seeded_ids}),
+            ("seeded errors", {k: v for k, v in labels.items() if k in seeded_ids}),
+        ):
+            part = agreement(subset, verdicts)
+            print(
+                f"  {name:<14} n={part.n:<3} correctness {part.correctness:.0%}, "
+                f"faithfulness {part.faithfulness:.0%}"
+            )
+    print(
+        "  correctness (you → judge): "
+        + ", ".join(f"{a}→{b} {n}" for (a, b), n in sorted(result.correctness_confusion.items()))
+    )
+    cost = sum(c.cost_usd or 0.0 for v in verdicts.values() for c in v.completions)
+    print(f"  cost ${cost:.4f}")
+    if args.verbose:
+        for item_id, dimension, detail in result.disagreements:
+            print(f"  {item_id:<44} {dimension:<12} {detail}: {verdicts[item_id].reason[:140]}")
+    if args.out:
+        Path(args.out).write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "id": i,
+                        "correctness": v.correctness,
+                        "faithful": v.faithful,
+                        "unsupported": list(v.unsupported),
+                        "reason": v.reason,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+                for i, v in sorted(verdicts.items())
+            ),
+            encoding="utf-8",
+        )
+    return 0 if result.passes() else 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -650,9 +907,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     ea.add_argument("--limit", type=int, help="only the first N items")
     ea.add_argument("--floor", type=float, help="relevance floor (default: calibrated for bge-m3)")
+    ea.add_argument(
+        "--judge", action="store_true", help="also judge correctness and faithfulness (JUDGE_MODEL)"
+    )
     ea.add_argument("--verbose", "-v", action="store_true", help="show the wrong answers")
     ea.add_argument("--out", help="write per-item answers as JSON")
     ea.set_defaults(run=cmd_eval_answers)
+    js = sub.add_parser("judge-sample", help="generate the judge's 30 calibration answers")
+    js.add_argument("--file", default="evals/golden.dev.jsonl")
+    js.add_argument("--out", default=str(CALIBRATION_ANSWERS))
+    js.add_argument("--force", action="store_true", help="replace an existing sample")
+    _add_retrieval_options(js)
+    js.set_defaults(run=cmd_judge_sample)
+    jc = sub.add_parser("judge-calibrate", help="compare the judge with the hand labels (D19)")
+    jc.add_argument("--answers", default=str(CALIBRATION_ANSWERS))
+    jc.add_argument("--labels", default=str(CALIBRATION_LABELS))
+    jc.add_argument(
+        "--seeded",
+        default="evals/judge/seeded.jsonl",
+        help="seeded errors to include ('' for none)",
+    )
+    jc.add_argument("--model", help="judge model (default: JUDGE_MODEL)")
+    jc.add_argument(
+        "--reasoning-effort", choices=["low", "medium", "high"], help="for reasoning models"
+    )
+    jc.add_argument("--verbose", "-v", action="store_true", help="show each disagreement")
+    jc.add_argument("--out", help="write the judge's verdicts as JSON lines")
+    jc.set_defaults(run=cmd_judge_calibrate)
     args = parser.parse_args(argv)
     return args.run(args)
 

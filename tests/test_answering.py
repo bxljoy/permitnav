@@ -193,6 +193,17 @@ def test_openrouter_request_shape_and_cost(monkeypatch) -> None:
     body = sent[0]
     assert body["messages"][0] == {"role": "system", "content": "sys"}
     assert "temperature" not in body and "top_p" not in body  # current Claude models reject them
+    assert "reasoning" not in body  # only sent when a request asks for it
+
+    OpenRouterLLM("key").complete(
+        CompletionRequest(
+            model="mistralai/mistral-large-4-0",
+            system="sys",
+            messages=[{"role": "user", "content": "q"}],
+            reasoning_effort="low",
+        )
+    )
+    assert sent[1]["reasoning"] == {"effort": "low"}
 
 
 def test_openrouter_retries_rate_limits_then_gives_up(monkeypatch) -> None:

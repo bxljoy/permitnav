@@ -23,6 +23,7 @@ class GoldenItem:
     # What the answer should be: answered | follow_up | not_settled | out_of_scope, from the
     # item's expects_* flags (they never combine).
     expected_kind: str = "answered"
+    reference_answer: str = ""  # what a correct answer says; the judge compares with it
 
     @property
     def is_translation(self) -> bool:
@@ -47,6 +48,7 @@ def load_golden(path: Path) -> list[GoldenItem]:
                 review=raw["review"],
                 authority=raw.get("authority"),
                 expected_kind=_expected_kind(raw),
+                reference_answer=raw.get("reference_answer", ""),
             )
         )
     return items
