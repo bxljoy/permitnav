@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 
+class LLMError(RuntimeError):
+    """A model call failed (after any retries the adapter makes)."""
+
+
 @dataclass(frozen=True)
 class CompletionRequest:
     model: str

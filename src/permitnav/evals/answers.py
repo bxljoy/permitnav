@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from permitnav.answering.answerer import KINDS, Answer, Answerer
 from permitnav.evals.golden import GoldenItem
-from permitnav.llm.openrouter import LLMError
+from permitnav.llm.port import LLMError
 
 
 @dataclass(frozen=True)
@@ -31,9 +31,15 @@ class AnswerResult:
 
     @property
     def cost_usd(self) -> float | None:
-        """None when the provider did not report the cost; 0 when no model was called."""
-        completion = self.answer.completion
-        return completion.cost_usd if completion else 0.0
+        """All model calls for the answer, retries included. None when the provider did not
+        report a cost; 0 when no model was called."""
+        calls = [
+            *self.answer.earlier,
+            *([self.answer.completion] if self.answer.completion else []),
+        ]
+        if any(c.cost_usd is None for c in calls):
+            return None
+        return sum((c.cost_usd or 0.0 for c in calls), 0.0)
 
 
 @dataclass

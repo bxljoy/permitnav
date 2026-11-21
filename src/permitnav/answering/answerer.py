@@ -1,6 +1,8 @@
 """`Answerer.answer(question, as_of)` (docs/DESIGN.md, "Phase 1 internals"; D11, D12, D21).
 
-Plain RAG for phase 1: retrieve, assemble sources, one model call, parse, check citations.
+Plain RAG: retrieve, assemble sources, call the model, parse, check citations. A reply cut off
+at the token limit is retried with twice the tokens, up to MAX_TOKENS_CAP; an unreadable reply
+is asked for once more. So one answer takes one call, rarely up to four.
 The prompt (prompts/answer.md) already allows one follow-up question, "not settled" and
 declining out-of-scope questions, so phase 5's agent is compared against a fair baseline (D21).
 
@@ -22,7 +24,7 @@ from datetime import date
 import psycopg
 
 from permitnav.answering.context import Context, Source, build_context
-from permitnav.llm.port import LLM, Completion, CompletionRequest
+from permitnav.llm.port import LLM, Completion, CompletionRequest, LLMError
 from permitnav.parsing.references import named_units
 from permitnav.prompting import load_prompt
 from permitnav.retrieval.retriever import Hit, Retriever
@@ -32,6 +34,13 @@ MARKER = re.compile(r"\[(S\d+)\]")
 # "[S1, S2]", "[S1–S3]", "[S1; S4]": groups the model sometimes writes instead of [S1][S2]
 GROUP = re.compile(r"\[(S\d+(?:\s*[,;–-]\s*S\d+)+)\]")
 MAX_TOKENS_CAP = 16000
+# Sent once when a reply cannot be read (no JSON, or broken JSON such as unescaped quotes);
+# about 1-3% of replies, depending on the prompt (phase 2).
+REASK = (
+    "That reply could not be used: it was not the JSON object described in the instructions "
+    "(no JSON, invalid JSON such as an unescaped quote inside a string, or no non-empty "
+    '"answer" field). Reply again with only that JSON object.'
+)
 # The relevance floor for bge-m3 cosine scores, calibrated on the dev set (phase 2, slice 2):
 # in-scope questions' best source scored 0.589–0.809, unrelated ones 0.491–0.641. The ranges
 # overlap, so the floor sits below every in-scope question with a margin and only catches
@@ -68,6 +77,8 @@ class Answer:
     dropped_markers: list[str] = field(default_factory=list)  # cited but not a given source
     sources: list[Source] = field(default_factory=list)  # everything the model was shown
     completion: Completion | None = None
+    # Earlier calls for the same answer (a reply cut off or unreadable, then asked again).
+    earlier: list[Completion] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -98,24 +109,48 @@ class Answerer:
         context = build_context(self._conn, hits, as_of)
         system = self._template.format(as_of=as_of.isoformat(), sources=context.render())
         max_tokens = self.config.max_tokens
-        while True:
-            completion = self._llm.complete(
+        earlier: list[Completion] = []
+        messages = [{"role": "user", "content": question}]
+
+        def ask(messages: list[dict]) -> Completion:
+            return self._llm.complete(
                 CompletionRequest(
                     model=self.config.model,
                     system=system,
-                    messages=[{"role": "user", "content": question}],
+                    messages=messages,
                     max_tokens=max_tokens,
                 )
             )
+
+        while True:
+            completion = ask(messages)
             cut_off = completion.extra.get("finish_reason") == "length"
             if not cut_off or max_tokens >= MAX_TOKENS_CAP:
                 break
-            max_tokens = min(
-                MAX_TOKENS_CAP, max_tokens * 2
-            )  # the reply was cut off: retry once larger
+            earlier.append(completion)
+            max_tokens = min(MAX_TOKENS_CAP, max_tokens * 2)  # cut off: double, up to the cap
         answer = parse_answer(completion, context)
+        if answer.kind == "failed" and not cut_off:  # unreadable: ask once more
+            # An empty reply cannot be shown back (an empty assistant turn is rejected), so
+            # the same request is simply repeated.
+            reask = messages
+            if completion.text.strip():
+                reask = [
+                    *messages,
+                    {"role": "assistant", "content": completion.text},
+                    {"role": "user", "content": REASK},
+                ]
+            try:
+                second = ask(reask)
+            except LLMError:
+                second = None  # keep the first answer and what it cost
+            if second is not None:
+                earlier.append(completion)
+                answer = parse_answer(second, context)
+                cut_off = second.extra.get("finish_reason") == "length"
         if cut_off and answer.kind == "failed":
             answer.text = "The reply was too long and was cut off. Please ask a narrower question."
+        answer.earlier = earlier
         return answer
 
 
@@ -224,7 +259,9 @@ def _json_object(text: str) -> dict | None:
                 depth -= 1
                 if depth == 0:
                     try:
-                        value = json.loads(text[start : i + 1])
+                        # strict=False: the model sometimes writes real line breaks inside
+                        # strings, which strict JSON rejects.
+                        value = json.loads(text[start : i + 1], strict=False)
                     except json.JSONDecodeError:
                         break
                     return value if isinstance(value, dict) else None

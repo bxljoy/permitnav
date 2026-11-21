@@ -679,3 +679,19 @@ It settles the questions the evals raised, as labelled:
 
 So the behaviour eval's main finding, too many follow-up questions (15 items), is now a prompt problem to fix, not a labelling question. The hold-out set (24 items, private) is still unreviewed; it gets its own review before the hold-out run.
 
+### Follow-up questions and unreadable replies
+
+After the golden-set review confirmed the labels, the behaviour eval's main error (the model asking a follow-up question where the item expects an answer or "not settled") became a prompt problem. Rules 5 and 6 of `prompts/answer.md` were rewritten three ways, each measured over three full runs of the 64 dev items with Haiku 5.5 (one run swings by four or five items):
+
+| Prompt | Runs (right of 64) | Mean | Real follow-ups asked (of 4) | Failed replies (3 runs) |
+|---|---|---|---|---|
+| original ("ask when it depends on facts you do not have") | 44, 42, 44 | 43.3 | 3–4 | – |
+| A: answer by default, rarely ask | 53, 54, 50 | 52.3 | 0 | 0 |
+| B: ask when the question doesn't say which permit, or for how long | 46, 48, 47 | 47.0 | 3 | 3 |
+| C: answer by default; a missing date or duration is a condition to state; ask only when the question says nothing about which permit | 52, 48, 47 | 49.0 | 2 | 6 |
+| **C, with unreadable replies asked for again (kept)** | **54, 52, 49** | **51.7** | 2–3 | **0** |
+
+- **C is kept:** as good as A within the noise, and it keeps the follow-up behaviour the labels and D14 call for, which A drops. Rule 6 now also sends a question that names no permit, where knowing the permit would settle the outcome, to rule 5 instead of "not settled" (after the code review, worded to match rule 5's condition; one run afterwards: 54 of 64, none failed). The prompt's example of a broad question is deliberately not a golden question.
+- **Unreadable replies:** two causes. The parser rejected replies with real line breaks inside JSON strings (strict JSON) and then picked up an inner quote object instead, which was a bug (fixed: `strict=False`) and behind most of the intermittent `failed` answers since slice 3. Separately, the model sometimes answers in prose or writes invalid JSON (unescaped quotes); the answerer now shows it its reply once and asks for the JSON object only (`REASK`), which costs one extra call on 1–3% of answers. An empty reply is repeated as the same request (an empty assistant turn is rejected); if the second call fails, the first answer and its cost are kept. Costs reported by `ask` and `eval-answers` include every call, and `eval-answers --out` keeps the earlier raw replies of a failed answer.
+- **Is it the model's size?** Sonnet 5.5 (20× Haiku's price) was run once on the 20 contested items (follow-up and not-settled) with the same prompt and retrieval: 13 of 20 right, against 12–15 for Haiku, and it misses the same items. The broad questions (put-work-003, work-working-while-pending-105) get an answer with conditions instead of a question, and 204, 207 and 304 get a caveated answer instead of "not settled". So the remaining errors sit on a judgement boundary (sources that partly answer: an answer with conditions, or "not settled"?), not on model capability. Haiku stays the answer model; the full comparison, with the judge measuring content, is slice 8.
+

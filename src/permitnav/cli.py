@@ -485,6 +485,10 @@ def cmd_ask(args: argparse.Namespace) -> int:
     if c is not None:
         cost = f", ${c.cost_usd:.4f}" if c.cost_usd is not None else ""
         print(f"[{c.model}: {c.input_tokens:,} in / {c.output_tokens:,} out tokens{cost}]")
+    if answer.earlier:  # a reply cut off or unreadable, then asked again
+        known = [e.cost_usd for e in answer.earlier if e.cost_usd is not None]
+        cost = f": ${sum(known):.4f}" if len(known) == len(answer.earlier) else " (cost unknown)"
+        print(f"[{len(answer.earlier)} earlier call(s) for this answer{cost}]")
     if translation := _translation_cost(translator):
         print(f"[{translation}]")
     return 0 if answer.kind != "failed" else 1
@@ -578,6 +582,14 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
                             {
                                 "raw": r.answer.completion.text,
                                 "finish_reason": r.answer.completion.extra.get("finish_reason"),
+                                # The replies before it (unreadable or cut off), oldest first.
+                                "earlier_raw": [
+                                    {
+                                        "text": e.text,
+                                        "finish_reason": e.extra.get("finish_reason"),
+                                    }
+                                    for e in r.answer.earlier
+                                ],
                             }
                             if r.kind == "failed" and r.answer.completion
                             else {}

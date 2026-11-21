@@ -586,3 +586,121 @@ def test_a_long_paragraph_is_cut_at_a_sentence() -> None:
     short = _shortened(text)
     assert short.endswith("meningen. […]")
     assert len(short) <= WHOLE_UNIT_TOKENS * 4 + 4
+
+
+def test_a_reply_with_literal_line_breaks_inside_strings_is_read() -> None:
+    """The model sometimes writes real line breaks inside JSON strings. Strict JSON rejects
+    them, and the parser then returned the first quote object instead of the reply."""
+    ctx = context_with("Lönen ska vara minst 90 procent av medianlönen.")
+    quote = '{"source": "S1", "swedish": "minst 90 procent", "translation": "at least 90 percent"}'
+    raw = (
+        '```json\n{\n  "kind": "answered",\n'
+        '  "answer": "First paragraph [S1].\n\nSecond paragraph.",\n'
+        f'  "quotes": [{quote}]\n}}\n```'
+    )
+    answer = parse_answer(Completion(text=raw, model="m"), ctx)
+    assert answer.kind == "answered"
+    assert answer.text.startswith("First paragraph [S1].")
+
+
+@pytest.mark.db
+def test_an_unreadable_reply_is_asked_for_again_once(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    replies = iter(
+        [
+            "The salary must be at least 90 percent of the median salary.",  # no JSON at all
+            json.dumps({"kind": "answered", "answer": "At least 90 percent [S1]."}),
+        ]
+    )
+    llm = ScriptedLLM(lambda request: next(replies))
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        "lönen", date(2026, 11, 20)
+    )
+    assert answer.kind == "answered"
+    first, second = llm.requests
+    assert second.messages[0] == first.messages[0]  # the question
+    assert second.messages[1] == {
+        "role": "assistant",
+        "content": "The salary must be at least 90 percent of the median salary.",
+    }
+    assert "JSON" in second.messages[2]["content"]
+
+
+@pytest.mark.db
+def test_a_second_unreadable_reply_fails_without_a_third_call(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    llm = ScriptedLLM("Not JSON either time.")
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        "lönen", date(2026, 11, 20)
+    )
+    assert answer.kind == "failed" and len(llm.requests) == 2
+
+
+@pytest.mark.db
+def test_an_empty_reply_is_asked_again_without_an_empty_assistant_turn(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    replies = iter(["", json.dumps({"kind": "answered", "answer": "Svar [S1]."})])
+    llm = ScriptedLLM(lambda request: next(replies))
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        "lönen", date(2026, 11, 20)
+    )
+    assert answer.kind == "answered"
+    assert llm.requests[1].messages == llm.requests[0].messages  # the same request, repeated
+
+
+@pytest.mark.db
+def test_a_failing_re_ask_keeps_the_first_answer_and_its_cost(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    from permitnav.llm.port import Completion as C
+
+    class FailsSecond(ScriptedLLM):
+        def complete(self, request: CompletionRequest) -> C:
+            self.requests.append(request)
+            if len(self.requests) == 2:
+                raise LLMError("OpenRouter: timeout")
+            return C(text="Prose, no JSON.", model="m", cost_usd=0.001)
+
+    llm = FailsSecond("")
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        "lönen", date(2026, 11, 20)
+    )
+    assert answer.kind == "failed"
+    assert answer.completion is not None and answer.completion.cost_usd == 0.001
+    assert answer.earlier == []
+
+
+@pytest.mark.db
+def test_a_re_asked_reply_that_is_cut_off_says_it_was_too_long(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    from permitnav.llm.port import Completion as C
+
+    class CutOffSecond(ScriptedLLM):
+        def complete(self, request: CompletionRequest) -> C:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return C(text="Prose.", model="m", extra={"finish_reason": "stop"})
+            return C(
+                text='{"kind": "answered", "answer": "Lo',
+                model="m",
+                extra={"finish_reason": "length"},
+            )
+
+    answer = Answerer(conn, stored, CutOffSecond(""), AnswerConfig(model="m")).answer(
+        "lönen", date(2026, 11, 20)
+    )
+    assert answer.kind == "failed" and "too long" in answer.text
+
+
+def test_the_re_ask_covers_a_missing_answer_field_and_costs_are_floats() -> None:
+    from permitnav.answering.answerer import REASK, Answer
+    from permitnav.evals.answers import AnswerResult
+    from tests.test_retriever import item
+
+    assert '"answer" field' in REASK
+    cost = AnswerResult(item("a", "q", []), Answer(kind="out_of_scope", text="x")).cost_usd
+    assert cost == 0.0 and isinstance(cost, float)

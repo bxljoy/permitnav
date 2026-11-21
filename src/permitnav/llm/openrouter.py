@@ -16,14 +16,13 @@ from collections.abc import Callable
 
 import certifi
 
-from permitnav.llm.port import Completion, CompletionRequest
+from permitnav.llm.port import Completion, CompletionRequest, LLMError
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
 RETRY_STATUSES = {408, 409, 429, 500, 502, 503, 504}
 
 
-class LLMError(RuntimeError):
-    pass
+__all__ = ["LLMError", "OpenRouterLLM"]
 
 
 class OpenRouterLLM:
