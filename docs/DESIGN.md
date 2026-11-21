@@ -477,7 +477,6 @@ pyproject.toml              Python 3.12, managed with uv
 docker-compose.yml          Postgres + pgvector (the app runs natively on the Mac, for the GPU)
 .env.example                DATABASE_URL, OPENROUTER_API_KEY, ANSWER_MODEL, EMBEDDING_MODEL
 migrations/                 001_schema.sql, …
-prompts/                    answer.md, … (in git, D15)
 src/permitnav/
   sources/                  http.py (Http seam), riksdagen.py, migrationsverket.py
   parsing/                  statute.py, webpage.py, types.py
@@ -488,7 +487,8 @@ src/permitnav/
   answering/                answerer.py, context.py, citations.py
   evals/                    golden.py, retrieval_metrics.py, run.py
   api/                      app.py
-  cli.py                    permitnav fetch | ingest | ask | eval
+  prompts/                  answer.md, … (in git, shipped with the package, D15)
+  cli.py                    permitnav fetch | ingest | index | ask | eval
 tests/
   fixtures/                 short statute and page excerpts, with source and fetch date
   …                         tests per module, through its interface
@@ -526,7 +526,7 @@ One more finding: the older wording of 6 kap. 2 § (before 2026-06-01) is **not*
 - **LangGraph (phase 5)** works with its own chat-model wrappers. The `LLM` interface either gets a LangGraph adapter then, or the agent calls `Retriever` and `Answerer` as tools and keeps the `LLM` interface for the plain-RAG baseline. Decide in phase 5; nothing in phase 1 depends on it.
 - **Changes "on the day the government decides"** (found by the statute parser): resolved in slice 2 (migration 002). `unit_version.pending` is `starts` or `ends`; a `starts` wording never applies and is left out of the overlap rule until the source gives a date, when ingest updates it in place.
 - **Undated changes** (slice 2): when a stored wording disappears and the source gives no date for the change, ingest ends it, and starts its replacement, on the day the crawler saw the change, with `dates_estimated = true`. Rebuilding history from the amending acts (phase 4) replaces these estimates.
-- **Transitional links are broad** (slice 2): every point of an amending act links to every section that act amended, so 6 kap. 2 § also gets 2026:295 punkt 4, which is about 20 kap. Before context assembly (slice 6), link a point only to the sections it names ("6 kap. 2 §") when it names any, and keep the broad link as a fallback.
+- **Transitional links are broad** (slice 2; handled in slice 6): every point of an amending act links to every section that act amended. Context assembly now keeps a point only for the sections it names ("6 kap. 2 §"), keeps points that name no section (up to three per hit), and drops points that name only other sections. Ranges ("10 kap. 1–17 §§") are not expanded yet.
 - **Inconsistent consolidated text:** the riksdagen text sometimes gives one section two different upcoming wordings from the same day (seen once: 10 kap. 14 § utlänningslagen, 2027-12-01). The parser keeps the later one and reports a conflict; check such cases against the SFS PDF.
 - **Swedish keyword stemming is incomplete** (slice 3): Postgres's `swedish` configuration maps "medianlönen" to "medianlön" but leaves "anställningsavtalet" and "arbetstillståndet" unchanged, so keyword search misses some definite forms. Phase 2's hybrid search should test this on the golden set and consider a better Swedish dictionary (e.g. a Hunspell `sv_SE` dictionary) or relying on the vector half for inflected forms.
 - **Pages crowd out the law** (slice 5): an English question matches an English Migrationsverket page far better (cosine ~0.78) than the Swedish statute (~0.57), so with pages indexed, statute sections dropped out of the top 10. Phase 1 interleaves law and guidance results (`RetrievalConfig.mix = "interleave"`); law items recovered only partly (R@5 0.46 → 0.29, and R@1 is now always a page). Phase 2's authority-aware fused ranking (D22) and keyword search replace this.

@@ -1,0 +1,29 @@
+"""The LLM interface: one request in, one completion out."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Protocol
+
+
+@dataclass(frozen=True)
+class CompletionRequest:
+    model: str
+    system: str
+    messages: list[dict[str, str]]  # [{"role": "user" | "assistant", "content": ...}]
+    max_tokens: int = 4000
+    # No sampling parameters: current Claude models reject temperature/top_p.
+
+
+@dataclass(frozen=True)
+class Completion:
+    text: str
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float | None = None  # as reported by the provider, if it reports it
+    extra: dict[str, object] = field(default_factory=dict)
+
+
+class LLM(Protocol):
+    def complete(self, request: CompletionRequest) -> Completion: ...

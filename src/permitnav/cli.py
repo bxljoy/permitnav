@@ -281,6 +281,79 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+KIND_LABELS = {
+    "answered": "",
+    "follow_up": "I need one more detail to answer this:",
+    "not_settled": "The rules don't settle this on their own:",
+    "out_of_scope": "Outside what PermitNav covers:",
+    "failed": "Something went wrong:",
+}
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    from datetime import date
+
+    from permitnav.answering.answerer import AnswerConfig, Answerer
+    from permitnav.llm.openrouter import LLMError, OpenRouterLLM
+    from permitnav.retrieval.retriever import Retriever
+
+    model = os.environ.get("ANSWER_MODEL", "").strip()
+    if not model:
+        print("ANSWER_MODEL is not set; see .env.example")
+        return 1
+    try:
+        from permitnav.embedding.bge_m3 import BgeM3Embedder
+
+        embedder = BgeM3Embedder()
+    except ImportError:
+        print("bge-m3 needs the embed extra: uv sync --extra embed")
+        return 1
+    as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+    try:
+        llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
+        with db.connect() as conn:
+            answerer = Answerer(conn, Retriever(conn, embedder), llm, AnswerConfig(model=model))
+            answer = answerer.answer(args.question, as_of=as_of)
+    except LLMError as error:
+        print(f"model call failed: {error}")
+        return 1
+
+    print()
+    if KIND_LABELS.get(answer.kind):
+        print(KIND_LABELS[answer.kind])
+    print(answer.text)
+    if answer.citations:
+        print("\nSources")
+        for c in answer.citations:
+            print(f"  [{c.marker}] {c.heading}")
+            print(f"       {c.dates} | {c.url}")
+            if c.quote:
+                print(f'       "{c.quote}"')
+                if c.translation:
+                    print(f"       (unofficial translation: {c.translation})")
+    credits = []
+    if any(c.authority in ("law", "ordinance") for c in answer.citations):
+        credits.append("Källa: Sveriges riksdag")
+    if any(c.authority == "web_page" for c in answer.citations):
+        credits.append("Källa: Migrationsverket")
+    if credits:
+        print("\n" + " · ".join(credits))
+    print(
+        f"\nAs of {as_of}. Not legal advice; check with Migrationsverket. You are talking to an AI."
+    )
+    if answer.dropped_markers:
+        print(f"(removed citations to unknown sources: {', '.join(answer.dropped_markers)})")
+    if args.show_sources:
+        print("\nShown to the model:")
+        for s in answer.sources:
+            print(f"  [{s.marker}] {s.role:<13} {s.unit_id}")
+    c = answer.completion
+    if c is not None:
+        cost = f", ${c.cost_usd:.4f}" if c.cost_usd is not None else ""
+        print(f"[{c.model}: {c.input_tokens:,} in / {c.output_tokens:,} out tokens{cost}]")
+    return 0 if answer.kind != "failed" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="permitnav")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -298,6 +371,13 @@ def main(argv: list[str] | None = None) -> int:
     index.add_argument("--strategy", nargs="+", default=list(STRATEGIES), choices=list(STRATEGIES))
     index.add_argument("--no-embed", action="store_true", help="only build chunks")
     index.set_defaults(run=cmd_index)
+    ask = sub.add_parser("ask", help="answer a question from the stored sources")
+    ask.add_argument("question")
+    ask.add_argument("--as-of", help="date the answer should apply on (YYYY-MM-DD); default today")
+    ask.add_argument(
+        "--show-sources", action="store_true", help="list everything shown to the model"
+    )
+    ask.set_defaults(run=cmd_ask)
     ev = sub.add_parser("eval", help="run the retrieval eval on a golden-set file")
     ev.add_argument("--file", default="evals/golden.dev.jsonl")
     ev.add_argument("--strategy", default="structure", choices=list(STRATEGIES))
