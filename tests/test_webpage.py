@@ -248,6 +248,25 @@ def test_generated_anchors_never_collide_with_real_ones() -> None:
     assert len(ids) == len(set(ids)) == 3
 
 
+def test_component_generated_ids_fall_back_to_the_heading_text() -> None:
+    """Link cards carry ids like `card-header-4Y2vfY9CK1nvwnbX` that the site can regenerate
+    on any publish; only the heading anchors (`h-…`) are stable enough for a unit id."""
+    html = _page(
+        "<h2 id='card-header-4Y2vfY9CK1nvwnbX'>Anställa från länder utanför EU/EES</h2><p>a</p>"
+        "<h2 id='h-'>Avgift</h2><p>b</p>"
+        "<h2 id='h-Kravforattfaarbetstillstand'>Krav för att få arbetstillstånd</h2><p>c</p>"
+    )
+    units = parse_page(html, SV).units
+    anchors = [u.unit_id.split("#")[1] for u in units]
+    assert anchors == [
+        "anstalla-fran-lander-utanfor-eu-ees",
+        "avgift",
+        "kravforattfaarbetstillstand",
+    ]
+    # The link still jumps to the element the page has today.
+    assert units[0].url == f"{SV}#card-header-4Y2vfY9CK1nvwnbX"
+
+
 def test_robots_txt_failures_stop_the_crawl_and_a_missing_file_allows_all() -> None:
     from permitnav.sources.http import FixtureHttp, HttpResponse
     from permitnav.sources.migrationsverket import ROBOTS, load_robots

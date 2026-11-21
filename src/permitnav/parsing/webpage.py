@@ -152,9 +152,14 @@ def _text(element: Tag | NavigableString | None) -> str:
 
 
 def _anchor(h2: Tag, heading: str) -> tuple[str, str]:
-    """(slug for the unit id, the page's own element id for the link fragment)."""
+    """(slug for the unit id, the page's own element id for the link fragment).
+
+    Only the site's heading anchors (`h-…`, made from the heading text) go into the unit id.
+    Other ids come from page components (`card-header-4Y2vfY9CK1nvwnbX`) and can change on any
+    publish, which would give the same section a new id; the heading text is used instead.
+    """
     element_id = str(h2.get("id") or "")
-    raw = element_id.removeprefix("h-") or heading
+    raw = (element_id.removeprefix("h-") if element_id.startswith("h-") else "") or heading
     slug = re.sub(r"[^a-z0-9]+", "-", _ascii(raw.lower())).strip("-")
     return slug or "section", element_id
 

@@ -32,6 +32,8 @@ The unit of retrieval, citation, verification and evaluation is the **citable un
 | MIG ruling | The whole ruling | `mig:2023:1` |
 | Migrationsverket web page | One heading section | `web:sv/arbeta-i-sverige/…#krav` |
 
+A web section's anchor is the site's own heading anchor (`h-Krav…`, made from the heading text). Ids that page components generate (`card-header-4Y2vfY9CK1nvwnbX`) can change on any publish, so for those, and for headings with no id, the anchor is made from the heading text instead. The link still uses the element id the page has today.
+
 Chunks record which unit they belong to. Metrics, citations and the golden set use unit IDs, never chunk IDs, so the chunking strategy can change without invalidating the evals.
 
 ### D3. Three layers: unit, version, chunk
