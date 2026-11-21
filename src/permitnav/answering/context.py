@@ -23,24 +23,12 @@ import psycopg
 from psycopg import sql
 
 from permitnav.corpus.chunking import estimate_tokens
+from permitnav.parsing.references import section_refs
 from permitnav.retrieval.retriever import APPLIES_ON, Hit
 
 WHOLE_UNIT_TOKENS = 800
 MAX_PROVISIONS_PER_HIT = 3
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
-# "6 kap. 2 §", "6 kap. 2 och 3 §§", "6 kap. 2, 2 a och 3 §§", "10 kap. 1–17 §§"
-SECTION_LIST = re.compile(
-    r"\b(\d+(?: [a-z])?) kap\. ((?:\d+(?: [a-z])?)(?:\s*(?:,|och|–|-)\s*\d+(?: [a-z])?)*)\s*(§§?)"
-)
-LIST_ITEM = re.compile(r"(\d+)(?: ([a-z])(?![a-zåäö]))?")  # "2 a", but not the "o" of "2 och"
-# A reference followed by another statute's name is to that statute, not to this one.
-STATUTE_NAMES = {
-    "sfs:2005:716": ("utlänningslagen", "2005:716"),
-    "sfs:2006:97": ("utlänningsförordningen", "2006:97"),
-}
-OTHER_STATUTE = re.compile(
-    r"\s*(?:första|andra|tredje|fjärde|femte|stycket|punkt|\d|\s)*(lagen|förordningen|\(\d{4}:\d+\)|[a-zåäö]+lagen|[a-zåäö]+förordningen)"
-)
 UNIT_SECTION = re.compile(r"^(sfs:\d{4}:\d+)/(\d+[a-z]?)kap/(\d+[a-z]?)§$")
 
 
@@ -152,30 +140,6 @@ def _provisions(conn: psycopg.Connection, hit: Hit, as_of: date) -> list[tuple]:
         (named if refs else general).append((order, record))
     chosen = sorted(named, key=lambda x: x[0]) + sorted(general, key=lambda x: x[0])
     return [record for _, record in chosen][:MAX_PROVISIONS_PER_HIT]
-
-
-def section_refs(text: str, document: str) -> set[tuple[str, str]]:
-    """(chapter, section) pairs a provision names in `document`, e.g. {("6", "2"), ("6", "3")}
-    for "6 kap. 2 och 3 §§". Ranges are expanded; references followed by another statute's
-    name are left out."""
-    own = STATUTE_NAMES.get(document, ())
-    found: set[tuple[str, str]] = set()
-    for match in SECTION_LIST.finditer(text):
-        after = OTHER_STATUTE.match(text, match.end())
-        if after and not any(name in after.group(1) for name in own):
-            continue  # "8 kap. 2 § utlänningsförordningen" from a law's provision
-        chapter = match[1]
-        items = LIST_ITEM.findall(match[2])
-        separators = re.findall(r"(,|och|–|-)", match[2])
-        sections: list[str] = []
-        for i, (number, letter) in enumerate(items):
-            if i > 0 and separators[i - 1] in ("–", "-") and not letter and items[i - 1][1] == "":
-                start = int(items[i - 1][0])
-                sections += [str(n) for n in range(start + 1, int(number) + 1)]
-            else:
-                sections.append(f"{number} {letter}" if letter else number)
-        found |= {(chapter, section) for section in sections}
-    return found
 
 
 def _stockholm_date(moment: datetime) -> date:

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from permitnav import db
 from permitnav.corpus.chunking import STRATEGIES
+from permitnav.retrieval.retriever import MODES, RetrievalConfig
 
 # Statutes in scope for the first version (D1).
 STATUTES = {
@@ -201,7 +202,6 @@ def cmd_eval(args: argparse.Namespace) -> int:
     from permitnav.evals.golden import load_golden
     from permitnav.evals.run import run_retrieval, slices
     from permitnav.retrieval.retriever import (
-        RetrievalConfig,
         Retriever,
         units_applying_on,
         units_with_same_text,
@@ -224,7 +224,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
         return 1
     with db.connect() as conn:
         existing = dict(conn.execute("SELECT id, document FROM unit").fetchall())
-        retriever = Retriever(conn, embedder, RetrievalConfig(strategy=args.strategy))
+        config = RetrievalConfig(
+            mode=args.mode, strategy=args.strategy, keyword_weight=args.keyword_weight
+        )
+        retriever = Retriever(conn, embedder, config)
         cache: dict = {}
 
         def applying_on(d):
@@ -241,7 +244,11 @@ def cmd_eval(args: argparse.Namespace) -> int:
         if args.include_drafts
         else "checked items"
     )
-    print(f"\nRetrieval eval: {args.file}, strategy={args.strategy}, mode=vector ({label})")
+    weight = f", keyword_weight={args.keyword_weight}" if args.mode == "hybrid" else ""
+    print(
+        f"\nRetrieval eval: {args.file}, strategy={args.strategy}, mode={args.mode}{weight}"
+        f" ({label})"
+    )
     columns = ("R@1", "R@5", "95% CI", "R@10", "MRR", "nDCG@5")
     widths = (5, 5, 13, 5, 5, 6)
     header = " ".join(f"{c:>{w}}" for c, w in zip(columns, widths, strict=True))
@@ -312,7 +319,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
     try:
         llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
         with db.connect() as conn:
-            answerer = Answerer(conn, Retriever(conn, embedder), llm, AnswerConfig(model=model))
+            retriever = Retriever(conn, embedder, RetrievalConfig(mode=args.mode))
+            answerer = Answerer(conn, retriever, llm, AnswerConfig(model=model))
             answer = answerer.answer(args.question, as_of=as_of)
     except LLMError as error:
         print(f"model call failed: {error}")
@@ -373,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     index.set_defaults(run=cmd_index)
     ask = sub.add_parser("ask", help="answer a question from the stored sources")
     ask.add_argument("question")
+    ask.add_argument("--mode", default=RetrievalConfig.mode, choices=list(MODES))
     ask.add_argument("--as-of", help="date the answer should apply on (YYYY-MM-DD); default today")
     ask.add_argument(
         "--show-sources", action="store_true", help="list everything shown to the model"
@@ -381,6 +390,8 @@ def main(argv: list[str] | None = None) -> int:
     ev = sub.add_parser("eval", help="run the retrieval eval on a golden-set file")
     ev.add_argument("--file", default="evals/golden.dev.jsonl")
     ev.add_argument("--strategy", default="structure", choices=list(STRATEGIES))
+    ev.add_argument("--mode", default=RetrievalConfig.mode, choices=list(MODES))
+    ev.add_argument("--keyword-weight", type=float, default=RetrievalConfig.keyword_weight)
     ev.add_argument("--include-drafts", action="store_true", help="development run; not reportable")
     ev.add_argument("--verbose", "-v", action="store_true", help="show each item's ranks")
     ev.add_argument("--out", help="write per-item results as JSON")

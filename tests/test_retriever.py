@@ -57,9 +57,154 @@ def test_pending_and_withdrawn_wordings_are_never_returned(
     assert "sfs:2005:716/6kap/2§" not in {h.unit_id for h in hits}
 
 
-def test_only_vector_mode_exists_in_phase_1(conn: psycopg.Connection) -> None:
-    with pytest.raises(ValueError, match="phase 2"):
-        Retriever(conn, FAKE, RetrievalConfig(mode="hybrid"))
+def test_unknown_modes_are_rejected(conn: psycopg.Connection) -> None:
+    with pytest.raises(ValueError, match="retrieval mode"):
+        Retriever(conn, FAKE, RetrievalConfig(mode="hybrid_rerank"))
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        RetrievalConfig(mode="vector"),
+        RetrievalConfig(mode="keyword"),
+        RetrievalConfig(mode="hybrid", keyword_weight=0.0),
+        RetrievalConfig(mode="hybrid", keyword_weight=1.0),
+    ],
+)
+def test_every_mode_finds_the_section_respects_dates_and_returns_units_once(
+    conn: psycopg.Connection, retriever: Retriever, config: RetrievalConfig
+) -> None:
+    searcher = Retriever(conn, FAKE, config)
+    hits = searcher.search("lönen medianlönen procent lönekravet", as_of=date(2026, 11, 20))
+    assert hits[0].unit_id == "sfs:2005:716/6kap/2§"
+    query = "utlänning ansökt beviljats tillstånd före inresan"
+    today = {h.unit_id: h for h in searcher.search(query, as_of=date(2026, 11, 20), k=50)}
+    later = {h.unit_id: h for h in searcher.search(query, as_of=date(2028, 2, 1), k=50)}
+    assert today[S4].valid_to == date(2028, 1, 1)
+    assert later[S4].valid_from == date(2028, 1, 1)
+    ids = [h.unit_id for h in searcher.search("arbetstillstånd", as_of=date(2026, 11, 20), k=20)]
+    assert len(ids) == len(set(ids))
+
+
+def test_keyword_search_ranks_rare_words_above_common_ones(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    """BM25: "medianlönen" appears in one section, "arbetstillstånd" in many."""
+    searcher = Retriever(conn, FAKE, RetrievalConfig(mode="keyword"))
+    hits = searcher.search("arbetstillstånd medianlönen", as_of=date(2026, 11, 20), k=5)
+    assert hits[0].unit_id == "sfs:2005:716/6kap/2§"
+    assert searcher.search("xyzzy", as_of=date(2026, 11, 20)) == []
+    assert searcher.search("", as_of=date(2026, 11, 20)) == []
+
+
+def test_a_section_the_question_names_comes_first(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    searcher = Retriever(conn, FAKE, RetrievalConfig(mode="hybrid"))
+    for question in (
+        "Vad säger 6 kap. 3 § utlänningslagen?",
+        "What does 6 kap. 3 § say about family members?",
+    ):
+        hits = searcher.search(question, as_of=date(2026, 11, 20))
+        assert hits[0].unit_id == "sfs:2005:716/6kap/3§"
+    assert searcher.search("Vad säger 99 kap. 1 §?", as_of=date(2026, 11, 20))  # unknown: ignored
+
+
+def test_fusion_adds_weighted_reciprocal_ranks_and_merges_identical_texts() -> None:
+    from datetime import UTC, datetime
+
+    from permitnav.retrieval.retriever import Hit, fuse
+
+    def hit(unit: str, text_hash: str) -> Hit:
+        now = datetime(2026, 11, 20, tzinfo=UTC)
+        return Hit(unit, 1, 1, "t", 0.5, "law", "h", "u", None, None, now, text_hash)
+
+    a, b, c, a_copy = hit("A", "ha"), hit("B", "hb"), hit("C", "hc"), hit("A2", "ha")
+    # b is 2nd in both rankings; a is 1st in one only: 2/62 > 1/61.
+    assert [h.unit_id for h in fuse([[a, b], [c, b]])] == ["B", "A", "C"]
+    # Equal ranks tie (broken by unit id); the weights decide which ranking's top wins.
+    assert [h.unit_id for h in fuse([[c], [a]])] == ["A", "C"]
+    assert [h.unit_id for h in fuse([[c], [a]], [1.0, 0.5])] == ["C", "A"]
+    # An identical copy found by the second ranking is the same item, shown as the first's.
+    assert [h.unit_id for h in fuse([[a], [a_copy]])] == ["A"]
+
+
+def test_named_units_follow_the_statute_the_question_names() -> None:
+    from permitnav.parsing.references import named_units
+
+    assert named_units("Vad säger 6 a kap. 1 § utlänningslagen?") == ["sfs:2005:716/6akap/1§"]
+    assert named_units("enligt 4 kap. 4 e § utlänningsförordningen") == ["sfs:2006:97/4kap/4e§"]
+    assert named_units("What does 6 kap. 2 a § say?") == [
+        "sfs:2005:716/6kap/2a§",
+        "sfs:2006:97/6kap/2a§",
+    ]
+    assert named_units("What salary do I need?") == []
+    # Joining words and English names still say which statute (review finding 1).
+    for question in (
+        "Vad säger 4 kap. 4 e § i utlänningsförordningen?",
+        "What does 4 kap. 4 e § of the Aliens Ordinance say?",
+        "enligt 4 kap. 4 e § förordningen (2006:97)",
+    ):
+        assert named_units(question) == ["sfs:2006:97/4kap/4e§"], question
+    assert named_units("6 kap. 2 § i lagen (2005:716)") == ["sfs:2005:716/6kap/2§"]
+    # The question's order, not string order (finding 2).
+    assert named_units("6 kap. 10 och 2 §§ utlänningslagen") == [
+        "sfs:2005:716/6kap/10§",
+        "sfs:2005:716/6kap/2§",
+    ]
+    # Ways people write it (finding 7).
+    for question in (
+        "Vad säger 6 kap 2 § utlänningslagen?",
+        "6 Kap. 2 § utlänningslagen",
+        "chapter 6, section 2 of the Aliens Act",
+        "Chapter 6 section 2 Aliens Act",
+    ):
+        assert named_units(question) == ["sfs:2005:716/6kap/2§"], question
+    assert named_units("chapter 6 section 2 a of the Aliens Act") == ["sfs:2005:716/6kap/2a§"]
+
+
+def test_transitional_wording_that_names_no_statute_still_counts_for_this_one() -> None:
+    from permitnav.parsing.references import section_refs
+
+    law = "sfs:2005:716"
+    assert section_refs("6 kap. 2 § i den äldre lydelsen gäller", law) == {("6", "2")}
+    assert section_refs("6 kap. 2 § i utlänningsförordningen", law) == set()
+
+
+def test_all_named_sections_come_first_and_ranges_cannot_fill_the_results(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    from permitnav.retrieval.retriever import MAX_NAMED
+
+    hits = retriever.search("Vad säger 6 kap. 3 och 1 §§ utlänningslagen?", date(2026, 11, 20))
+    assert [h.unit_id for h in hits[:2]] == ["sfs:2005:716/6kap/3§", "sfs:2005:716/6kap/1§"]
+    hits = retriever.search("6 kap. 1–9 §§ utlänningslagen", date(2026, 11, 20), k=5)
+    assert len({h.unit_id for h in hits}) == 5
+    assert MAX_NAMED == 3
+    assert [h.unit_id for h in hits[:3]] == [
+        "sfs:2005:716/6kap/1§",
+        "sfs:2005:716/6kap/2§",
+        "sfs:2005:716/6kap/3§",
+    ]
+
+
+def test_negative_keyword_weights_are_rejected(conn: psycopg.Connection) -> None:
+    with pytest.raises(ValueError, match="keyword_weight"):
+        Retriever(conn, FAKE, RetrievalConfig(mode="hybrid", keyword_weight=-0.5))
+
+
+def test_keyword_search_skips_wordings_that_do_not_apply(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    """A withdrawn wording is not matched and the others keep their order. (The statistics
+    use the same date filter; scores aren't exposed, so that part is checked by reading.)"""
+    searcher = Retriever(conn, FAKE, RetrievalConfig(mode="keyword"))
+    query = "arbetstillstånd medianlönen"
+    before = [(h.unit_id) for h in searcher.search(query, as_of=date(2026, 11, 20), k=10)]
+    conn.execute("UPDATE unit_version SET withdrawn = true WHERE unit_id = 'sfs:2005:716/6kap/2§'")
+    after = [h.unit_id for h in searcher.search(query, as_of=date(2026, 11, 20), k=10)]
+    assert "sfs:2005:716/6kap/2§" in before and "sfs:2005:716/6kap/2§" not in after
+    assert [u for u in before if u != "sfs:2005:716/6kap/2§"] == after[: len(before) - 1]
 
 
 def item(item_id: str, question: str, expected, language: str = "en") -> GoldenItem:

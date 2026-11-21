@@ -538,3 +538,37 @@ One more finding: the older wording of 6 kap. 2 § (before 2026-06-01) is **not*
 - **Search has no relevance floor** (same run): search always returns the k nearest sections, even for a question nothing in the corpus answers. "How do I exchange my foreign driving licence?" sent 11 unrelated sources (4,814 tokens) to the model, which declined correctly but at full cost. Phase 2: set a minimum similarity score from the golden set (in-scope versus out-of-scope items); when nothing passes it, skip the answer model or tell it that no relevant sources were found.
 - **Unrelated topics get the wrong label** (same run): the prompt defines out of scope only as asylum, protection and deportation, so the driving-licence question came back as `not_settled` ("the rules don't settle this"). Phase 2: widen rule 7 of `prompts/answer.md` to any topic outside work permits, their family members and permanent residence, and add unrelated-topic items to the golden set (D18).
 - **OpenRouter model IDs** for Claude Haiku 5.5 and the Mistral judge are configuration values, to be confirmed against OpenRouter's model list at setup.
+
+## Phase 2
+
+### Build order
+
+Each slice ends with the retrieval eval (dev set, drafts included, so development numbers only) and a code review. Retrieval slices come first because they are measurable without an LLM; the judge needs your hand-labelled answers.
+
+1. **Hybrid search:** BM25 keyword search over `chunk.tsv`, Reciprocal Rank Fusion, and a direct lookup of sections the question names. *(Done; results below.)*
+2. **Questions the corpus can't answer:** a relevance floor calibrated on the golden set, the wider out-of-scope rule in the prompt, unrelated-topic golden items (D18).
+3. **Cross-references:** add sections a retrieved section refers to ("2 § andra stycket") to the context.
+4. **Query translation for keyword search:** English questions translated to Swedish before BM25; then re-measure the keyword weight.
+5. **Authority-aware ranking (D22):** replaces the law/guidance interleaving.
+6. **Reranker:** `bge-reranker-v2-m3` over the top 30–50; gain and latency.
+7. **LLM judge:** calibrated on ~30 answers you label, ≥85% agreement (D19).
+8. **Answer-model comparison (D15):** Haiku 5.5, Sonnet 5.5, one Mistral model.
+9. **Experiment grid and the hold-out run:** MLflow; your golden-set review (`checked`), then one hold-out run.
+
+### Slice 1 results: hybrid search
+
+`RetrievalConfig.mode` is `vector`, `keyword` (BM25 only) or `hybrid` (the default). Hybrid fuses the vector and keyword rankings with RRF (1 / (60 + rank), the keyword ranking weighted by `keyword_weight`), within each source group, and puts up to three sections the question names ("6 kap. 2 a § utlänningslagen", "chapter 6, section 2 of the Aliens Act") first, in the question's order. BM25 is computed in SQL: document frequencies from the GIN index, each chunk matched with its own text-search configuration.
+
+Dev set, 48 items, structure chunks:
+
+| Configuration | R@1 | R@5 | R@10 | MRR | Identifier (8) |
+|---|---|---|---|---|---|
+| vector (phase 1) | 0.06 | 0.32 [0.21, 0.44] | 0.45 | 0.18 | 0.12 |
+| keyword only | 0.03 | 0.10 | 0.18 | 0.06 | 0.00 |
+| hybrid, keyword weight 1.0 | 0.24 | 0.40 | 0.57 | 0.32 | 1.00 |
+| hybrid, keyword weight 0.3 | 0.25 | 0.46 | 0.61 | 0.35 | 1.00 |
+| **hybrid, keyword weight 0 (default)** | 0.23 | **0.47 [0.34, 0.59]** | 0.57 | 0.33 | 1.00 |
+
+- **The gain comes from the named-section lookup.** Identifier questions went from 0.12 to 1.00; nothing else changed at weight 0.
+- **BM25 helps Swedish questions and hurts English ones.** Swedish R@10 rose from 0.56 to 0.69 at weight 0.3, but English R@5 fell, because an English question's words, stemmed as Swedish, match noise in the law. The default stays at 0 until query translation (slice 4) gives keyword search Swedish words to match; the differences between 0, 0.3 and 0.5 are one or two items, inside the noise.
+- **Performance:** BM25's per-term document counts must be computed once per query (`MATERIALIZED`); inlined, Postgres recomputed them for every matching row, about 1 s per search instead of ~50 ms.
