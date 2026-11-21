@@ -30,6 +30,7 @@ from permitnav.corpus.indexing import EMBEDDING_TABLES, to_pgvector
 from permitnav.embedding.port import Embedder
 from permitnav.parsing.references import named_units
 from permitnav.retrieval.translate import Translator, is_swedish
+from permitnav.retrieval.variants import collapse_variants
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,10 @@ class RetrievalConfig:
     # translated_vector also for the law's vector ranking.
     translate: bool = False
     translated_vector: bool = False
+    # One slot per near-duplicate page section (the same section on the employee, artist,
+    # seasonal-worker… pages; retrieval/variants.py). Measured in phase 2 slice 5: recall
+    # unchanged, but without it 36 of 512 top-8 slots on the dev set held such a copy.
+    collapse_variants: bool = True
     # Hybrid: the keyword ranking's weight in the fusion, relative to the vector ranking's 1.
     # 0 keeps only the vector ranking and the lookup of sections the question names. Measured
     # in phase 2 (dev set, 48 items): without translation R@5 0.47 at 0, 0.46 at 0.3, 0.40 at
@@ -155,21 +160,21 @@ class Retriever:
             }
             first = [found[u] for u in named if u in found][:MAX_NAMED]
         depth = k + len(first)  # room for results the named sections duplicate
+        # Collapsing variants removes results, so rank deeper first and cut after.
+        fetch = 3 * depth if self.config.collapse_variants else depth
+
+        def ranked(types, exclude, order_vector):
+            hits = self._ranking(keyword, vector, as_of, fetch, types, exclude, order_vector)
+            if self.config.collapse_variants:
+                hits = collapse_variants(hits, query)
+            return hits[:depth]
+
         if self.config.mix == "none":
-            rest = self._ranking(keyword, vector, as_of, depth, None, False, None)
+            rest = ranked(None, False, None)
         else:
             groups = [(t, False) for t in SOURCE_GROUPS.values()] + [(LISTED_TYPES, True)]
             rankings = [
-                self._ranking(
-                    keyword,
-                    vector,
-                    as_of,
-                    depth,
-                    t,
-                    x,
-                    law_order if t == SOURCE_GROUPS["law"] else None,
-                )
-                for t, x in groups
+                ranked(t, x, law_order if t == SOURCE_GROUPS["law"] else None) for t, x in groups
             ]
             rankings = [hits for hits in rankings if hits]
             rankings.sort(key=lambda hits: -hits[0].score)  # the best-matching group first

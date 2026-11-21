@@ -78,6 +78,7 @@ def _retrieval_config(args: argparse.Namespace) -> RetrievalConfig:
         # A translation costs a model call: only when keyword search or the law vector uses it.
         translate=translate and (keyword_runs or args.translated_vector),
         translated_vector=args.translated_vector,
+        collapse_variants=not args.no_collapse_variants,
     )
 
 
@@ -87,6 +88,11 @@ def _add_retrieval_options(parser: argparse.ArgumentParser) -> None:
         "--keyword-weight",
         type=float,
         help=f"hybrid fusion weight (default {TRANSLATED_KEYWORD_WEIGHT} with translation, else 0)",
+    )
+    parser.add_argument(
+        "--no-collapse-variants",
+        action="store_true",
+        help="keep near-duplicate page sections (employee, artist, seasonal… pages) apart",
     )
     translation = parser.add_mutually_exclusive_group()
     translation.add_argument(
@@ -328,6 +334,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     weight = f", keyword_weight={config.keyword_weight}" if args.mode == "hybrid" else ""
     weight += ", translate" if config.translate else ""
     weight += " (+ law vector)" if config.translated_vector else ""
+    weight += ", collapse variants" if config.collapse_variants else ""
     print(
         f"\nRetrieval eval: {args.file}, strategy={args.strategy}, mode={args.mode}{weight}"
         f" ({label})"

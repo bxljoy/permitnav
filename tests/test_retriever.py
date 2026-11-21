@@ -395,3 +395,33 @@ def test_a_mistyped_page_section_is_a_golden_set_error(
     typo = item("typo", "x", [[f"{BASE}#lonekrav"]])
     run = run_retrieval([typo], retriever, existing, lambda d: units_applying_on(conn, d))
     assert run.unknown_units == {"typo": [f"{BASE}#lonekrav"]}
+
+
+def test_near_duplicate_page_variants_take_one_slot(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    from permitnav.corpus.store import ingest_page
+    from permitnav.parsing.webpage import parse_page
+    from tests.test_webpage import FIXTURE as PAGE
+    from tests.test_webpage import SV, raw_page
+
+    # The artist page: the same sections with a word changed, so not identical text.
+    artist_url = SV.replace("/anstalld.html", "/artist.html")
+    artist = PAGE.replace("fackförbund", "fackförbund för artister")
+    ingest_page(conn, raw_page(PAGE, 20), parse_page(PAGE, SV))
+    ingest_page(conn, raw_page(artist, 20, url=artist_url), parse_page(artist, artist_url))
+    build_chunks(conn, "structure")
+    embed_chunks(conn, FAKE)
+    query = "fackförbund erbjudandet anställning yttra"
+    anchor = "#fackforbundetfarmojlighetattyttrasig"
+
+    def pages(config: RetrievalConfig, question: str = query) -> list[str]:
+        hits = Retriever(conn, FAKE, config).search(question, as_of=date(2026, 11, 21), k=10)
+        return [h.unit_id.split("/")[-1] for h in hits if h.unit_id.endswith(anchor)]
+
+    assert sorted(pages(RetrievalConfig(collapse_variants=False))) == [
+        "anstalld" + anchor,
+        "artist" + anchor,
+    ]
+    assert pages(RetrievalConfig()) == ["anstalld" + anchor]  # the general page
+    assert pages(RetrievalConfig(), "Jag är artist. " + query) == ["artist" + anchor]
