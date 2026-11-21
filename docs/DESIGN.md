@@ -550,7 +550,7 @@ Each slice ends with the retrieval eval (dev set, drafts included, so developmen
 3. **Cross-references:** add sections a retrieved section refers to ("2 § andra stycket") to the context. *(Done; results below.)*
 4. **Query translation for keyword search:** English questions translated to Swedish before BM25; then re-measure the keyword weight. *(Done; results below.)*
 5. **Authority-aware ranking (D22):** replaces the law/guidance interleaving. *(Done, re-scoped by measurement: interleaving stays; near-duplicate page variants are collapsed. Results below.)*
-6. **Reranker:** `bge-reranker-v2-m3` over the top 30–50; gain and latency.
+6. **Reranker:** `bge-reranker-v2-m3` over the top 30–50; gain and latency. *(Done; results below.)*
 7. **LLM judge:** calibrated on ~30 answers you label, ≥85% agreement (D19).
 8. **Answer-model comparison (D15):** Haiku 5.5, Sonnet 5.5, one Mistral model.
 9. **Experiment grid and the hold-out run:** MLflow; your golden-set review (`checked`), then one hold-out run.
@@ -642,4 +642,27 @@ The plan was to replace the law/guidance interleaving with an authority-aware ra
 - **Agency items do not fail because the law takes their slots:** with no law in the results at all they still score 0.38. They fail inside the page ranking. The expected sections were at ranks 23–39, so this is ranking quality, which the reranker (slice 6) addresses. Some expected sections are also debatable (an applicant's "prepare your application" section versus the employer's version of it), which the golden-set review should settle.
 - **Near-duplicate page variants are collapsed (`retrieval/variants.py`, `RetrievalConfig.collapse_variants`, on by default).** Migrationsverket publishes the same section on parallel pages for employees, artists, athletes, ICT permits, seasonal workers, seafarers, researchers and others: 456 sections appear on two or more sibling pages. Embeddings cannot separate them from different sections (variants 0.85–0.96; different sections on one page up to 0.95), but the structure can: the same section anchor, compared whole, on sibling pages of the known variant families (general and specialised pages), excluding intros. Other sibling pages that share a heading, such as the pages for a first application and for an extension, differ in content and stay apart. A group takes one slot where its best member ranked, with that member's score (so the relevance floor and the group order are unaffected); it shows the variant the question names ("I'm an artist", whole unambiguous words only), else the general page (employees), else the best-ranked one.
 - **Effect:** recall unchanged (R@5 0.55 with and without), because the missed sections ranked far below the freed slots. But without collapsing, 36 of the 512 top-8 slots on the dev set (8 sources × 64 questions) held a section with the same anchor as one on a sibling page already shown, in 21 of 64 questions; with it, 5, all on sibling pages outside the variant families, kept apart on purpose. The answer model sees more distinct material.
+
+### Slice 6 results: reranking
+
+- **Reranker (`reranking/`):** a port (`score(question, texts)`), `BgeReranker` (`BAAI/bge-reranker-v2-m3` with sentence-transformers, Mac GPU in half precision, pairs capped at 512 tokens) and a fake for tests. It reorders each source group's top `rerank_depth` candidates before variant collapsing; named sections still come first. Opt-in: `--rerank` (`RetrievalConfig.rerank`).
+- **Cost:** a one-time 2.3 GB download, 4.6 s to load, about 2.6 GB of memory. Per question, about 4 s more on the Mac GPU at depth 20 (5.5 s with a 1,024-token cap; 2.4 s at depth 10); the eval goes from 20 s to about 220 s for 48 questions. A CPU-only server would be several times slower.
+
+Dev set, 48 items (hybrid, translation, keyword weight 0.5, variants collapsed):
+
+| Configuration | R@5 [95% CI] | R@10 | MRR | Law R@5 | Agency R@5 | Time per question added |
+|---|---|---|---|---|---|---|
+| no reranker | 0.55 [0.43, 0.68] | 0.67 | 0.38 | 0.69 | 0.38 | – |
+| rerank top 10 | 0.58 | 0.68 | 0.40 | 0.67 | 0.50 | ~2.4 s |
+| **rerank top 20** (512 tokens) | **0.61 [0.49, 0.73]** | 0.72 | 0.41 | 0.67 | **0.75** | **~4 s** |
+| rerank top 20 (1,024 tokens)* | 0.61 | 0.76 | 0.42 | 0.71 | 0.62 | ~5.5 s |
+| rerank top 30* | 0.59 | 0.76 | 0.41 | 0.67 | 0.62 | ~7 s |
+| one ranking by reranker score (`--mix rerank`)* | 0.45 | 0.56 | 0.33 | 0.38 | 1.00 | ~7 s |
+
+\* Measured before the code review's fixes (sigmoid scores; candidates past the rerank depth dropped instead of kept after the reranked ones). The rows without a star were measured after them; rerank top 20 gave the same figures before and after.
+
+- **The gain is where slice 5 pointed:** agency items, whose right sections ranked 23–39, go from 0.38 to 0.62–0.75 (R@10 to 1.00). Overall R@5 0.55 → 0.61; multi-source items 0.12 → 0.25.
+- **Interleaving still matters:** one ranking by reranker score, which unlike cosine compares across groups, lets the plain-language pages push law items from 0.69 to 0.38. The cross-encoder prefers explanations to statute text, just as cosine does.
+- **Deeper is not better:** 30 candidates add time without gain; 20 is the best on every measure.
+- **For phase 3 (hosting):** measured on CPU (the M3's cores, full precision), one question at depth 20 (40 pairs) takes 8.8 s with 2 threads and 7.4 s with 4; a typical cloud vCPU is slower. So the local model on the planned 8 GB CPU server would add 8 s or more to every answer. A hosted rerank API was not measured: it needs an account with a provider that offers one (OpenRouter does not). The options are a hosted rerank API (no memory cost, a per-call price, and EU data processing to check), a server with a GPU, or depth 10 on a bigger CPU server (R@5 0.58 instead of 0.61). Until that decision, reranking stays off by default; evals that use it say so in their header.
 

@@ -84,3 +84,12 @@ def test_named_variants_are_matched_on_words_not_parts_of_words() -> None:
     assert named_variants("Vem bär ansvaret för att lönen är rätt i praktiken?") == set()
     assert named_variants("I'm the family member of a student. Can I work?") == set()
     assert named_variants("Can I do research on my rights? Ship my documents?") == set()
+
+
+def test_a_group_keeps_its_best_cosine_score_when_the_reranker_put_another_first() -> None:
+    import dataclasses
+
+    artist = dataclasses.replace(hit(EXT + "artists" + PREP), score=0.55, rerank_score=3.0)
+    general = dataclasses.replace(hit(EXT + "employees" + PREP), score=0.62, rerank_score=1.0)
+    (shown,) = collapse_variants([artist, general], "What must be prepared?")
+    assert (shown.unit_id, shown.score, shown.rerank_score) == (general.unit_id, 0.62, 3.0)

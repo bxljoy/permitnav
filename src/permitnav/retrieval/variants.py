@@ -155,7 +155,16 @@ def collapse_variants(hits: list[Hit], question: str) -> list[Hit]:
             out.append(hit)
         elif key not in placed:
             placed.add(key)
-            # The group's best score (its first member's), so the relevance floor and the
-            # ordering of source groups see what the search found, not the display choice.
-            out.append(dataclasses.replace(chosen(groups[key]), score=hit.score))
+            # The group's best cosine score and its first member's reranker score, so the
+            # relevance floor and the ordering of source groups see what the search found, not
+            # which variant is displayed. (After reranking, the first member need not have the
+            # best cosine score.)
+            members = groups[key]
+            out.append(
+                dataclasses.replace(
+                    chosen(members),
+                    score=max(m.score for m in members),
+                    rerank_score=hit.rerank_score,
+                )
+            )
     return out

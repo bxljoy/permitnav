@@ -13,6 +13,10 @@ when something uses it: keyword search then matches Swedish chunks with the Swed
 English pages with the original, and with `translated_vector` the law's vector ranking is
 ordered by the Swedish text too. Scores are always against the original question.
 
+With `rerank`, a cross-encoder (reranking/) reorders each ranking's top `rerank_depth`
+candidates; with `mix="rerank"` the groups are merged into one ranking by its scores, which,
+unlike cosine scores, compare across law and pages.
+
 Returns citable units, not chunks: when several chunks of one unit match, the best one
 represents the unit (D2). Only wordings that apply on `as_of` are searched (D8, D5):
 wordings waiting for a government decision, and withdrawn ones, never are.
@@ -20,6 +24,7 @@ wordings waiting for a government decision, and withdrawn ones, never are.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -29,6 +34,7 @@ from psycopg import sql
 from permitnav.corpus.indexing import EMBEDDING_TABLES, to_pgvector
 from permitnav.embedding.port import Embedder
 from permitnav.parsing.references import named_units
+from permitnav.reranking.port import Reranker
 from permitnav.retrieval.translate import Translator, is_swedish
 from permitnav.retrieval.variants import collapse_variants
 
@@ -49,6 +55,7 @@ class Hit:
     valid_to: date | None
     fetched_at: datetime  # when the crawler first saw this wording
     text_hash: str  # identical wordings (repeated page sections) share it
+    rerank_score: float | None = None  # the reranker's, when reranking; orders the hits
 
 
 # Which wordings apply on a date (D8, D5). Web pages are dated by when the crawler saw them,
@@ -90,7 +97,7 @@ class RetrievalConfig:
     # "interleave": search law and guidance separately and alternate the results, so pages in
     # the question's language cannot push the (Swedish) law out of the top k. "none": one
     # ranking over everything.
-    mix: str = "interleave"
+    mix: str = "interleave"  # or "none", or "rerank" (one ranking by reranker score)
     candidates: int = 50  # per ranking, before fusion (hybrid)
     # Translate English questions to Swedish for keyword search (needs a Translator), and with
     # translated_vector also for the law's vector ranking.
@@ -100,6 +107,11 @@ class RetrievalConfig:
     # seasonal-worker… pages; retrieval/variants.py). Measured in phase 2 slice 5: recall
     # unchanged, but without it 36 of 512 top-8 slots on the dev set held such a copy.
     collapse_variants: bool = True
+    # Reorder each ranking's top candidates with a cross-encoder (needs a Reranker). Measured in
+    # phase 2 slice 6: R@5 0.55 -> 0.61 at depth 20 (agency items 0.38 -> 0.62-0.75), at about
+    # 4 s per question on the Mac GPU; off by default until the phase 3 hosting decision.
+    rerank: bool = False
+    rerank_depth: int = 20
     # Hybrid: the keyword ranking's weight in the fusion, relative to the vector ranking's 1.
     # 0 keeps only the vector ranking and the lookup of sections the question names. Measured
     # in phase 2 (dev set, 48 items): without translation R@5 0.47 at 0, 0.46 at 0.3, 0.40 at
@@ -115,18 +127,26 @@ class Retriever:
         embedder: Embedder,
         config: RetrievalConfig | None = None,
         translator: Translator | None = None,
+        reranker: Reranker | None = None,
     ) -> None:
         self._conn = conn
         self._embedder = embedder
         self._translator = translator
+        self._reranker = reranker
         self.config = config or RetrievalConfig()
+        if self.config.rerank and reranker is None:
+            raise ValueError("rerank=True needs a reranker")
+        if self.config.mix == "rerank" and not self.config.rerank:
+            raise ValueError('mix="rerank" needs rerank=True')
+        if self.config.rerank_depth < 1:
+            raise ValueError("rerank_depth must be >= 1")
         if self.config.translate and translator is None:
             raise ValueError("translate=True needs a translator")
         if self.config.translated_vector and not self.config.translate:
             raise ValueError("translated_vector needs translate=True")
         if self.config.mode not in MODES:
             raise ValueError(f"unknown retrieval mode {self.config.mode!r}; one of {MODES}")
-        if self.config.mix not in ("interleave", "none"):
+        if self.config.mix not in ("interleave", "none", "rerank"):
             raise ValueError(f"unknown mix {self.config.mix!r}")
         if self.config.keyword_weight < 0 or self.config.candidates < 1:
             raise ValueError("keyword_weight must be >= 0 and candidates >= 1")
@@ -162,9 +182,14 @@ class Retriever:
         depth = k + len(first)  # room for results the named sections duplicate
         # Collapsing variants removes results, so rank deeper first and cut after.
         fetch = 3 * depth if self.config.collapse_variants else depth
+        if self.config.rerank:
+            fetch = max(fetch, self.config.rerank_depth)
 
         def ranked(types, exclude, order_vector):
             hits = self._ranking(keyword, vector, as_of, fetch, types, exclude, order_vector)
+            if self.config.rerank:  # the top candidates reordered; the rest kept after them
+                cut = self.config.rerank_depth
+                hits = self._rerank(query, hits[:cut]) + hits[cut:]
             if self.config.collapse_variants:
                 hits = collapse_variants(hits, query)
             return hits[:depth]
@@ -177,14 +202,24 @@ class Retriever:
                 ranked(t, x, law_order if t == SOURCE_GROUPS["law"] else None) for t, x in groups
             ]
             rankings = [hits for hits in rankings if hits]
-            rankings.sort(key=lambda hits: -hits[0].score)  # the best-matching group first
-            rest = [
-                hits[position]
-                for position in range(depth)
-                for hits in rankings
-                if position < len(hits)
-            ]
+            if self.config.mix == "rerank":  # one ranking: reranker scores compare across groups
+                rest = sorted((hit for hits in rankings for hit in hits), key=_by_rerank_score)
+            else:
+                # The best-matching group first: by reranker score when reranking.
+                rankings.sort(key=lambda hits: -_order_score(hits[0], self.config.rerank))
+                rest = [
+                    hits[position]
+                    for position in range(depth)
+                    for hits in rankings
+                    if position < len(hits)
+                ]
         return _unique(first + rest)[:k]
+
+    def _rerank(self, question: str, hits: list[Hit]) -> list[Hit]:
+        assert self._reranker is not None
+        scores = self._reranker.score(question, [h.text for h in hits])
+        scored = [dataclasses.replace(h, rerank_score=s) for h, s in zip(hits, scores, strict=True)]
+        return sorted(scored, key=_by_rerank_score)  # stable: ties keep their order
 
     def _uses_translation(self) -> bool:
         """Translation costs a model call: only when keyword search or the law's vector
@@ -195,7 +230,8 @@ class Retriever:
         keyword_runs = config.mode == "keyword" or (
             config.mode == "hybrid" and config.keyword_weight > 0
         )
-        return keyword_runs or (config.translated_vector and config.mix == "interleave")
+        # The law is ordered by the translation whenever groups are searched separately.
+        return keyword_runs or (config.translated_vector and config.mix != "none")
 
     def _ranking(
         self,
@@ -344,6 +380,18 @@ NEGATIVE_BM25 = """-(
        + 1.2 * (1 - 0.75 + 0.75 * length(c.tsv) / NULLIF(co.avglen, 0))))
   FROM unnest(c.tsv) AS x JOIN df d ON d.cfg = c.ts_config AND d.lexeme = x.lexeme
 )"""
+
+
+def _order_score(hit: Hit, reranked: bool) -> float:
+    if not reranked:
+        return hit.score
+    return hit.rerank_score if hit.rerank_score is not None else float("-inf")
+
+
+def _by_rerank_score(hit: Hit) -> tuple[bool, float]:
+    """Highest reranker score first; hits the reranker did not score after all scored ones.
+    (Raw scores can be negative, so a missing score is not 0.)"""
+    return (hit.rerank_score is None, -(hit.rerank_score or 0.0))
 
 
 def fuse(rankings: list[list[Hit]], weights: list[float] | None = None) -> list[Hit]:

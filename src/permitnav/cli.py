@@ -52,6 +52,17 @@ def _translator(enabled: bool):
     return LLMTranslator(llm, model.strip(), cache_path=_translations_cache())
 
 
+def _reranker(enabled: bool):
+    """The local cross-encoder (phase 2, slice 6), or None when reranking is off."""
+    if not enabled:
+        return None
+    try:
+        from permitnav.reranking.bge import BgeReranker
+    except ImportError:
+        raise SystemExit("the reranker needs the embed extra: uv sync --extra embed") from None
+    return BgeReranker()
+
+
 def _translation_cost(translator) -> str:
     if translator is None or not translator.calls:
         return ""
@@ -66,6 +77,11 @@ TRANSLATED_KEYWORD_WEIGHT = 0.5
 
 
 def _retrieval_config(args: argparse.Namespace) -> RetrievalConfig:
+    # Checked before any model is loaded, so a bad option fails at once with a message.
+    if args.mix == "rerank" and not args.rerank:
+        raise SystemExit("--mix rerank needs --rerank")
+    if args.rerank_depth < 1:
+        raise SystemExit("--rerank-depth must be at least 1")
     translate = not args.no_translate
     weight = args.keyword_weight
     if weight is None:
@@ -79,6 +95,9 @@ def _retrieval_config(args: argparse.Namespace) -> RetrievalConfig:
         translate=translate and (keyword_runs or args.translated_vector),
         translated_vector=args.translated_vector,
         collapse_variants=not args.no_collapse_variants,
+        rerank=args.rerank,
+        rerank_depth=args.rerank_depth,
+        mix=args.mix,
     )
 
 
@@ -88,6 +107,16 @@ def _add_retrieval_options(parser: argparse.ArgumentParser) -> None:
         "--keyword-weight",
         type=float,
         help=f"hybrid fusion weight (default {TRANSLATED_KEYWORD_WEIGHT} with translation, else 0)",
+    )
+    parser.add_argument(
+        "--rerank", action="store_true", help="reorder candidates with bge-reranker-v2-m3 (local)"
+    )
+    parser.add_argument("--rerank-depth", type=int, default=RetrievalConfig.rerank_depth)
+    parser.add_argument(
+        "--mix",
+        default=RetrievalConfig.mix,
+        choices=["interleave", "none", "rerank"],
+        help="how law and guidance results combine (rerank: one ranking by reranker score)",
     )
     parser.add_argument(
         "--no-collapse-variants",
@@ -306,7 +335,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         translator = _translator(config.translate)
         with db.connect() as conn:
             existing = dict(conn.execute("SELECT id, document FROM unit").fetchall())
-            retriever = Retriever(conn, embedder, config, translator)
+            retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
             cache: dict = {}
 
             def applying_on(d):
@@ -335,6 +364,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
     weight += ", translate" if config.translate else ""
     weight += " (+ law vector)" if config.translated_vector else ""
     weight += ", collapse variants" if config.collapse_variants else ""
+    weight += f", rerank top {config.rerank_depth}" if config.rerank else ""
+    weight += f", mix={config.mix}" if config.mix != "interleave" else ""
     print(
         f"\nRetrieval eval: {args.file}, strategy={args.strategy}, mode={args.mode}{weight}"
         f" ({label})"
@@ -413,7 +444,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         with db.connect() as conn:
             config = _retrieval_config(args)
             translator = _translator(config.translate)
-            retriever = Retriever(conn, embedder, config, translator)
+            retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
             answer_config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR)
             answerer = Answerer(conn, retriever, llm, answer_config)
             answer = answerer.answer(args.question, as_of=as_of)
@@ -498,7 +529,7 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
         print(f"model call failed: {error}")
         return 1
     with db.connect() as conn:
-        retriever = Retriever(conn, embedder, config, translator)
+        retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
         answerer = Answerer(conn, retriever, llm, AnswerConfig(model=model, min_score=floor))
         results = run_answers(
             items,
