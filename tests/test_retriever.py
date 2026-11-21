@@ -207,7 +207,9 @@ def test_keyword_search_skips_wordings_that_do_not_apply(
     assert [u for u in before if u != "sfs:2005:716/6kap/2§"] == after[: len(before) - 1]
 
 
-def item(item_id: str, question: str, expected, language: str = "en") -> GoldenItem:
+def item(
+    item_id: str, question: str, expected, language: str = "en", expected_kind: str = "answered"
+) -> GoldenItem:
     return GoldenItem(
         id=item_id,
         question=question,
@@ -218,6 +220,7 @@ def item(item_id: str, question: str, expected, language: str = "en") -> GoldenI
         expected=tuple(tuple(g) for g in expected),
         review="draft",
         authority="law",
+        expected_kind=expected_kind,
     )
 
 

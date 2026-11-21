@@ -4,6 +4,9 @@ Plain RAG for phase 1: retrieve, assemble sources, one model call, parse, check 
 The prompt (prompts/answer.md) already allows one follow-up question, "not settled" and
 declining out-of-scope questions, so phase 5's agent is compared against a fair baseline (D21).
 
+With a floor set (`AnswerConfig.min_score` > 0), a question whose sources all score below it,
+and that names no section, is declined without a model call: nothing in the corpus is about it.
+
 Citations are checked against the sources the model was given: a marker that points nowhere
 is removed and counted. Checking that each claim is supported by its source is phase 5's
 verifier (D13).
@@ -21,13 +24,28 @@ import psycopg
 
 from permitnav.answering.context import Context, Source, build_context
 from permitnav.llm.port import LLM, Completion, CompletionRequest
-from permitnav.retrieval.retriever import Retriever
+from permitnav.parsing.references import named_units
+from permitnav.retrieval.retriever import Hit, Retriever
 
 KINDS = ("answered", "follow_up", "not_settled", "out_of_scope")
 MARKER = re.compile(r"\[(S\d+)\]")
 # "[S1, S2]", "[S1–S3]", "[S1; S4]": groups the model sometimes writes instead of [S1][S2]
 GROUP = re.compile(r"\[(S\d+(?:\s*[,;–-]\s*S\d+)+)\]")
 MAX_TOKENS_CAP = 16000
+# The relevance floor for bge-m3 cosine scores, calibrated on the dev set (phase 2, slice 2):
+# in-scope questions' best source scored 0.589–0.809, unrelated ones 0.491–0.641. The ranges
+# overlap, so the floor sits below every in-scope question with a margin and only catches
+# clearly unrelated ones; the prompt's out-of-scope rule handles the rest.
+BGE_M3_FLOOR = 0.55
+NOTHING_RELEVANT = (
+    "PermitNav found nothing about this in its sources. It covers Swedish work permits and "
+    "their extensions, family members of work-permit holders, permanent residence and EU "
+    "long-term resident status. For other questions, contact the authority responsible, or "
+    "see Migrationsverket (www.migrationsverket.se).\n\n"
+    "PermitNav hittade inget om detta i sina källor. Tjänsten handlar om arbetstillstånd och "
+    "förlängningar, familjemedlemmar till personer med arbetstillstånd, permanent "
+    "uppehållstillstånd och status som varaktigt bosatt i EU."
+)
 
 
 def load_prompt(name: str = "answer.md") -> str:
@@ -62,6 +80,9 @@ class AnswerConfig:
     model: str
     k: int = 8
     max_tokens: int = 4000
+    # Decline without a model call when every source scores below this (0 = off). Scores are
+    # the embedding model's cosine similarities, so the value belongs to that model.
+    min_score: float = 0.0
 
 
 class Answerer:
@@ -77,6 +98,8 @@ class Answerer:
     def answer(self, question: str, as_of: date | None = None) -> Answer:
         as_of = as_of or date.today()
         hits = self._retriever.search(question, as_of=as_of, k=self.config.k)
+        if not _relevant(question, hits, self.config.min_score):
+            return Answer(kind="out_of_scope", text=NOTHING_RELEVANT)
         context = build_context(self._conn, hits, as_of)
         system = self._template.format(as_of=as_of.isoformat(), sources=context.render())
         max_tokens = self.config.max_tokens
@@ -99,6 +122,14 @@ class Answerer:
         if cut_off and answer.kind == "failed":
             answer.text = "The reply was too long and was cut off. Please ask a narrower question."
         return answer
+
+
+def _relevant(question: str, hits: list[Hit], min_score: float) -> bool:
+    """False only when a floor is set, the question names no section (whether or not the
+    retrieval mode looked it up), and no source reaches the floor."""
+    if min_score <= 0 or named_units(question):
+        return True
+    return any(h.score >= min_score for h in hits)
 
 
 def parse_answer(completion: Completion, context: Context) -> Answer:

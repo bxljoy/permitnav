@@ -60,7 +60,7 @@ One JSON object per line.
 | `reference_answer` | A short correct answer, written from the source text. Used by the judge, not shown to the model. |
 | `expects_follow_up` | The right first response is a question back (D14). |
 | `expects_not_settled` | The sources don't settle it; the assistant must say so. |
-| `expects_out_of_scope` | Asylum, protection or deportation; the assistant must decline and point to Migrationsverket (D18). |
+| `expects_out_of_scope` | Outside the service: asylum, protection or deportation, or any unrelated topic (driving licences, taxes, housing); the assistant must decline and point to Migrationsverket or the authority responsible (D18, prompt rule 7). At most one `expects_*` flag is true. |
 | `authority` | Optional. Which kind of source answers it (D22): `law` (a legal requirement), `agency` (Migrationsverket practice the law doesn't set) or `both`. Results are reported per kind. |
 | `review` | `draft` or `checked`. |
 | `notes` | Optional. Why the item exists, what makes it hard, what the source says. What people were told by Migrationsverket's phone service or emails goes here, never into `expected` (D23). |

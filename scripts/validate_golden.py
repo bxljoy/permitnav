@@ -111,6 +111,11 @@ def check_item(item, line):
     out_of_scope = item["expects_out_of_scope"]
     if out_of_scope != (item["type"] == "out-of-scope"):
         err("expects_out_of_scope must be true exactly when type is 'out-of-scope'")
+    flags = [
+        f for f in ("expects_follow_up", "expects_not_settled", "expects_out_of_scope") if item[f]
+    ]
+    if len(flags) > 1:
+        err("at most one expects_* flag may be true, got %s" % ", ".join(flags))
     if item["type"] == "not-settled" and not item["expects_not_settled"]:
         err("type 'not-settled' needs expects_not_settled: true")
     if item["type"] == "needs-follow-up" and not item["expects_follow_up"]:

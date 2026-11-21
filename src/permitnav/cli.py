@@ -300,7 +300,7 @@ KIND_LABELS = {
 def cmd_ask(args: argparse.Namespace) -> int:
     from datetime import date
 
-    from permitnav.answering.answerer import AnswerConfig, Answerer
+    from permitnav.answering.answerer import BGE_M3_FLOOR, AnswerConfig, Answerer
     from permitnav.llm.openrouter import LLMError, OpenRouterLLM
     from permitnav.retrieval.retriever import Retriever
 
@@ -320,8 +320,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
         llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
         with db.connect() as conn:
             retriever = Retriever(conn, embedder, RetrievalConfig(mode=args.mode))
-            answerer = Answerer(conn, retriever, llm, AnswerConfig(model=model))
-            answer = answerer.answer(args.question, as_of=as_of)
+            config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR)
+            answer = Answerer(conn, retriever, llm, config).answer(args.question, as_of=as_of)
     except LLMError as error:
         print(f"model call failed: {error}")
         return 1
@@ -362,6 +362,96 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return 0 if answer.kind != "failed" else 1
 
 
+def cmd_eval_answers(args: argparse.Namespace) -> int:
+    import json
+
+    from permitnav.answering.answerer import BGE_M3_FLOOR, AnswerConfig, Answerer
+    from permitnav.evals.answers import kind_table, run_answers
+    from permitnav.evals.golden import load_golden
+    from permitnav.llm.openrouter import LLMError, OpenRouterLLM
+    from permitnav.retrieval.retriever import Retriever
+
+    model = os.environ.get("ANSWER_MODEL", "").strip()
+    if not model:
+        print("ANSWER_MODEL is not set; see .env.example")
+        return 1
+    items = load_golden(Path(args.file))
+    if not args.include_drafts:
+        items = [i for i in items if i.review == "checked"]
+    if args.kind:
+        items = [i for i in items if i.expected_kind in args.kind]
+    items = items[: args.limit] if args.limit else items
+    if not items:
+        drafts = "" if args.include_drafts else "; only checked items count unless --include-drafts"
+        print(f"no items left after the filters (--kind, --limit){drafts}")
+        return 1
+    try:
+        from permitnav.embedding.bge_m3 import BgeM3Embedder
+
+        embedder = BgeM3Embedder()
+    except ImportError:
+        print("bge-m3 needs the embed extra: uv sync --extra embed")
+        return 1
+    floor = BGE_M3_FLOOR if args.floor is None else args.floor
+    try:
+        llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
+    except LLMError as error:
+        print(f"model call failed: {error}")
+        return 1
+    with db.connect() as conn:
+        retriever = Retriever(conn, embedder, RetrievalConfig(mode=args.mode))
+        answerer = Answerer(conn, retriever, llm, AnswerConfig(model=model, min_score=floor))
+        results = run_answers(
+            items,
+            answerer,
+            lambda done, total: print(f"  answered {done}/{total}", end="\r", flush=True),
+        )
+
+    label = "DEVELOPMENT RUN, includes drafts, not reportable" if args.include_drafts else "checked"
+    print(f"\nBehaviour eval: {args.file}, model={model}, floor={floor} ({label})")
+    print(f"{'expected kind':<14} {'n':>3} {'right':>5}  given instead")
+    for row in kind_table(results):
+        instead = ", ".join(f"{kind} {n}" for kind, n in row.got.most_common())
+        print(f"{row.expected:<14} {row.n:>3} {row.correct:>5}  {instead}")
+    right = sum(r.correct for r in results)
+    skipped = sum(r.answer.completion is None and r.kind != "failed" for r in results)
+    failed = sum(r.kind == "failed" for r in results)
+    costs = [r.cost_usd for r in results]
+    cost = sum(c for c in costs if c is not None)
+    unknown = sum(c is None for c in costs)
+    print(f"all            {len(results):>3} {right:>5}")
+    print(
+        f"declined without a model call: {skipped}; failed: {failed}; cost ${cost:.4f}"
+        + (f" (+ {unknown} replies with unknown cost)" if unknown else "")
+    )
+    if args.verbose:
+        for r in results:
+            if not r.correct:
+                text = " ".join(r.answer.text.split())[:110]
+                print(f"  {r.item.id:<40} expected {r.item.expected_kind}, got {r.kind}: {text}")
+    if args.out:
+        Path(args.out).write_text(
+            json.dumps(
+                [
+                    {
+                        "id": r.item.id,
+                        "expected": r.item.expected_kind,
+                        "kind": r.kind,
+                        "text": r.answer.text,
+                        "sources": [s.unit_id for s in r.answer.sources],
+                        "cost_usd": r.cost_usd,
+                    }
+                    for r in results
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="permitnav")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -396,6 +486,20 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--verbose", "-v", action="store_true", help="show each item's ranks")
     ev.add_argument("--out", help="write per-item results as JSON")
     ev.set_defaults(run=cmd_eval)
+    ea = sub.add_parser(
+        "eval-answers", help="run the behaviour eval (answer kinds); calls the model"
+    )
+    ea.add_argument("--file", default="evals/golden.dev.jsonl")
+    ea.add_argument("--mode", default=RetrievalConfig.mode, choices=list(MODES))
+    ea.add_argument("--include-drafts", action="store_true", help="development run; not reportable")
+    ea.add_argument(
+        "--kind", nargs="+", choices=["answered", "follow_up", "not_settled", "out_of_scope"]
+    )
+    ea.add_argument("--limit", type=int, help="only the first N items")
+    ea.add_argument("--floor", type=float, help="relevance floor (default: calibrated for bge-m3)")
+    ea.add_argument("--verbose", "-v", action="store_true", help="show the wrong answers")
+    ea.add_argument("--out", help="write per-item answers as JSON")
+    ea.set_defaults(run=cmd_eval_answers)
     args = parser.parse_args(argv)
     return args.run(args)
 

@@ -337,3 +337,138 @@ def test_openrouter_retries_a_dropped_connection_and_a_non_json_reply(monkeypatc
         CompletionRequest(model="m", system="s", messages=[])
     )
     assert result.text == "ok" and len(calls) == 3
+
+
+# --- relevance floor and the behaviour eval (phase 2, slice 2) --------------------------------
+
+
+@pytest.mark.db
+def test_questions_nothing_relevant_matches_never_reach_the_model(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    llm = ScriptedLLM(json.dumps({"kind": "answered", "answer": "x [S1]."}))
+    answerer = Answerer(conn, stored, llm, AnswerConfig(model="m", min_score=0.99))
+    answer = answerer.answer("How do I exchange my driving licence?", as_of=date(2026, 11, 20))
+    assert llm.requests == []
+    assert answer.kind == "out_of_scope"
+    assert "Migrationsverket" in answer.text and answer.citations == []
+
+
+@pytest.mark.db
+def test_a_section_the_question_names_is_answered_whatever_its_score(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    llm = ScriptedLLM(json.dumps({"kind": "answered", "answer": "It says… [S1]."}))
+    answerer = Answerer(conn, stored, llm, AnswerConfig(model="m", min_score=0.99))
+    answerer.answer("Vad säger 6 kap. 3 § utlänningslagen?", as_of=date(2026, 11, 20))
+    assert len(llm.requests) == 1
+
+
+@pytest.mark.db
+def test_the_floor_is_off_unless_configured(conn: psycopg.Connection, stored: Retriever) -> None:
+    llm = ScriptedLLM(json.dumps({"kind": "out_of_scope", "answer": "No."}))
+    Answerer(conn, stored, llm, AnswerConfig(model="m")).answer("körkort", date(2026, 11, 20))
+    assert len(llm.requests) == 1
+
+
+def test_the_prompt_declines_any_topic_outside_the_service() -> None:
+    from permitnav.answering.answerer import load_prompt
+
+    rule = next(line for line in load_prompt().splitlines() if "**Out of scope.**" in line)
+    assert "asylum" in rule.lower() and "any other topic" in rule.lower()
+
+
+@pytest.mark.db
+def test_the_behaviour_eval_compares_answer_kinds_with_the_golden_flags(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    from permitnav.evals.answers import kind_table, run_answers
+    from tests.test_retriever import item
+
+    def reply(request: CompletionRequest) -> str:
+        question = request.messages[0]["content"]
+        kind = "out_of_scope" if "asyl" in question else "answered"
+        return json.dumps({"kind": kind, "answer": "x"})
+
+    items = [
+        item("a", "lönen medianlönen", [["sfs:2005:716/6kap/2§"]]),
+        item("b", "asylum question", [], expected_kind="out_of_scope"),
+        item("c", "do I need to say more?", [], expected_kind="follow_up"),
+    ]
+    answerer = Answerer(conn, stored, ScriptedLLM(reply), AnswerConfig(model="m"))
+    results = run_answers(items, answerer)
+    assert [(r.item.id, r.kind) for r in results] == [
+        ("a", "answered"),
+        ("b", "out_of_scope"),
+        ("c", "answered"),
+    ]
+    rows = {row.expected: row for row in kind_table(results)}
+    assert (rows["answered"].n, rows["answered"].correct) == (1, 1)
+    assert (rows["out_of_scope"].n, rows["out_of_scope"].correct) == (1, 1)
+    assert (rows["follow_up"].correct, dict(rows["follow_up"].got)) == (0, {"answered": 1})
+
+
+@pytest.mark.db
+def test_with_the_floor_off_even_no_sources_reach_the_model(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    llm = ScriptedLLM(json.dumps({"kind": "not_settled", "answer": "The sources are silent."}))
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer("lönen", date(2020, 1, 1))
+    assert len(llm.requests) == 1 and answer.kind == "not_settled"
+
+
+@pytest.mark.db
+def test_a_named_section_reaches_the_model_in_every_retrieval_mode(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    from permitnav.retrieval.retriever import RetrievalConfig
+    from tests.test_retriever import FAKE
+
+    llm = ScriptedLLM(json.dumps({"kind": "answered", "answer": "It says… [S1]."}))
+    vector = Retriever(conn, FAKE, RetrievalConfig(mode="vector"))
+    Answerer(conn, vector, llm, AnswerConfig(model="m", min_score=0.99)).answer(
+        "Vad säger 6 kap. 3 § utlänningslagen?", date(2026, 11, 20)
+    )
+    assert len(llm.requests) == 1
+
+
+@pytest.mark.db
+def test_a_model_failure_on_one_item_keeps_the_rest_of_the_run(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    from permitnav.evals.answers import kind_table, run_answers
+    from tests.test_retriever import item
+
+    def reply(request: CompletionRequest) -> str:
+        if "fails" in request.messages[0]["content"]:
+            raise LLMError("OpenRouter: HTTP 502")
+        return json.dumps({"kind": "answered", "answer": "x"})
+
+    items = [item("a", "lönen", []), item("b", "this one fails", []), item("c", "lönen", [])]
+    results = run_answers(items, Answerer(conn, stored, ScriptedLLM(reply), AnswerConfig("m")))
+    assert [r.kind for r in results] == ["answered", "failed", "answered"]
+    assert "HTTP 502" in results[1].answer.text
+    (row,) = kind_table(results)
+    assert (row.n, row.correct, dict(row.got)) == (3, 2, {"failed": 1})
+
+
+def test_combined_expects_flags_are_rejected(tmp_path) -> None:
+    from permitnav.evals.golden import load_golden
+
+    line = {
+        "id": "x",
+        "question": "q",
+        "original_language": "en",
+        "translation_of": None,
+        "type": "not-settled",
+        "as_of": "2026-11-20",
+        "expected": [],
+        "review": "draft",
+        "expects_follow_up": True,
+        "expects_not_settled": True,
+        "expects_out_of_scope": False,
+    }
+    path = tmp_path / "g.jsonl"
+    path.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="at most one"):
+        load_golden(path)

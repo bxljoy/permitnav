@@ -535,8 +535,8 @@ One more finding: the older wording of 6 kap. 2 § (before 2026-06-01) is **not*
 - **Pages crowd out the law** (slice 5): an English question matches an English Migrationsverket page far better (cosine ~0.78) than the Swedish statute (~0.57), so with pages indexed, statute sections dropped out of the top 10. Phase 1 interleaves law and guidance results (`RetrievalConfig.mix = "interleave"`); law items recovered only partly (R@5 0.46 → 0.29, and R@1 is now always a page). Phase 2's authority-aware fused ranking (D22) and keyword search replace this.
 - **Repeated page sections** (slice 5): Migrationsverket repeats identical sections across many pages (the union paragraph is on ~20). Search keeps one per distinct text, and the eval counts an identical copy of an expected section as a hit. Near-identical variants (artist vs employee pages) still compete; phase 2 should collapse them or prefer the page a golden item names.
 - **Cross-references are not followed** (found with `permitnav ask`, 2026-11-21): 6 kap. 4 a § says "det som föreskrivs i 2 § andra stycket" also applies to a new employment, but 6 kap. 2 § was not retrieved, so the model could only say a requirement exists that its sources don't show. Phase 2: when a retrieved section refers to another section of the same statute, add that section to the context (reusing `section_refs`), within a limit.
-- **Search has no relevance floor** (same run): search always returns the k nearest sections, even for a question nothing in the corpus answers. "How do I exchange my foreign driving licence?" sent 11 unrelated sources (4,814 tokens) to the model, which declined correctly but at full cost. Phase 2: set a minimum similarity score from the golden set (in-scope versus out-of-scope items); when nothing passes it, skip the answer model or tell it that no relevant sources were found.
-- **Unrelated topics get the wrong label** (same run): the prompt defines out of scope only as asylum, protection and deportation, so the driving-licence question came back as `not_settled` ("the rules don't settle this"). Phase 2: widen rule 7 of `prompts/answer.md` to any topic outside work permits, their family members and permanent residence, and add unrelated-topic items to the golden set (D18).
+- **Search has no relevance floor** (same run; handled in phase 2 slice 2, as a safety net only): search always returns the k nearest sections, even for a question nothing in the corpus answers. "How do I exchange my foreign driving licence?" sent 11 unrelated sources (4,814 tokens) to the model, which declined correctly but at full cost. Phase 2: set a minimum similarity score from the golden set (in-scope versus out-of-scope items); when nothing passes it, skip the answer model or tell it that no relevant sources were found.
+- **Unrelated topics get the wrong label** (same run; handled in phase 2 slice 2): the prompt defines out of scope only as asylum, protection and deportation, so the driving-licence question came back as `not_settled` ("the rules don't settle this"). Phase 2: widen rule 7 of `prompts/answer.md` to any topic outside work permits, their family members and permanent residence, and add unrelated-topic items to the golden set (D18).
 - **OpenRouter model IDs** for Claude Haiku 5.5 and the Mistral judge are configuration values, to be confirmed against OpenRouter's model list at setup.
 
 ## Phase 2
@@ -546,7 +546,7 @@ One more finding: the older wording of 6 kap. 2 § (before 2026-06-01) is **not*
 Each slice ends with the retrieval eval (dev set, drafts included, so development numbers only) and a code review. Retrieval slices come first because they are measurable without an LLM; the judge needs your hand-labelled answers.
 
 1. **Hybrid search:** BM25 keyword search over `chunk.tsv`, Reciprocal Rank Fusion, and a direct lookup of sections the question names. *(Done; results below.)*
-2. **Questions the corpus can't answer:** a relevance floor calibrated on the golden set, the wider out-of-scope rule in the prompt, unrelated-topic golden items (D18).
+2. **Questions the corpus can't answer:** a relevance floor calibrated on the golden set, the wider out-of-scope rule in the prompt, unrelated-topic golden items (D18), and a behaviour eval. *(Done; results below.)*
 3. **Cross-references:** add sections a retrieved section refers to ("2 § andra stycket") to the context.
 4. **Query translation for keyword search:** English questions translated to Swedish before BM25; then re-measure the keyword weight.
 5. **Authority-aware ranking (D22):** replaces the law/guidance interleaving.
@@ -572,3 +572,27 @@ Dev set, 48 items, structure chunks:
 - **The gain comes from the named-section lookup.** Identifier questions went from 0.12 to 1.00; nothing else changed at weight 0.
 - **BM25 helps Swedish questions and hurts English ones.** Swedish R@10 rose from 0.56 to 0.69 at weight 0.3, but English R@5 fell, because an English question's words, stemmed as Swedish, match noise in the law. The default stays at 0 until query translation (slice 4) gives keyword search Swedish words to match; the differences between 0, 0.3 and 0.5 are one or two items, inside the noise.
 - **Performance:** BM25's per-term document counts must be computed once per query (`MATERIALIZED`); inlined, Postgres recomputed them for every matching row, about 1 s per search instead of ~50 ms.
+
+### Slice 2 results: questions the corpus can't answer
+
+- **Golden items:** three unrelated-topic pairs in the dev set (driving licence, income tax return, rental housing queue) and one in the hold-out (bank account), 16 out-of-scope items in the dev set in all.
+- **Relevance floor (`AnswerConfig.min_score`, `BGE_M3_FLOOR = 0.55`):** when every source scores below it and the question names no section, the answerer declines without a model call. Calibration on the dev set (best source's cosine score): in-scope 0.589–0.809, near misses (asylum, deportation) 0.640–0.734, unrelated 0.491–0.641. The ranges overlap: unrelated English questions mention Sweden and taxes, which the work-permit pages also discuss. So the floor sits below every in-scope question with a margin and is only a safety net (1 of 6 unrelated questions, and nonsense input). A higher floor would refuse real questions, which is worse than a wasted model call.
+- **Prompt rule 7** now names the service's scope and declines any other topic, not only asylum and deportation; "not_settled" is reserved for in-scope questions the sources leave open.
+- **Behaviour eval (`permitnav eval-answers`):** each item expects one answer kind from its `expects_*` flags; the eval compares the answerer's `kind` with it. No judge, about $0.08 for the 64 dev items with Haiku 5.5.
+
+Out-of-scope items (16), Haiku 5.5:
+
+| Configuration | Right | Wrong |
+|---|---|---|
+| Old prompt, no floor | 9 | 7 "not settled" (all six unrelated, one deportation) |
+| New prompt, no floor | 14 | 2 follow-ups (deportation) |
+| New prompt, floor 0.55 | 14 | 1 "not settled", 1 follow-up (asylum, deportation); 1 declined without a model call |
+
+All 64 dev items, new prompt and floor: 44 right. No in-scope question was declined. answered 20/28 (8 follow-ups instead), follow_up 3/4, not_settled 7/16 (7 follow-ups, 2 answered), out_of_scope 14/16.
+
+Found by the behaviour eval, for later slices:
+
+- **Too many follow-up questions:** 15 items that expect an answer or "not settled" got a follow-up question. Some golden labels are debatable (whether applying for permanent residence together with an extension "depends on your situation"), so the golden-set review comes before any prompt tuning.
+- **The near-miss boundary is unstable:** which asylum and deportation questions fail changes from run to run. One of them (a final deportation decision and a work-permit extension) is partly covered by Migrationsverket's employer pages, so its out-of-scope label should be checked in the review.
+- **Language:** some Swedish questions got English answers (put-apply-with-extension-302-sv, family-spouse-put-income-401-sv, work-extension-insurance-history-204-sv), against rule 8.
+
