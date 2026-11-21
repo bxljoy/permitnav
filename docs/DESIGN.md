@@ -532,7 +532,7 @@ One more finding: the older wording of 6 kap. 2 § (before 2026-06-01) is **not*
 - **Transitional links are broad** (slice 2; handled in slice 6): every point of an amending act links to every section that act amended. Context assembly now keeps a point only for the sections it names ("6 kap. 2 §"), keeps points that name no section (up to three per hit), and drops points that name only other sections. Ranges ("10 kap. 1–17 §§") are not expanded yet.
 - **Inconsistent consolidated text:** the riksdagen text sometimes gives one section two different upcoming wordings from the same day (seen once: 10 kap. 14 § utlänningslagen, 2027-12-01). The parser keeps the later one and reports a conflict; check such cases against the SFS PDF.
 - **Swedish keyword stemming is incomplete** (slice 3): Postgres's `swedish` configuration maps "medianlönen" to "medianlön" but leaves "anställningsavtalet" and "arbetstillståndet" unchanged, so keyword search misses some definite forms. Phase 2's hybrid search should test this on the golden set and consider a better Swedish dictionary (e.g. a Hunspell `sv_SE` dictionary) or relying on the vector half for inflected forms.
-- **Pages crowd out the law** (slice 5): an English question matches an English Migrationsverket page far better (cosine ~0.78) than the Swedish statute (~0.57), so with pages indexed, statute sections dropped out of the top 10. Phase 1 interleaves law and guidance results (`RetrievalConfig.mix = "interleave"`); law items recovered only partly (R@5 0.46 → 0.29, and R@1 is now always a page). Phase 2's authority-aware fused ranking (D22) and keyword search replace this.
+- **Pages crowd out the law** (slice 5; much improved in phase 2: law items R@5 0.29 → 0.69 after slices 1 and 4): an English question matches an English Migrationsverket page far better (cosine ~0.78) than the Swedish statute (~0.57), so with pages indexed, statute sections dropped out of the top 10. Phase 1 interleaves law and guidance results (`RetrievalConfig.mix = "interleave"`); law items recovered only partly (R@5 0.46 → 0.29, and R@1 is now always a page). Phase 2's authority-aware fused ranking (D22) and keyword search replace this.
 - **Repeated page sections** (slice 5): Migrationsverket repeats identical sections across many pages (the union paragraph is on ~20). Search keeps one per distinct text, and the eval counts an identical copy of an expected section as a hit. Near-identical variants (artist vs employee pages) still compete; phase 2 should collapse them or prefer the page a golden item names.
 - **Cross-references are not followed** (found with `permitnav ask`, 2026-11-21; handled in phase 2 slice 3): 6 kap. 4 a § says "det som föreskrivs i 2 § andra stycket" also applies to a new employment, but 6 kap. 2 § was not retrieved, so the model could only say a requirement exists that its sources don't show. Phase 2: when a retrieved section refers to another section of the same statute, add that section to the context (reusing `section_refs`), within a limit.
 - **Search has no relevance floor** (same run; handled in phase 2 slice 2, as a safety net only): search always returns the k nearest sections, even for a question nothing in the corpus answers. "How do I exchange my foreign driving licence?" sent 11 unrelated sources (4,814 tokens) to the model, which declined correctly but at full cost. Phase 2: set a minimum similarity score from the golden set (in-scope versus out-of-scope items); when nothing passes it, skip the answer model or tell it that no relevant sources were found.
@@ -548,7 +548,7 @@ Each slice ends with the retrieval eval (dev set, drafts included, so developmen
 1. **Hybrid search:** BM25 keyword search over `chunk.tsv`, Reciprocal Rank Fusion, and a direct lookup of sections the question names. *(Done; results below.)*
 2. **Questions the corpus can't answer:** a relevance floor calibrated on the golden set, the wider out-of-scope rule in the prompt, unrelated-topic golden items (D18), and a behaviour eval. *(Done; results below.)*
 3. **Cross-references:** add sections a retrieved section refers to ("2 § andra stycket") to the context. *(Done; results below.)*
-4. **Query translation for keyword search:** English questions translated to Swedish before BM25; then re-measure the keyword weight.
+4. **Query translation for keyword search:** English questions translated to Swedish before BM25; then re-measure the keyword weight. *(Done; results below.)*
 5. **Authority-aware ranking (D22):** replaces the law/guidance interleaving.
 6. **Reranker:** `bge-reranker-v2-m3` over the top 30–50; gain and latency.
 7. **LLM judge:** calibrated on ~30 answers you label, ≥85% agreement (D19).
@@ -604,4 +604,27 @@ Found by the behaviour eval, for later slices:
 - **The question that found the gap** ("Can I start working for a new employer while my extension is processed?") now cites 6 kap. 2 § and says what a new job must meet, instead of only saying that a requirement exists.
 - **Behaviour eval:** no change beyond noise. Not-settled items scored 8 and 8 of 16 with references, 9 and 8 without; a single run of all 64 items gave 4 of 16, so one run swings by four or five items. **Compare behaviour-eval results across repeated runs, never one run against one.**
 - **A retrieval metric for the context** would show this kind of gain directly: the share of expected sections that reach the model (search plus references and transitional provisions), next to recall@k. Worth adding with the judge (slice 7).
+
+### Slice 4 results: query translation
+
+- **Translation (`retrieval/translate.py`):** a question is recognised as Swedish without a model call (Swedish letters outside statute names, or more Swedish than English function words; right for all 64 dev questions). An English question is translated by the answer model (or `TRANSLATE_MODEL`) with `prompts/translate.md`, which asks for the law's own terms ("make, maka eller sambo", "status som varaktigt bosatt") and keeps section references. Translations are cached per (model, question) in `data/cache/translations.json`, so repeated evals are free and repeatable. About $0.0001 and a second per English question.
+- **Keyword search per language:** Swedish chunks are matched with the Swedish text, English pages with the original question. Before, an English question stemmed as Swedish matched noise in the law.
+- **Defaults:** the CLI (`ask`, `eval`, `eval-answers`) translates and uses keyword weight 0.5; `--no-translate` turns both off (weight 0). `RetrievalConfig`'s own defaults stay offline (no translation, weight 0), as do the tests.
+
+Dev set, 48 items:
+
+| Configuration | R@1 | R@5 [95% CI] | R@10 | MRR | English R@5 | Law R@5 |
+|---|---|---|---|---|---|---|
+| slice 1 default (no translation, weight 0) | 0.23 | 0.47 [0.34, 0.59] | 0.57 | 0.33 | 0.44 | 0.56 |
+| translate, weight 0.3 | 0.25 | 0.52 | 0.63 | 0.37 | 0.54 | 0.65 |
+| **translate, weight 0.5 (default)** | 0.25 | **0.56 [0.44, 0.68]** | 0.66 | 0.38 | **0.58** | **0.69** |
+| translate, weight 1.0 | 0.25 | 0.49 | 0.62 | 0.37 | 0.52 | 0.65 |
+| translate + law vector, weight 0 | 0.22 | 0.50 | 0.61 | 0.35 | 0.50 | 0.62 |
+| translate + law vector, weight 0.5 | 0.28 | 0.53 | 0.66 | 0.40 | 0.52 | 0.62 |
+
+- **English questions gain the most** (0.44 → 0.58): keyword search can now reach the Swedish law. Law items: 0.56 → 0.69 (0.29 in phase 1).
+- **Searching the law with the translated question's vector adds nothing** on top; it stays an option (`--translated-vector`), off by default.
+- **Translations vary a little between runs:** a fresh set of translations (after the cache key began to include the prompt) gave R@5 0.55 instead of 0.56, one item. The cache keeps a run repeatable; a new prompt or model means new translations and a slightly different number.
+- **The weight is not tuned finely:** 0.3–1.0 differ by one to three items; 0.5 is the middle of that range, and the hold-out run will show whether it carries over.
+- **Behaviour eval:** 44, 42 and 44 of 64 in three runs, the same as before. Across all runs so far, about 3 of ~380 answers came back `failed`, intermittently; `eval-answers --out` now keeps the model's raw reply and finish reason for failed answers, so the next one can be diagnosed.
 

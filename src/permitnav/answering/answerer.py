@@ -18,13 +18,13 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
-from importlib import resources
 
 import psycopg
 
 from permitnav.answering.context import Context, Source, build_context
 from permitnav.llm.port import LLM, Completion, CompletionRequest
 from permitnav.parsing.references import named_units
+from permitnav.prompting import load_prompt
 from permitnav.retrieval.retriever import Hit, Retriever
 
 KINDS = ("answered", "follow_up", "not_settled", "out_of_scope")
@@ -46,11 +46,6 @@ NOTHING_RELEVANT = (
     "förlängningar, familjemedlemmar till personer med arbetstillstånd, permanent "
     "uppehållstillstånd och status som varaktigt bosatt i EU."
 )
-
-
-def load_prompt(name: str = "answer.md") -> str:
-    """Prompts ship inside the package (permitnav/prompts), versioned in git (D15)."""
-    return resources.files("permitnav").joinpath("prompts", name).read_text(encoding="utf-8")
 
 
 @dataclass(frozen=True)

@@ -30,6 +30,77 @@ def _user_agent() -> str:
     )
 
 
+def _translations_cache() -> Path:
+    """CACHE_DIR, or `cache` next to the raw downloads (RAW_DIR), so it does not depend on the
+    directory a command is run from any more than the downloads do."""
+    root = os.environ.get("CACHE_DIR") or _raw_dir().parent / "cache"
+    return Path(root) / "translations.json"
+
+
+def _translator(enabled: bool):
+    """The query translator (phase 2, slice 4), or None when translation is off. Uses
+    TRANSLATE_MODEL, else ANSWER_MODEL; translations are cached in data/cache."""
+    if not enabled:
+        return None
+    from permitnav.llm.openrouter import OpenRouterLLM
+    from permitnav.retrieval.translate import LLMTranslator
+
+    model = os.environ.get("TRANSLATE_MODEL", "").strip() or os.environ.get("ANSWER_MODEL", "")
+    if not model.strip():
+        raise SystemExit("translation needs TRANSLATE_MODEL or ANSWER_MODEL; see .env.example")
+    llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
+    return LLMTranslator(llm, model.strip(), cache_path=_translations_cache())
+
+
+def _translation_cost(translator) -> str:
+    if translator is None or not translator.calls:
+        return ""
+    unknown = f", {translator.cost_unknown} of unknown cost" if translator.cost_unknown else ""
+    return f"translation: {translator.calls} calls, ${translator.cost_usd:.4f}{unknown}"
+
+
+# The measured best (phase 2, slice 4): English questions translated for keyword search, with
+# the keyword ranking at weight 0.5. Without translation, keyword search only adds noise for
+# English questions, so its weight drops to 0. RetrievalConfig's own defaults stay offline.
+TRANSLATED_KEYWORD_WEIGHT = 0.5
+
+
+def _retrieval_config(args: argparse.Namespace) -> RetrievalConfig:
+    translate = not args.no_translate
+    weight = args.keyword_weight
+    if weight is None:
+        weight = TRANSLATED_KEYWORD_WEIGHT if translate else RetrievalConfig.keyword_weight
+    keyword_runs = args.mode == "keyword" or (args.mode == "hybrid" and weight > 0)
+    return RetrievalConfig(
+        mode=args.mode,
+        strategy=getattr(args, "strategy", RetrievalConfig.strategy),
+        keyword_weight=weight,
+        # A translation costs a model call: only when keyword search or the law vector uses it.
+        translate=translate and (keyword_runs or args.translated_vector),
+        translated_vector=args.translated_vector,
+    )
+
+
+def _add_retrieval_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--mode", default=RetrievalConfig.mode, choices=list(MODES))
+    parser.add_argument(
+        "--keyword-weight",
+        type=float,
+        help=f"hybrid fusion weight (default {TRANSLATED_KEYWORD_WEIGHT} with translation, else 0)",
+    )
+    translation = parser.add_mutually_exclusive_group()
+    translation.add_argument(
+        "--no-translate",
+        action="store_true",
+        help="don't translate English questions for keyword search (no model call)",
+    )
+    translation.add_argument(
+        "--translated-vector",
+        action="store_true",
+        help="also search the law with the translated question's vector (an experiment)",
+    )
+
+
 def cmd_migrate(_: argparse.Namespace) -> int:
     with db.connect() as conn:
         applied = db.migrate(conn)
@@ -222,29 +293,41 @@ def cmd_eval(args: argparse.Namespace) -> int:
     except ImportError:
         print("bge-m3 needs the embed extra: uv sync --extra embed")
         return 1
-    with db.connect() as conn:
-        existing = dict(conn.execute("SELECT id, document FROM unit").fetchall())
-        config = RetrievalConfig(
-            mode=args.mode, strategy=args.strategy, keyword_weight=args.keyword_weight
-        )
-        retriever = Retriever(conn, embedder, config)
-        cache: dict = {}
+    from permitnav.llm.openrouter import LLMError
 
-        def applying_on(d):
-            if d not in cache:
-                cache[d] = units_applying_on(conn, d)
-            return cache[d]
+    config = _retrieval_config(args)
+    try:
+        translator = _translator(config.translate)
+        with db.connect() as conn:
+            existing = dict(conn.execute("SELECT id, document FROM unit").fetchall())
+            retriever = Retriever(conn, embedder, config, translator)
+            cache: dict = {}
 
-        run = run_retrieval(
-            items, retriever, existing, applying_on, lambda u, d: units_with_same_text(conn, u, d)
-        )
+            def applying_on(d):
+                if d not in cache:
+                    cache[d] = units_applying_on(conn, d)
+                return cache[d]
+
+            run = run_retrieval(
+                items,
+                retriever,
+                existing,
+                applying_on,
+                lambda u, d: units_with_same_text(conn, u, d),
+            )
+    except LLMError as error:
+        print(f"query translation failed: {error}")
+        print("(the retrieval eval translates English questions; --no-translate runs offline)")
+        return 1
 
     label = (
         "DEVELOPMENT RUN, includes drafts, not reportable"
         if args.include_drafts
         else "checked items"
     )
-    weight = f", keyword_weight={args.keyword_weight}" if args.mode == "hybrid" else ""
+    weight = f", keyword_weight={config.keyword_weight}" if args.mode == "hybrid" else ""
+    weight += ", translate" if config.translate else ""
+    weight += " (+ law vector)" if config.translated_vector else ""
     print(
         f"\nRetrieval eval: {args.file}, strategy={args.strategy}, mode={args.mode}{weight}"
         f" ({label})"
@@ -261,6 +344,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
         )
     for reason, ids in run.skipped.items():
         print(f"skipped {len(ids)}: {reason}")
+    if cost := _translation_cost(translator):
+        print(cost)
     for item_id, units in run.unknown_units.items():
         print(f"GOLDEN-SET ERROR {item_id}: expected units not in the corpus: {', '.join(units)}")
     if args.verbose:
@@ -319,9 +404,12 @@ def cmd_ask(args: argparse.Namespace) -> int:
     try:
         llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
         with db.connect() as conn:
-            retriever = Retriever(conn, embedder, RetrievalConfig(mode=args.mode))
-            config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR)
-            answer = Answerer(conn, retriever, llm, config).answer(args.question, as_of=as_of)
+            config = _retrieval_config(args)
+            translator = _translator(config.translate)
+            retriever = Retriever(conn, embedder, config, translator)
+            answer_config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR)
+            answerer = Answerer(conn, retriever, llm, answer_config)
+            answer = answerer.answer(args.question, as_of=as_of)
     except LLMError as error:
         print(f"model call failed: {error}")
         return 1
@@ -359,6 +447,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
     if c is not None:
         cost = f", ${c.cost_usd:.4f}" if c.cost_usd is not None else ""
         print(f"[{c.model}: {c.input_tokens:,} in / {c.output_tokens:,} out tokens{cost}]")
+    if translation := _translation_cost(translator):
+        print(f"[{translation}]")
     return 0 if answer.kind != "failed" else 1
 
 
@@ -393,13 +483,15 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
         print("bge-m3 needs the embed extra: uv sync --extra embed")
         return 1
     floor = BGE_M3_FLOOR if args.floor is None else args.floor
+    config = _retrieval_config(args)
     try:
         llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
+        translator = _translator(config.translate)
     except LLMError as error:
         print(f"model call failed: {error}")
         return 1
     with db.connect() as conn:
-        retriever = Retriever(conn, embedder, RetrievalConfig(mode=args.mode))
+        retriever = Retriever(conn, embedder, config, translator)
         answerer = Answerer(conn, retriever, llm, AnswerConfig(model=model, min_score=floor))
         results = run_answers(
             items,
@@ -419,6 +511,9 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
     costs = [r.cost_usd for r in results]
     cost = sum(c for c in costs if c is not None)
     unknown = sum(c is None for c in costs)
+    if translator is not None:  # the translations are part of the run's cost
+        cost += translator.cost_usd
+        unknown += translator.cost_unknown
     print(f"all            {len(results):>3} {right:>5}")
     print(
         f"declined without a model call: {skipped}; failed: {failed}; cost ${cost:.4f}"
@@ -440,6 +535,15 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
                         "text": r.answer.text,
                         "sources": [s.unit_id for s in r.answer.sources],
                         "cost_usd": r.cost_usd,
+                        # For failed answers: what the model actually sent back.
+                        **(
+                            {
+                                "raw": r.answer.completion.text,
+                                "finish_reason": r.answer.completion.extra.get("finish_reason"),
+                            }
+                            if r.kind == "failed" and r.answer.completion
+                            else {}
+                        ),
                     }
                     for r in results
                 ],
@@ -471,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
     index.set_defaults(run=cmd_index)
     ask = sub.add_parser("ask", help="answer a question from the stored sources")
     ask.add_argument("question")
-    ask.add_argument("--mode", default=RetrievalConfig.mode, choices=list(MODES))
+    _add_retrieval_options(ask)
     ask.add_argument("--as-of", help="date the answer should apply on (YYYY-MM-DD); default today")
     ask.add_argument(
         "--show-sources", action="store_true", help="list everything shown to the model"
@@ -480,8 +584,7 @@ def main(argv: list[str] | None = None) -> int:
     ev = sub.add_parser("eval", help="run the retrieval eval on a golden-set file")
     ev.add_argument("--file", default="evals/golden.dev.jsonl")
     ev.add_argument("--strategy", default="structure", choices=list(STRATEGIES))
-    ev.add_argument("--mode", default=RetrievalConfig.mode, choices=list(MODES))
-    ev.add_argument("--keyword-weight", type=float, default=RetrievalConfig.keyword_weight)
+    _add_retrieval_options(ev)
     ev.add_argument("--include-drafts", action="store_true", help="development run; not reportable")
     ev.add_argument("--verbose", "-v", action="store_true", help="show each item's ranks")
     ev.add_argument("--out", help="write per-item results as JSON")
@@ -490,7 +593,7 @@ def main(argv: list[str] | None = None) -> int:
         "eval-answers", help="run the behaviour eval (answer kinds); calls the model"
     )
     ea.add_argument("--file", default="evals/golden.dev.jsonl")
-    ea.add_argument("--mode", default=RetrievalConfig.mode, choices=list(MODES))
+    _add_retrieval_options(ea)
     ea.add_argument("--include-drafts", action="store_true", help="development run; not reportable")
     ea.add_argument(
         "--kind", nargs="+", choices=["answered", "follow_up", "not_settled", "out_of_scope"]

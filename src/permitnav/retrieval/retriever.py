@@ -8,6 +8,11 @@ Modes (`RetrievalConfig.mode`):
   the question names ("6 kap. 2 a §"): up to `MAX_NAMED` of them come first, in the order the
   question names them.
 
+With `translate`, an English question is translated to Swedish (retrieval/translate.py), only
+when something uses it: keyword search then matches Swedish chunks with the Swedish text and
+English pages with the original, and with `translated_vector` the law's vector ranking is
+ordered by the Swedish text too. Scores are always against the original question.
+
 Returns citable units, not chunks: when several chunks of one unit match, the best one
 represents the unit (D2). Only wordings that apply on `as_of` are searched (D8, D5):
 wordings waiting for a government decision, and withdrawn ones, never are.
@@ -24,6 +29,7 @@ from psycopg import sql
 from permitnav.corpus.indexing import EMBEDDING_TABLES, to_pgvector
 from permitnav.embedding.port import Embedder
 from permitnav.parsing.references import named_units
+from permitnav.retrieval.translate import Translator, is_swedish
 
 
 @dataclass(frozen=True)
@@ -85,21 +91,34 @@ class RetrievalConfig:
     # ranking over everything.
     mix: str = "interleave"
     candidates: int = 50  # per ranking, before fusion (hybrid)
+    # Translate English questions to Swedish for keyword search (needs a Translator), and with
+    # translated_vector also for the law's vector ranking.
+    translate: bool = False
+    translated_vector: bool = False
     # Hybrid: the keyword ranking's weight in the fusion, relative to the vector ranking's 1.
     # 0 keeps only the vector ranking and the lookup of sections the question names. Measured
-    # in phase 2 slice 1 (dev set, 48 items): R@5 0.47 at 0, 0.46 at 0.3, 0.40 at 1. BM25
-    # helps Swedish questions but adds noise for English ones, whose words don't occur in the
-    # Swedish law; revisit once English questions are translated for keyword search.
+    # in phase 2 (dev set, 48 items): without translation R@5 0.47 at 0, 0.46 at 0.3, 0.40 at
+    # 1, since an English question's words don't occur in the Swedish law; with translation
+    # 0.56 at 0.5 (slice 4), the CLI's default. The default here stays offline: 0.
     keyword_weight: float = 0.0
 
 
 class Retriever:
     def __init__(
-        self, conn: psycopg.Connection, embedder: Embedder, config: RetrievalConfig | None = None
+        self,
+        conn: psycopg.Connection,
+        embedder: Embedder,
+        config: RetrievalConfig | None = None,
+        translator: Translator | None = None,
     ) -> None:
         self._conn = conn
         self._embedder = embedder
+        self._translator = translator
         self.config = config or RetrievalConfig()
+        if self.config.translate and translator is None:
+            raise ValueError("translate=True needs a translator")
+        if self.config.translated_vector and not self.config.translate:
+            raise ValueError("translated_vector needs translate=True")
         if self.config.mode not in MODES:
             raise ValueError(f"unknown retrieval mode {self.config.mode!r}; one of {MODES}")
         if self.config.mix not in ("interleave", "none"):
@@ -121,6 +140,13 @@ class Retriever:
         """
         as_of = as_of or date.today()
         vector = to_pgvector(self._embedder.embed_query(query))
+        swedish = query
+        if self._translator is not None and self._uses_translation() and not is_swedish(query):
+            swedish = self._translator.translate(query)
+        keyword = (swedish, query)  # (text for Swedish chunks, text for English chunks)
+        law_order = None  # the vector the law is ordered by, when not the question's own
+        if self.config.translated_vector and swedish != query:
+            law_order = to_pgvector(self._embedder.embed_query(swedish))
         first: list[Hit] = []
         named = named_units(query) if self.config.mode == "hybrid" else []
         if named:
@@ -130,10 +156,21 @@ class Retriever:
             first = [found[u] for u in named if u in found][:MAX_NAMED]
         depth = k + len(first)  # room for results the named sections duplicate
         if self.config.mix == "none":
-            rest = self._ranking(query, vector, as_of, depth, None, False)
+            rest = self._ranking(keyword, vector, as_of, depth, None, False, None)
         else:
             groups = [(t, False) for t in SOURCE_GROUPS.values()] + [(LISTED_TYPES, True)]
-            rankings = [self._ranking(query, vector, as_of, depth, t, x) for t, x in groups]
+            rankings = [
+                self._ranking(
+                    keyword,
+                    vector,
+                    as_of,
+                    depth,
+                    t,
+                    x,
+                    law_order if t == SOURCE_GROUPS["law"] else None,
+                )
+                for t, x in groups
+            ]
             rankings = [hits for hits in rankings if hits]
             rankings.sort(key=lambda hits: -hits[0].score)  # the best-matching group first
             rest = [
@@ -144,25 +181,37 @@ class Retriever:
             ]
         return _unique(first + rest)[:k]
 
+    def _uses_translation(self) -> bool:
+        """Translation costs a model call: only when keyword search or the law's vector
+        ordering will use it."""
+        config = self.config
+        if not config.translate:
+            return False
+        keyword_runs = config.mode == "keyword" or (
+            config.mode == "hybrid" and config.keyword_weight > 0
+        )
+        return keyword_runs or (config.translated_vector and config.mix == "interleave")
+
     def _ranking(
         self,
-        query: str,
+        keyword: tuple[str, str],
         vector: str,
         as_of: date,
         k: int,
         types: tuple[str, ...] | None,
         exclude: bool,
+        order_vector: str | None,
     ) -> list[Hit]:
         mode = self.config.mode
         if mode == "vector":
-            return self._search(vector, as_of, k, types, exclude)
+            return self._search(vector, as_of, k, types, exclude, order_vector=order_vector)
         if mode == "keyword":
-            return self._search(vector, as_of, k, types, exclude, keyword=query)
+            return self._search(vector, as_of, k, types, exclude, keyword=keyword)
         depth = max(self.config.candidates, k)
-        rankings = [self._search(vector, as_of, depth, types, exclude)]
+        rankings = [self._search(vector, as_of, depth, types, exclude, order_vector=order_vector)]
         weights = [1.0]
         if self.config.keyword_weight > 0:
-            rankings.append(self._search(vector, as_of, depth, types, exclude, keyword=query))
+            rankings.append(self._search(vector, as_of, depth, types, exclude, keyword=keyword))
             weights.append(self.config.keyword_weight)
         return fuse(rankings, weights)[:k]
 
@@ -173,15 +222,20 @@ class Retriever:
         k: int,
         source_types: tuple[str, ...] | None,
         exclude: bool = False,
-        keyword: str | None = None,
+        keyword: tuple[str, str] | None = None,
         units: list[str] | None = None,
+        order_vector: str | None = None,
     ) -> list[Hit]:
-        """One ranking: by cosine distance, or by BM25 when `keyword` is given. `units`
-        restricts it to those units."""
+        """One ranking: by cosine distance, or by BM25 when `keyword` (the question's text for
+        Swedish and for English chunks) is given. `units` restricts it to those units.
+        `order_vector` orders a vector ranking by another vector (the translated question);
+        the score stays against `vector`."""
         keyword_ctes = sql.SQL("")
         keyword_join = sql.SQL("")
         keyword_where = sql.SQL("")
-        order = sql.SQL("e.embedding <=> %(q)s::vector")
+        order = sql.SQL(
+            "e.embedding <=> %(oq)s::vector" if order_vector else "e.embedding <=> %(q)s::vector"
+        )
         if keyword is not None:
             keyword_ctes = sql.SQL(KEYWORD_CTES).format(  # pyright: ignore[reportArgumentType]
                 applies=sql.SQL(APPLIES_ON)  # pyright: ignore[reportArgumentType]
@@ -233,28 +287,32 @@ class Retriever:
             ),
             {
                 "q": vector,
+                "oq": order_vector,
                 "strategy": self.config.strategy,
                 "d": as_of,
                 "k": k,
                 "types": list(source_types) if source_types else None,
                 "exclude": exclude,
                 "units": units,
-                "text": _plain(keyword or ""),
+                "text_sv": _plain(keyword[0] if keyword else ""),
+                "text_en": _plain(keyword[1] if keyword else ""),
             },
         ).fetchall()
         return [Hit(*row) for row in rows]
 
 
 # BM25 over the chunks of one strategy whose wording applies on the date, the statistics
-# included. The question is stemmed once per text-search configuration; each chunk is matched
-# with the configuration it was indexed with. Document frequencies come from the GIN index;
+# included. The question is stemmed once per text-search configuration (its Swedish text with
+# `swedish`, its original with `english`); each chunk is matched with the configuration it was
+# indexed with. Document frequencies come from the GIN index;
 # length is the number of distinct lexemes. k1 = 1.2
 # (term-frequency saturation) and b = 0.75 (length normalisation), the usual defaults.
 KEYWORD_CTES = """
 terms AS (
-  SELECT DISTINCT cfg, t.lexeme
-  FROM unnest(ARRAY['swedish', 'english']::regconfig[]) AS cfg,
-       LATERAL unnest(to_tsvector(cfg, %(text)s)) AS t
+  SELECT DISTINCT q.cfg, t.lexeme
+  FROM (VALUES ('swedish'::regconfig, %(text_sv)s), ('english'::regconfig, %(text_en)s))
+         AS q(cfg, text),
+       LATERAL unnest(to_tsvector(q.cfg, q.text)) AS t
 ),
 corpus AS MATERIALIZED (
   SELECT c.ts_config AS cfg, count(*) AS n, avg(length(c.tsv)) AS avglen
