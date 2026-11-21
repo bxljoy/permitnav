@@ -553,7 +553,7 @@ Each slice ends with the retrieval eval (dev set, drafts included, so developmen
 6. **Reranker:** `bge-reranker-v2-m3` over the top 30–50; gain and latency. *(Done; results below.)*
 7. **LLM judge:** calibrated on ~30 answers you label, ≥85% agreement (D19).
 8. **Answer-model comparison (D15):** Haiku 5.5, Sonnet 5.5, one Mistral model.
-9. **Experiment grid and the hold-out run:** MLflow; your golden-set review (`checked`), then one hold-out run.
+9. **Experiment grid and the hold-out run:** MLflow; your golden-set review (`checked`), then one hold-out run. *(Dev-set review done 2026-11-21: all 64 items checked, no changes.)*
 
 ### Slice 1 results: hybrid search
 
@@ -665,4 +665,17 @@ Dev set, 48 items (hybrid, translation, keyword weight 0.5, variants collapsed):
 - **Interleaving still matters:** one ranking by reranker score, which unlike cosine compares across groups, lets the plain-language pages push law items from 0.69 to 0.38. The cross-encoder prefers explanations to statute text, just as cosine does.
 - **Deeper is not better:** 30 candidates add time without gain; 20 is the best on every measure.
 - **For phase 3 (hosting):** measured on CPU (the M3's cores, full precision), one question at depth 20 (40 pairs) takes 8.8 s with 2 threads and 7.4 s with 4; a typical cloud vCPU is slower. So the local model on the planned 8 GB CPU server would add 8 s or more to every answer. A hosted rerank API was not measured: it needs an account with a provider that offers one (OpenRouter does not). The options are a hosted rerank API (no memory cost, a per-call price, and EU data processing to check), a server with a GPU, or depth 10 on a bigger CPU server (R@5 0.58 instead of 0.61). Until that decision, reranking stays off by default; evals that use it say so in their header.
+
+### Golden-set review (dev set)
+
+Reviewed on 2026-11-21 with a review page showing each item's expected sources (with their text on the item's date), reference answer and expected behaviour; deliberately not what PermitNav retrieved or answered. All 64 items were marked correct, with no changes, and are now `checked`, so dev-set results are reported without `--include-drafts`. The review took about 4.5 minutes in all; the owner confirmed it as a full review.
+
+It settles the questions the evals raised, as labelled:
+
+- the deportation item (oos-deportation-work-permit-602) stays out of scope;
+- put-apply-with-extension-302, family-spouse-put-income-401, family-spouse-stays-403 and work-new-or-extension-202 expect a direct answer, not a follow-up question;
+- work-extension-insurance-history-204, work-update-pending-application-207 and work-switch-in-sweden-104 expect "not settled", not a follow-up;
+- the expected Migrationsverket sections for the agency items stand.
+
+So the behaviour eval's main finding, too many follow-up questions (15 items), is now a prompt problem to fix, not a labelling question. The hold-out set (24 items, private) is still unreviewed; it gets its own review before the hold-out run.
 
