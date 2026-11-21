@@ -472,3 +472,117 @@ def test_combined_expects_flags_are_rejected(tmp_path) -> None:
     path.write_text(json.dumps(line) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="at most one"):
         load_golden(path)
+
+
+# --- cross-references (phase 2, slice 3) --------------------------------------------------------
+
+
+def test_cited_units_resolve_chapterless_references_to_the_same_chapter() -> None:
+    from permitnav.parsing.references import cited_units
+
+    law = "sfs:2005:716"
+    text = (
+        "får förlängas om anställningen uppfyller förutsättningarna i 2 § första stycket. Om "
+        "ansökan avser en ny anställning gäller även det som föreskrivs i 2 § andra stycket. "
+        "Förlängning ska vägras om ... enligt 7 kap. 7 e § första stycket 1."
+    )
+    assert cited_units(text, law, "6") == ["sfs:2005:716/6kap/2§", "sfs:2005:716/7kap/7e§"]
+    # Lists with "eller" and "och", and a range; the chapter comes from the citing section.
+    assert cited_units("med stöd av 3 eller 3 a § eller 10–11 §§", law, "5") == [
+        "sfs:2005:716/5kap/3§",
+        "sfs:2005:716/5kap/3a§",
+        "sfs:2005:716/5kap/10§",
+        "sfs:2005:716/5kap/11§",
+    ]
+    # Other statutes: named ours resolve to them; anything else is left out.
+    assert cited_units("enligt 5 kap. 3 § utlänningslagen", "sfs:2006:97", "4") == [
+        "sfs:2005:716/5kap/3§"
+    ]
+    assert cited_units("enligt 4 kap. 1 a eller 1 b § brottsbalken", law, "20") == []
+    assert cited_units("enligt 8 § lagen (2016:752) om tillfälliga begränsningar", law, "5") == []
+    assert cited_units("Lag (2022:303).", law, "6") == []
+
+
+@pytest.mark.db
+def test_context_adds_the_sections_a_retrieved_section_refers_to(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    hits = stored.search("Vad säger 6 kap. 4 a § utlänningslagen?", date(2026, 11, 20), k=1)
+    assert hits[0].unit_id == "sfs:2005:716/6kap/4a§"
+    ctx = build_context(conn, hits, date(2026, 11, 20))
+    referenced = [s for s in ctx.sources if s.role == "referenced"]
+    # "2 § andra stycket" is 6 kap. 2 §; 7 kap. 7 e § is not in the fixture, so it is skipped.
+    assert [s.unit_id for s in referenced] == ["sfs:2005:716/6kap/2§"]
+    assert referenced[0].dates == "applies from 2026-06-01"
+    assert "| referenced |" in ctx.render()
+
+
+@pytest.mark.db
+def test_a_referenced_section_already_in_the_context_is_not_repeated(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    hits = stored.search("Vad säger 6 kap. 2 och 4 a §§ utlänningslagen?", date(2026, 11, 20), k=2)
+    ctx = build_context(conn, hits, date(2026, 11, 20))
+    assert [s.unit_id for s in ctx.sources].count("sfs:2005:716/6kap/2§") == 1
+
+
+@pytest.mark.db
+def test_references_are_capped(
+    conn: psycopg.Connection, stored: Retriever, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from permitnav.answering import context
+
+    monkeypatch.setattr(context, "MAX_REFERENCES", 0)
+    hits = stored.search("Vad säger 6 kap. 4 a § utlänningslagen?", date(2026, 11, 20), k=1)
+    assert not [
+        s for s in build_context(conn, hits, date(2026, 11, 20)).sources if s.role == "referenced"
+    ]
+
+
+def test_the_prompt_explains_referenced_sources() -> None:
+    from permitnav.answering.answerer import load_prompt
+
+    assert "`referenced`" in load_prompt()
+
+
+def test_reference_parsing_review_cases() -> None:
+    from permitnav.parsing.references import cited_units, ordered_section_refs
+
+    law = "sfs:2005:716"
+    # An unknown document still skips references to other acts (finding 2).
+    assert ordered_section_refs("6 kap. 2 § lagen (2016:752)", "") == []
+    # The chapter named after a chapterless reference, or before it in a joined list (4).
+    assert cited_units("enligt 2 § i 5 kap. gäller", law, "6") == ["sfs:2005:716/5kap/2§"]
+    assert cited_units("6 kap. 2 § och 3 §", law, "7") == [
+        "sfs:2005:716/6kap/2§",
+        "sfs:2005:716/6kap/3§",
+    ]
+    assert cited_units("8 kap. 2 § brottsbalken och 3 §", law, "7") == []
+    # Letter ranges (6).
+    assert cited_units("enligt 1 a–1 c §§", law, "6") == [
+        "sfs:2005:716/6kap/1a§",
+        "sfs:2005:716/6kap/1b§",
+        "sfs:2005:716/6kap/1c§",
+    ]
+    # Common words are not statute names (7).
+    assert cited_units("enligt 2 § i förslagen", law, "6") == ["sfs:2005:716/6kap/2§"]
+
+
+@pytest.mark.db
+def test_a_section_search_found_keeps_its_role_when_an_earlier_hit_cites_it(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    hits = stored.search("Vad säger 6 kap. 4 a och 2 §§ utlänningslagen?", date(2026, 11, 20), k=2)
+    assert [h.unit_id for h in hits] == ["sfs:2005:716/6kap/4a§", "sfs:2005:716/6kap/2§"]
+    ctx = build_context(conn, hits, date(2026, 11, 20))
+    roles = {s.unit_id: s.role for s in ctx.sources}
+    assert roles["sfs:2005:716/6kap/2§"] == "retrieved"
+
+
+def test_a_long_paragraph_is_cut_at_a_sentence() -> None:
+    from permitnav.answering.context import WHOLE_UNIT_TOKENS, _shortened
+
+    text = "Första meningen. " * (WHOLE_UNIT_TOKENS // 3)
+    short = _shortened(text)
+    assert short.endswith("meningen. […]")
+    assert len(short) <= WHOLE_UNIT_TOKENS * 4 + 4

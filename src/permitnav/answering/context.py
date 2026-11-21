@@ -7,6 +7,10 @@ For each retrieved unit:
   them points back to ("the older wording still applies to…"), so the model can say who is
   covered by which rule.
 
+For a retrieved law section, the sections it refers to ("2 § andra stycket", "7 kap. 7 e §")
+are added too, in the wording that applies on the date, so the model can say what the
+reference requires: at most MAX_REFERENCES_PER_HIT per section and MAX_REFERENCES in all.
+
 Transitional links are broad (every point of an amending act links to every section the act
 changed). A point that names specific sections ("6 kap. 2 §") is only added for those
 sections; a point that names none is kept, up to a limit.
@@ -23,11 +27,14 @@ import psycopg
 from psycopg import sql
 
 from permitnav.corpus.chunking import estimate_tokens
-from permitnav.parsing.references import section_refs
+from permitnav.parsing.references import cited_units, section_refs
 from permitnav.retrieval.retriever import APPLIES_ON, Hit
 
 WHOLE_UNIT_TOKENS = 800
 MAX_PROVISIONS_PER_HIT = 3
+MAX_REFERENCES_PER_HIT = 2
+MAX_REFERENCES = 4
+STATUTE_TYPES = ("statute",)
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 UNIT_SECTION = re.compile(r"^(sfs:\d{4}:\d+)/(\d+[a-z]?)kap/(\d+[a-z]?)§$")
 
@@ -37,7 +44,7 @@ class Source:
     marker: str  # "S1"
     unit_id: str
     version_id: int
-    role: str  # retrieved | transitional | older_wording
+    role: str  # retrieved | transitional | older_wording | referenced
     authority: str
     heading: str
     url: str
@@ -70,6 +77,8 @@ def build_context(conn: psycopg.Connection, hits: list[Hit], as_of: date) -> Con
     or not-yet-dated ones."""
     context = Context()
     seen_versions: set[int] = set()
+    references_left = MAX_REFERENCES
+    hit_versions = {hit.version_id for hit in hits}  # a reference never takes a hit's place
 
     def add(unit_id, version_id, role, authority, heading, url, text, dates) -> None:
         if version_id in seen_versions:
@@ -99,6 +108,13 @@ def build_context(conn: psycopg.Connection, hits: list[Hit], as_of: date) -> Con
             add(*provision)
             for older in _older_wordings(conn, provision[0], hit.unit_id):
                 add(*older)
+        if references_left > 0:
+            limit = min(MAX_REFERENCES_PER_HIT, references_left)
+            # Only what the model sees: a long section is shown as its matching chunk.
+            skip = seen_versions | hit_versions
+            for reference in _references(conn, hit, text, as_of, skip)[:limit]:
+                add(*reference)
+                references_left -= 1
     return context
 
 
@@ -182,6 +198,70 @@ def _older_wordings(conn: psycopg.Connection, provision_unit: str, unit_id: str)
         )
         for vid, auth, heading, url, text, vf, vt in rows
     ]
+
+
+def _references(
+    conn: psycopg.Connection, hit: Hit, text: str, as_of: date, seen: set[int]
+) -> list[tuple]:
+    """The sections a retrieved statute section cites, in citing order, in the wording that
+    applies on `as_of`; sections not stored, or already in the context, are skipped."""
+    section = _section_of(hit.unit_id)
+    if section is None:
+        return []
+    document, chapter, _ = section
+    cited = [u for u in cited_units(text, document, chapter) if u != hit.unit_id]
+    if not cited:
+        return []
+    rows = conn.execute(
+        sql.SQL(
+            """
+            SELECT u.id, v.id, u.authority, u.heading, u.url, v.text, v.valid_from, v.valid_to
+            FROM unit_version v JOIN unit u ON u.id = v.unit_id
+            WHERE u.id = ANY(%(ids)s) AND u.source_type = ANY(%(types)s) AND {applies}
+            ORDER BY u.id, v.valid_from DESC NULLS LAST, v.id DESC
+            """
+        ).format(applies=sql.SQL(APPLIES_ON)),  # pyright: ignore[reportArgumentType]
+        {"ids": cited, "types": list(STATUTE_TYPES), "d": as_of},
+    ).fetchall()
+    by_unit: dict[str, tuple] = {}
+    for row in rows:
+        by_unit.setdefault(row[0], row)  # the newest wording that applies
+    references = []
+    for unit in cited:
+        row = by_unit.get(unit)
+        if row is None or row[1] in seen:
+            continue
+        unit_id, version_id, authority, heading, url, body, valid_from, valid_to = row
+        references.append(
+            (
+                unit_id,
+                version_id,
+                "referenced",
+                authority,
+                heading,
+                url,
+                _shortened(body),
+                _dates(authority, valid_from, valid_to, None),
+            )
+        )
+    return references
+
+
+def _shortened(text: str) -> str:
+    """A referenced section is context, not the answer: long ones are cut at a paragraph."""
+    if estimate_tokens(text) <= WHOLE_UNIT_TOKENS:
+        return text
+    kept: list[str] = []
+    for paragraph in text.split("\n\n"):
+        if kept and estimate_tokens("\n\n".join([*kept, paragraph])) > WHOLE_UNIT_TOKENS:
+            break
+        kept.append(paragraph)
+    shortened = "\n\n".join(kept)
+    limit = WHOLE_UNIT_TOKENS * 4
+    if len(shortened) > limit:  # one huge paragraph: cut at a line or sentence end
+        cut = max(shortened.rfind("\n", 0, limit), shortened.rfind(". ", 0, limit) + 1)
+        shortened = shortened[: cut if cut > 0 else limit].rstrip()
+    return shortened + " […]"
 
 
 def _section_of(unit_id: str) -> tuple[str, str, str] | None:
