@@ -784,3 +784,22 @@ Then judged, two runs each:
 - **More sources add unsupported claims, in both languages:** two or three per run, against none at 8. Of the five, three were substantive: content from the artists' page answering a general question (a near-miss variant slipping in), an inference no source states, and a claim about which trips count towards residence time that the cited source does not support.
 - **Kept at 8 (owner's decision, D24):** the English slice is the headline, and there k = 12 adds unsupported claims without making answers more correct; in a legal answer an unsupported confident claim is worse than a missing detail. Not tried: k = 10, which may keep most of the gain with less dilution, and more sources for Swedish questions only (easy, but tuned to a 24-item slice).
 
+### The hold-out run (phase 2 result)
+
+The 24 private hold-out items were reviewed on 2026-11-22 (eight references made more precise, each new fact checked against the sources first; one cited court ruling, MIG 2017:24, kept in the item's notes because rulings are not crawled yet, D7) and then run **once** with the default configuration (hybrid search with translation and keyword weight 0.5, variant collapsing, the Swedish-only page ranking, k = 8, Haiku 5.5, the calibrated judge). Aggregate numbers only; the items stay private.
+
+| | Dev set (tuned on) | **Hold-out (run once)** |
+|---|---|---|
+| Retrieval R@5 [95% CI] | 0.53 [0.41, 0.65] | **0.31** [0.14, 0.50] (18 scored) |
+| Law items R@5 | 0.69 | 0.40 |
+| English R@5 | 0.54 | 0.25 |
+| Behaviour (right kind of answer) | 49–55 of 64 (~81%) | **14 of 24 (58%)** |
+| Judged correct (items that should be answered) | 39–44 of 48 (81–85% at k = 8) | **11 of 18 (61%)** |
+| Faithful (judged) | 43–48 of 48 | 18 of 18 |
+| Answers in the question's language | 63 of 63 | 24 of 24 |
+
+- **The dev numbers were optimistic.** Every phase 2 choice was tuned on the dev set (prompt wording, fusion weights, variant rules, the follow-up line), and part of the gain was specific to those 64 questions: about 20 points of correctness and 23 of behaviour do not carry over. The hold-out is also small (CIs overlap) and somewhat harder (more multi-source items; references just made more precise).
+- **What carried over:** faithfulness (no unsupported claims detected) and the answer-language fix. Changes to *how* the system answers generalised; tuning of *what* it retrieves, and of when it answers rather than says "not settled", generalised less: four answerable hold-out questions got "not settled".
+- **Phase 2's headline is therefore:** dev 81–85% correct, hold-out 61%; retrieval R@5 0.53 dev, 0.31 hold-out.
+- **This hold-out is now spent.** Nothing may be tuned on it. Its failures can be read to find general causes (multi-source retrieval, over-caution), but every fix must be shown on new questions: a fresh hold-out of 20–30 items, reviewed the same way, before the next round of changes is judged.
+
