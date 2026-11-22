@@ -74,6 +74,10 @@ def _translation_cost(translator) -> str:
 # the keyword ranking at weight 0.5. Without translation, keyword search only adds noise for
 # English questions, so its weight drops to 0. RetrievalConfig's own defaults stay offline.
 TRANSLATED_KEYWORD_WEIGHT = 0.5
+# Measured too: a third page ranking by the translated question's vector, only for pages with
+# no English version, lets English questions reach Swedish-only guidance (the trade-union
+# page) without crowding out English twins. Weight 1 (2 crowded out other sources).
+TRANSLATED_PAGE_WEIGHT = 1.0
 
 
 def _retrieval_config(args: argparse.Namespace) -> RetrievalConfig:
@@ -87,14 +91,23 @@ def _retrieval_config(args: argparse.Namespace) -> RetrievalConfig:
     if weight is None:
         weight = TRANSLATED_KEYWORD_WEIGHT if translate else RetrievalConfig.keyword_weight
     keyword_runs = args.mode == "keyword" or (args.mode == "hybrid" and weight > 0)
+    page_ranking = args.mode == "hybrid" and args.mix != "none"
+    if args.translated_page_weight is not None and not page_ranking:
+        raise SystemExit("--translated-page-weight needs --mode hybrid and a mix other than none")
+    page_weight = 0.0
+    if translate and page_ranking:
+        explicit = args.translated_page_weight
+        page_weight = TRANSLATED_PAGE_WEIGHT if explicit is None else explicit
     return RetrievalConfig(
         mode=args.mode,
         strategy=getattr(args, "strategy", RetrievalConfig.strategy),
         keyword_weight=weight,
-        # A translation costs a model call: only when keyword search or the law vector uses it.
-        translate=translate and (keyword_runs or args.translated_vector),
+        # A translation costs a model call: only when keyword search, the law vector or the
+        # page ranking uses it.
+        translate=translate and (keyword_runs or args.translated_vector or page_weight > 0),
         translated_vector=args.translated_vector,
         collapse_variants=not args.no_collapse_variants,
+        translated_page_weight=page_weight,
         rerank=args.rerank,
         rerank_depth=args.rerank_depth,
         mix=args.mix,
@@ -107,6 +120,12 @@ def _add_retrieval_options(parser: argparse.ArgumentParser) -> None:
         "--keyword-weight",
         type=float,
         help=f"hybrid fusion weight (default {TRANSLATED_KEYWORD_WEIGHT} with translation, else 0)",
+    )
+    parser.add_argument(
+        "--translated-page-weight",
+        type=float,
+        help=f"rank Swedish-only pages by the translated question (default {TRANSLATED_PAGE_WEIGHT}"
+        " with translation, else 0)",
     )
     parser.add_argument(
         "--rerank", action="store_true", help="reorder candidates with bge-reranker-v2-m3 (local)"
@@ -364,6 +383,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
     weight += ", translate" if config.translate else ""
     weight += " (+ law vector)" if config.translated_vector else ""
     weight += ", collapse variants" if config.collapse_variants else ""
+    if config.translated_page_weight and config.mode == "hybrid" and config.mix != "none":
+        weight += f", translated page ranking {config.translated_page_weight}"
     weight += f", rerank top {config.rerank_depth}" if config.rerank else ""
     weight += f", mix={config.mix}" if config.mix != "interleave" else ""
     print(
@@ -382,6 +403,21 @@ def cmd_eval(args: argparse.Namespace) -> int:
         )
     for reason, ids in run.skipped.items():
         print(f"skipped {len(ids)}: {reason}")
+    # English readers should get English pages where they exist (D6): of English questions'
+    # page sources in the top 8, how many are in English.
+    english_pages = [
+        u
+        for r in run.results
+        if r.item.original_language == "en"
+        for u in r.retrieved[:8]
+        if u.startswith("web:")
+    ]
+    if english_pages:
+        in_english = sum(u.startswith("web:en/") for u in english_pages)
+        print(
+            f"English questions' page sources in English: {in_english} of {len(english_pages)}"
+            f" ({in_english / len(english_pages):.0%})"
+        )
     if cost := _translation_cost(translator):
         print(cost)
     for item_id, units in run.unknown_units.items():

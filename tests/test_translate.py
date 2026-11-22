@@ -124,15 +124,23 @@ def test_the_cli_defaults_to_translation_with_the_measured_keyword_weight() -> N
         True,
         TRANSLATED_KEYWORD_WEIGHT,
     )
+    assert default.translated_page_weight == 1.0  # Swedish-only pages, measured
     offline = _retrieval_config(parser.parse_args(["--no-translate"]))
     assert (offline.translate, offline.keyword_weight) == (False, 0.0)
+    assert offline.translated_page_weight == 0.0
     assert _retrieval_config(parser.parse_args(["--keyword-weight", "0.3"])).keyword_weight == 0.3
     vector = _retrieval_config(parser.parse_args(["--mode", "vector"]))
     assert not vector.translate
     law = _retrieval_config(parser.parse_args(["--mode", "vector", "--translated-vector"]))
     assert law.translate and law.translated_vector
-    # Weight 0 means keyword search doesn't run, so nothing would use a translation.
-    assert not _retrieval_config(parser.parse_args(["--keyword-weight", "0"])).translate
+    # Keyword weight 0: the page ranking still uses the translation; with it off too, nothing does.
+    assert _retrieval_config(parser.parse_args(["--keyword-weight", "0"])).translate
+    nothing = parser.parse_args(["--keyword-weight", "0", "--translated-page-weight", "0"])
+    assert not _retrieval_config(nothing).translate
+    # The page ranking only exists in hybrid mode with interleaving.
+    assert _retrieval_config(parser.parse_args(["--mix", "none"])).translated_page_weight == 0.0
+    with pytest.raises(SystemExit, match="needs --mode hybrid"):
+        _retrieval_config(parser.parse_args(["--mode", "vector", "--translated-page-weight", "1"]))
     with pytest.raises(SystemExit):
         parser.parse_args(["--no-translate", "--translated-vector"])
 
@@ -210,3 +218,87 @@ def test_no_translation_is_requested_when_nothing_would_use_it(
     ):
         Retriever(conn, FAKE, config, words).search("What salary?", date(2026, 11, 20))
     assert words.asked == []
+
+
+@pytest.mark.db
+def test_pages_can_also_be_searched_with_the_translated_question(
+    conn: psycopg.Connection, corpus: None
+) -> None:
+    """A Swedish-only page section reaches an English question through a third ranking: the
+    page group ordered by the Swedish translation's vector (phase 2, Swedish-only pages)."""
+    from permitnav.corpus.store import ingest_page
+    from permitnav.parsing.webpage import parse_page
+    from tests.test_webpage import EN, SV, raw_page
+    from tests.test_webpage import FIXTURE as PAGE
+
+    ingest_page(conn, raw_page(PAGE, 20), parse_page(PAGE, SV))
+    build_chunks(conn, "structure")
+    embed_chunks(conn, FAKE)
+    # "kronor" and "sverige" occur in other sections, not the union one: the English ranking
+    # alone ranks those first (the fake embedder matches words, like a real one in-language).
+    question = "Does the trade union get to comment on kronor in sverige?"
+    words = Dictionary({question: "fackförbund erbjudandet anställning yttra"})
+    anchor = "#fackforbundetfarmojlighetattyttrasig"
+
+    def page_rank(weight: float, untranslated_only: bool = False) -> int | None:
+        config = RetrievalConfig(
+            mode="hybrid",
+            translate=True,
+            keyword_weight=0.0,
+            translated_page_weight=weight,
+            translated_pages_untranslated_only=untranslated_only,
+        )
+        hits = Retriever(conn, FAKE, config, words).search(question, date(2026, 11, 21), k=20)
+        pages = [h.unit_id for h in hits if h.unit_id.startswith("web:")]
+        return next((n + 1 for n, u in enumerate(pages) if u.endswith(anchor)), None)
+
+    without, with_translation = page_rank(0.0), page_rank(1.0)
+    # The translated ranking lifts it; the English ranking still counts in the fusion.
+    assert with_translation is not None
+    assert without is None or with_translation < without
+    assert words.asked == [question]  # only the search that uses it asks for a translation
+    # By default the translated ranking covers only Swedish pages without a live English
+    # version. With no English twin stored, this page counts as Swedish-only and is lifted.
+    assert page_rank(1.0, untranslated_only=True) == with_translation
+    # Once its English twin is stored (with current sections), the ranking leaves it alone.
+    ingest_page(conn, raw_page(PAGE, 20, url=EN), parse_page(PAGE, EN))
+    build_chunks(conn, "structure")
+    embed_chunks(conn, FAKE)
+    swedish = [u for u in _units_lifted(conn, words, question) if u.startswith("web:sv/")]
+    assert not swedish
+
+
+@pytest.mark.db
+def test_the_translated_page_ranking_keeps_scores_against_the_question(
+    conn: psycopg.Connection, corpus: None
+) -> None:
+    question = "Which salary requirement applies?"
+    words = Dictionary({question: "lönen medianlönen procent lönekravet"})
+    plain = Retriever(conn, FAKE, RetrievalConfig(mode="vector"))
+    scores = {h.unit_id: h.score for h in plain.search(question, date(2026, 11, 20), k=50)}
+    config = RetrievalConfig(
+        mode="hybrid", translate=True, keyword_weight=0.0, translated_page_weight=1.0
+    )
+    for hit in Retriever(conn, FAKE, config, words).search(question, date(2026, 11, 20)):
+        if hit.unit_id in scores:
+            assert hit.score == pytest.approx(scores[hit.unit_id])
+
+
+@pytest.mark.db
+def test_a_negative_translated_page_weight_is_rejected(conn: psycopg.Connection) -> None:
+    with pytest.raises(ValueError, match="translated_page_weight"):
+        Retriever(conn, FAKE, RetrievalConfig(translated_page_weight=-1), Dictionary({}))
+
+
+def _units_lifted(conn, words, question) -> list[str]:
+    """Sections the translated page ranking alone would put forward (keyword and vector off)."""
+    from permitnav.corpus.indexing import to_pgvector
+
+    config = RetrievalConfig(mode="hybrid", translate=True, translated_page_weight=1.0)
+    retriever = Retriever(conn, FAKE, config, words)
+    swedish = to_pgvector(FAKE.embed_query(words.translate(question)))
+    vector = to_pgvector(FAKE.embed_query(question))
+    hits = retriever._search(
+        vector, date(2026, 11, 21), 20, ("web_page",), order_vector=swedish, untranslated_only=True
+    )
+    return [h.unit_id for h in hits]

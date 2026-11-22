@@ -103,6 +103,13 @@ class RetrievalConfig:
     # translated_vector also for the law's vector ranking.
     translate: bool = False
     translated_vector: bool = False
+    # Hybrid: for English questions, a third ranking in the page group, ordered by the Swedish
+    # translation's vector and fused with this weight, so Swedish-only pages (no English
+    # twin) can reach English questions. 0 = off. Over all pages it crowded out English twins
+    # (English readers' page sources in English 73% -> 41%), so by default it covers only
+    # sections of pages that have no English version.
+    translated_page_weight: float = 0.0
+    translated_pages_untranslated_only: bool = True
     # One slot per near-duplicate page section (the same section on the employee, artist,
     # seasonal-worker… pages; retrieval/variants.py). Measured in phase 2 slice 5: recall
     # unchanged, but without it 36 of 512 top-8 slots on the dev set held such a copy.
@@ -150,6 +157,10 @@ class Retriever:
             raise ValueError(f"unknown mix {self.config.mix!r}")
         if self.config.keyword_weight < 0 or self.config.candidates < 1:
             raise ValueError("keyword_weight must be >= 0 and candidates >= 1")
+        if self.config.translated_page_weight < 0:
+            raise ValueError("translated_page_weight must be >= 0")
+        if self.config.translated_page_weight > 0 and not self.config.translate:
+            raise ValueError("translated_page_weight needs translate=True")
         table = EMBEDDING_TABLES.get(embedder.model_id)
         if table is None:
             raise ValueError(f"no embedding table for model {embedder.model_id!r}")
@@ -170,8 +181,12 @@ class Retriever:
             swedish = self._translator.translate(query)
         keyword = (swedish, query)  # (text for Swedish chunks, text for English chunks)
         law_order = None  # the vector the law is ordered by, when not the question's own
-        if self.config.translated_vector and swedish != query:
-            law_order = to_pgvector(self._embedder.embed_query(swedish))
+        swedish_vector = None
+        if swedish != query and (self.config.translated_vector or self._page_translation()):
+            swedish_vector = to_pgvector(self._embedder.embed_query(swedish))
+        if self.config.translated_vector:
+            law_order = swedish_vector
+        page_order = swedish_vector if self._page_translation() else None
         first: list[Hit] = []
         named = named_units(query) if self.config.mode == "hybrid" else []
         if named:
@@ -185,8 +200,10 @@ class Retriever:
         if self.config.rerank:
             fetch = max(fetch, self.config.rerank_depth)
 
-        def ranked(types, exclude, order_vector):
-            hits = self._ranking(keyword, vector, as_of, fetch, types, exclude, order_vector)
+        def ranked(types, exclude, order_vector, extra_order=None):
+            hits = self._ranking(
+                keyword, vector, as_of, fetch, types, exclude, order_vector, extra_order
+            )
             if self.config.rerank:  # the top candidates reordered; the rest kept after them
                 cut = self.config.rerank_depth
                 hits = self._rerank(query, hits[:cut]) + hits[cut:]
@@ -199,7 +216,13 @@ class Retriever:
         else:
             groups = [(t, False) for t in SOURCE_GROUPS.values()] + [(LISTED_TYPES, True)]
             rankings = [
-                ranked(t, x, law_order if t == SOURCE_GROUPS["law"] else None) for t, x in groups
+                ranked(
+                    t,
+                    x,
+                    law_order if t == SOURCE_GROUPS["law"] else None,
+                    page_order if t == SOURCE_GROUPS["guidance"] else None,
+                )
+                for t, x in groups
             ]
             rankings = [hits for hits in rankings if hits]
             if self.config.mix == "rerank":  # one ranking: reranker scores compare across groups
@@ -221,6 +244,13 @@ class Retriever:
         scored = [dataclasses.replace(h, rerank_score=s) for h, s in zip(hits, scores, strict=True)]
         return sorted(scored, key=_by_rerank_score)  # stable: ties keep their order
 
+    def _page_translation(self) -> bool:
+        return (
+            self.config.mode == "hybrid"
+            and self.config.translated_page_weight > 0
+            and self.config.mix != "none"
+        )
+
     def _uses_translation(self) -> bool:
         """Translation costs a model call: only when keyword search or the law's vector
         ordering will use it."""
@@ -231,7 +261,11 @@ class Retriever:
             config.mode == "hybrid" and config.keyword_weight > 0
         )
         # The law is ordered by the translation whenever groups are searched separately.
-        return keyword_runs or (config.translated_vector and config.mix != "none")
+        return (
+            keyword_runs
+            or (config.translated_vector and config.mix != "none")
+            or self._page_translation()
+        )
 
     def _ranking(
         self,
@@ -242,7 +276,10 @@ class Retriever:
         types: tuple[str, ...] | None,
         exclude: bool,
         order_vector: str | None,
+        extra_order: str | None = None,
     ) -> list[Hit]:
+        """One group's ranking. `extra_order`: a further vector ranking (the translated
+        question, for pages) fused in with translated_page_weight."""
         mode = self.config.mode
         if mode == "vector":
             return self._search(vector, as_of, k, types, exclude, order_vector=order_vector)
@@ -254,6 +291,19 @@ class Retriever:
         if self.config.keyword_weight > 0:
             rankings.append(self._search(vector, as_of, depth, types, exclude, keyword=keyword))
             weights.append(self.config.keyword_weight)
+        if extra_order is not None:  # scores stay against the question's own vector
+            rankings.append(
+                self._search(
+                    vector,
+                    as_of,
+                    depth,
+                    types,
+                    exclude,
+                    order_vector=extra_order,
+                    untranslated_only=self.config.translated_pages_untranslated_only,
+                )
+            )
+            weights.append(self.config.translated_page_weight)
         return fuse(rankings, weights)[:k]
 
     def _search(
@@ -266,6 +316,7 @@ class Retriever:
         keyword: tuple[str, str] | None = None,
         units: list[str] | None = None,
         order_vector: str | None = None,
+        untranslated_only: bool = False,
     ) -> list[Hit]:
         """One ranking: by cosine distance, or by BM25 when `keyword` (the question's text for
         Swedish and for English chunks) is given. `units` restricts it to those units.
@@ -305,6 +356,7 @@ class Retriever:
                     AND (%(types)s::text[] IS NULL
                          OR (u.source_type = ANY(%(types)s::text[])) <> %(exclude)s)
                     AND (%(units)s::text[] IS NULL OR u.id = ANY(%(units)s::text[]))
+                    AND (NOT %(untranslated)s OR (u.language = 'sv' AND {no_twin}))
                 ),
                 best_per_unit AS (
                   SELECT DISTINCT ON (unit_id) * FROM scored ORDER BY unit_id, rank_key, chunk_id
@@ -319,6 +371,7 @@ class Retriever:
                 FROM best ORDER BY rank_key, unit_id LIMIT %(k)s
                 """
             ).format(
+                no_twin=sql.SQL(NO_LIVE_ENGLISH_TWIN),
                 keyword_ctes=keyword_ctes,
                 order=order,
                 table=sql.Identifier(self._table),
@@ -329,6 +382,7 @@ class Retriever:
             {
                 "q": vector,
                 "oq": order_vector,
+                "untranslated": untranslated_only,
                 "strategy": self.config.strategy,
                 "d": as_of,
                 "k": k,
@@ -340,6 +394,20 @@ class Retriever:
             },
         ).fetchall()
         return [Hit(*row) for row in rows]
+
+
+# A Swedish page with no English version that still exists: no twin recorded from either
+# side (the Swedish page's hreflang, or an English page naming it) whose sections are still
+# observed. A twin that disappeared from the site no longer counts.
+NO_LIVE_ENGLISH_TWIN = """NOT EXISTS (
+  SELECT 1 FROM page_translation pt
+  JOIN unit tu ON tu.document = CASE WHEN pt.document = u.document THEN pt.translation
+                                     ELSE pt.document END
+  JOIN unit_version tv ON tv.unit_id = tu.id AND tv.observed_to IS NULL
+  WHERE tu.language = 'en'
+    AND ((pt.document = u.document AND pt.language = 'sv')
+         OR (pt.translation = u.document AND pt.language = 'en'))
+)"""
 
 
 # BM25 over the chunks of one strategy whose wording applies on the date, the statistics

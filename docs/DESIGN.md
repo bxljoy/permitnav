@@ -293,6 +293,17 @@ Answers from Migrationsverket's phone service, emails and individual case office
 
 ---
 
+### D24. English-primary; answers in the question's language
+
+PermitNav's primary users are people who move to Sweden for work: applicants for a first permit, people changing employer or extending, and those heading for permanent residence. Many of them do not read Swedish well, and English is the language they most often share. Swedish speakers (employers, HR staff, long-term residents) are served too, and Swedish is the language of every source.
+
+- **Priorities and evaluation are English-first.** When a change is judged, the English slice is the headline number (D20 already reports both languages); a change that helps Swedish but hurts English needs a strong reason. Cross-language work (an English question, Swedish law) gets priority because it is the hardest path and the main one.
+- **Answers are in the language of the question,** not English by default: Swedish questions get Swedish answers, English ones English. When the language is unclear (very short, mixed, another language), no language is imposed and the model follows the question (forcing English on unclear questions answered German and Arabic in English).
+- **English is the default around the answer:** the interface, PermitNav's fixed texts, and the unofficial translation of Swedish quotes for every non-Swedish question (D12), which for English users is part of the product, not a courtesy.
+- **Swedish stays first-class in the pipeline:** the sources are Swedish, the Swedish page wins on a disagreement (D6), and answers quote the Swedish text.
+- **V1 supports English and Swedish.** Other languages may work (the translator turns any language into Swedish for keyword search, and the model answers in the question's language) but nothing measures them; which ones to add is decided from real usage after V1.
+- **The golden set keeps its English/Swedish pairs,** which keep the comparison fair; new items can lean on questions written in English.
+
 ## Phase 1 internals
 
 Added 2026-11-20. How the concepts above become code for phase 1 (baseline RAG), designed so that phases 2–5 add behaviour behind the same interfaces instead of changing them.
@@ -735,7 +746,16 @@ Two judged runs with rules 10–11 and the language fix: correct 41 and 39 of 48
 
 Open points from this round:
 
-- **Swedish-only pages and English questions:** the trade-union page has no English version. English questions search pages with their English vector, so it does not reach the top 8; the translation only helps keyword search. Worth measuring: ordering Swedish-only pages by the translated question too, as `translated_vector` does for the law.
+- **Swedish-only pages and English questions (handled):** the trade-union page is the only one of 114 Swedish pages with no English version. For the English 102 question its 14-day section ranked 59th by meaning (cosine 0.56 against 0.66 for English union sections) though 2nd by keyword search, so it missed the top 8. Fix (`RetrievalConfig.translated_page_weight`, `translated_pages_untranslated_only`): for English questions, a third ranking in the page group, ordered by the Swedish translation's vector (scores stay against the question), fused with RRF.
+
+| Configuration | R@5 | R@10 | 102-en: 14-day section | English questions' page sources in English |
+|---|---|---|---|---|
+| without | 0.53 | 0.66 | not found | 73% |
+| A: all pages, weight 1 | 0.53 | 0.68 | rank 5 | 41% |
+| **B: only pages with no English version, weight 1 (CLI default)** | 0.53 | 0.67 | **rank 1** | **70%** |
+| B, weight 2 | 0.53 | 0.66 | rank 1 | 69% (crowds out 102-en's other requirement) |
+
+  Over all pages the translated ranking pushed English readers' sources from English to Swedish twins (D6), for no recall gain; restricted to pages without an English version it reaches the Swedish-only guidance and leaves the rest alone. The English 102 answer now gives the 14-day rule. The page-language share is reported by `permitnav eval`.
 - **A page's plain wording over the law's term:** in 202 the answer model prefers Migrationsverket's "new application" to the law's "extension" even with 6 kap. 4 a § in the context, and invents the contrast. A candidate for the answer-model comparison (slice 8): whether a stronger model reads the two together.
 - **The language instruction can still slip:** one `ask` of a Swedish question (102-sv) answered in English, although both judged runs had every reply in the question's language.
 - **More sources outside the crawl rules:** the trade-union page shows that useful guidance can live outside the applicant and employer sections. When an answer says "the sources do not say", check the site before treating it as a gap in the rules.
