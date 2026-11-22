@@ -237,11 +237,21 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             print(f"\r  {n}/{len(swedish)} pages (with English versions)", end="", flush=True)
         finish_crawl(_raw_dir(), fetched, failed)
         print(f"\nmigrationsverket: {len(fetched)} fetched, {gone} gone, {len(failed)} failed")
+    if args.source in ("domstol", "all"):
+        from permitnav.sources.domstol import fetch_rulings
+
+        try:
+            rulings_fetch = fetch_rulings(http, _raw_dir())
+        except (RuntimeError, ValueError, OSError) as error:  # malformed JSON, network
+            print(f"domstol: failed: {error}")
+            return 1
+        print(f"domstol: {len(rulings_fetch.content):,} bytes -> {rulings_fetch.storage_path}")
     return 1 if failed else 0
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
     from permitnav.corpus.store import ingest_page, ingest_statute
+    from permitnav.parsing.ruling import EARLIEST as EARLIEST_RULING
     from permitnav.parsing.statute import parse_statute
     from permitnav.sources.riksdagen import latest_fetch
 
@@ -272,6 +282,14 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 notes = report.conflicts + [f"estimated change date: {u}" for u in report.estimated]
                 for line in notes:
                     print(f"  note: {line}")
+        if args.source == "riksdagen":  # statute dates may have moved under the rulings' links
+            from permitnav.corpus.store import relink_rulings
+            from permitnav.parsing.ruling import parse_rulings
+            from permitnav.sources.domstol import latest_rulings
+
+            if (rulings_raw := latest_rulings(_raw_dir())) is not None:
+                links = relink_rulings(conn, parse_rulings(rulings_raw.content))
+                print(f"domstol: {links} ruling links rebuilt")
         if args.source in ("migrationsverket", "all"):
             from permitnav.parsing.webpage import parse_page
             from permitnav.sources.migrationsverket import saved_pages
@@ -304,6 +322,27 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 f"{totals['failed']} failed"
             )
             status = status or (1 if totals["failed"] else 0)
+        if args.source in ("domstol", "all"):
+            from permitnav.corpus.store import ingest_rulings
+            from permitnav.parsing.ruling import parse_rulings
+            from permitnav.sources.domstol import latest_rulings
+
+            raw = latest_rulings(_raw_dir())
+            if raw is None:  # like a missing statute download: recorded, the rest still runs
+                print("domstol: nothing downloaded yet; run `permitnav fetch --source domstol`")
+                status = 1
+            else:
+                rulings = parse_rulings(raw.content)
+                report = ingest_rulings(conn, raw, rulings)
+                print(
+                    f"domstol: {report.units} rulings in scope ({rulings.out_of_scope} out of"
+                    f" scope, {rulings.too_old} decided before {EARLIEST_RULING}),"
+                    f" {report.new_versions} new, {report.unchanged_versions} unchanged,"
+                    f" {report.closed_versions} closed, {report.withdrawn_versions} replaced,"
+                    f" {report.links} links to cited sections"
+                )
+                for number in rulings.no_text:
+                    print(f"  note: {number} has no full text in the source; summary only")
     return status
 
 
@@ -529,6 +568,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
         credits.append("Källa: Sveriges riksdag")
     if any(c.authority == "web_page" for c in answer.citations):
         credits.append("Källa: Migrationsverket")
+    if any(c.authority == "ruling" for c in answer.citations):
+        credits.append("Källa: Sveriges Domstolar")
     if credits:
         print("\n" + " · ".join(credits))
     print(
@@ -935,7 +976,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="permitnav")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="apply database migrations").set_defaults(run=cmd_migrate)
-    sources = ["riksdagen", "migrationsverket", "all"]
+    sources = ["riksdagen", "migrationsverket", "domstol", "all"]
     fetch = sub.add_parser("fetch", help="download statutes and Migrationsverket pages")
     fetch.add_argument("sfs", nargs="*", help="SFS numbers, e.g. 2005:716 (default: all in scope)")
     fetch.add_argument("--source", default="all", choices=sources)

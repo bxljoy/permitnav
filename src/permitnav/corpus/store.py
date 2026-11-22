@@ -31,6 +31,7 @@ from datetime import date, datetime
 
 import psycopg
 
+from permitnav.parsing.ruling import Rulings
 from permitnav.parsing.statute import Statute
 from permitnav.parsing.types import ParsedUnit
 from permitnav.parsing.webpage import Page
@@ -98,6 +99,38 @@ def ingest_page(conn: psycopg.Connection, raw: RawFetch, page: Page) -> IngestRe
                     (page.url, page.language, url),
                 )
     return report
+
+
+def ingest_rulings(conn: psycopg.Connection, raw: RawFetch, rulings: Rulings) -> IngestReport:
+    """Store rulings (one unit each, dated by the decision date) and link each one to the
+    wording of every section it cites that applied on its decision date (D7). A ruling no
+    longer in the court's list is closed like any other unit that disappears."""
+    with conn.transaction():
+        withdrawn = _withdraw_changed_rulings(conn, raw, rulings)
+    report = _ingest(conn, raw, rulings.units, _Context(repealed={}, in_force={}), [])
+    report.withdrawn_versions += withdrawn
+    with conn.transaction():
+        report.links = _link_rulings(conn, rulings)
+    return report
+
+
+def _withdraw_changed_rulings(conn: psycopg.Connection, raw: RawFetch, rulings: Rulings) -> int:
+    """A ruling whose stored text differs from the new one (a correction, or full text added
+    to a summary) keeps one wording: the old text is withdrawn, not ended. Both would start on
+    the decision date, so ending the old one would overlap the new one (one_wording_per_day);
+    the decision itself has not changed, only how the source renders it."""
+    count = 0
+    for unit in rulings.units:
+        cur = conn.execute(
+            """
+            UPDATE unit_version SET withdrawn = true, observed_to = %(at)s
+            WHERE unit_id = %(u)s AND observed_to IS NULL AND NOT withdrawn
+              AND text_hash <> %(h)s
+            """,
+            {"u": unit.unit_id, "h": text_hash(unit.text), "at": raw.fetched_at},
+        )
+        count += cur.rowcount
+    return count
 
 
 def close_documents(conn: psycopg.Connection, keep: set[str], at: datetime) -> int:
@@ -460,6 +493,46 @@ def _link_transitional(conn: psycopg.Connection, statute: Statute) -> int:
                     "INSERT INTO unit_link (from_unit_id, to_version_id, kind)"
                     " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
                     (unit.unit_id, version_id, kind),
+                )
+                count += inserted.rowcount
+    return count
+
+
+def relink_rulings(conn: psycopg.Connection, rulings: Rulings) -> int:
+    """Rebuild the rulings' citation links, e.g. after statute wordings changed their dates
+    or were withdrawn (links point at versions, so they can go stale)."""
+    with conn.transaction():
+        return _link_rulings(conn, rulings)
+
+
+def _link_rulings(conn: psycopg.Connection, rulings: Rulings) -> int:
+    """`cites` links from each ruling to the cited sections' wordings on its decision date.
+
+    Until statute history is rebuilt (D10, phase 4), many wordings have no recorded start,
+    and such a wording counts as applying on any earlier date: the link then points at the
+    oldest wording we know, not necessarily the one the court read."""
+    count = 0
+    for unit in rulings.units:
+        conn.execute(
+            "DELETE FROM unit_link WHERE from_unit_id = %s AND kind = 'cites'", (unit.unit_id,)
+        )
+        for target in dict.fromkeys(t for kind, t in unit.links if kind == "cites"):
+            row = conn.execute(
+                """
+                SELECT v.id FROM unit_version v
+                WHERE v.unit_id = %(u)s AND v.time_basis = 'valid' AND NOT v.withdrawn
+                  AND v.pending IS DISTINCT FROM 'starts'
+                  AND (v.valid_from IS NULL OR v.valid_from <= %(d)s)
+                  AND (v.valid_to IS NULL OR v.valid_to > %(d)s)
+                ORDER BY v.valid_from DESC NULLS LAST LIMIT 1
+                """,
+                {"u": target, "d": unit.valid_from},
+            ).fetchone()
+            if row is not None:
+                inserted = conn.execute(
+                    "INSERT INTO unit_link (from_unit_id, to_version_id, kind)"
+                    " VALUES (%s, %s, 'cites') ON CONFLICT DO NOTHING",
+                    (unit.unit_id, row[0]),
                 )
                 count += inserted.rowcount
     return count

@@ -119,6 +119,14 @@ class RetrievalConfig:
     # 4 s per question on the Mac GPU; off by default until the phase 3 hosting decision.
     rerank: bool = False
     rerank_depth: int = 20
+    # Slots for the "other" group (rulings, later position papers), placed last among the k
+    # results: they complement the law and the guidance instead of taking a third of the
+    # places in the interleaving (phase 3: with equal shares, dev R@5 fell 0.53 -> 0.46).
+    # None gives the group an equal share, as before.
+    other_slots: int | None = 1
+    # The rank the "other" slots start at (1-based), the same whatever k a caller asks for,
+    # so the eval (k=10) and the answerer (k=8) see the same ranking: the answer's k.
+    other_rank: int = 8
     # Hybrid: the keyword ranking's weight in the fusion, relative to the vector ranking's 1.
     # 0 keeps only the vector ranking and the lookup of sections the question names. Measured
     # in phase 2 (dev set, 48 items): without translation R@5 0.47 at 0, 0.46 at 0.3, 0.40 at
@@ -224,6 +232,9 @@ class Retriever:
                 )
                 for t, x in groups
             ]
+            other: list[Hit] = []
+            if self.config.other_slots is not None:  # the last group is "other"
+                other = rankings.pop()[: self.config.other_slots]
             rankings = [hits for hits in rankings if hits]
             if self.config.mix == "rerank":  # one ranking: reranker scores compare across groups
                 rest = sorted((hit for hits in rankings for hit in hits), key=_by_rerank_score)
@@ -236,6 +247,10 @@ class Retriever:
                     for hits in rankings
                     if position < len(hits)
                 ]
+            if other:  # at a fixed rank, never in place of a section the question names
+                ordered = _unique(first + rest)
+                at = max(len(_unique(first)), min(k, self.config.other_rank) - len(other))
+                return _unique(ordered[:at] + other + ordered[at:])[:k]
         return _unique(first + rest)[:k]
 
     def _rerank(self, question: str, hits: list[Hit]) -> list[Hit]:

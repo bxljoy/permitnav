@@ -868,3 +868,30 @@ Hold-out 2 (22 private items, 11 topics in English and Swedish, drafted from Mig
 
 **Phase 2 closes here.** Its honest results: on fresh questions that should be answered, about 90% judged correct and faithful, in the question's language; on harder situational questions (hold-out 1) about 60%. The main open problem is law retrieval for situational questions (only a strong model naming the sections helped, a cost decision for later); over-caution turned out to be mostly a consequence of it.
 
+---
+
+## Phase 3
+
+Build order (agreed 2026-11-22): widen the corpus first (MIG rulings, then position papers), because it is the only part of phase 3 that can change answer quality; then the HTTP API and container, tracing, CI eval levels and deployment.
+
+### Corpus widening 1: MIG rulings
+
+- **Source:** the courts' open data API (Sök rättspraxis, PUH API, CC0), `GET /api/v1/publiceringar?domstolkod=MIOD`, 100 records a page, 1 request/s. One fetch (all 535 Migration Court of Appeal publications, with full text and cited sections) is saved as one raw download (`sources/domstol.py`).
+- **Scope (`parsing/ruling.py`):** a ruling is kept if it cites sections on work permits, family ties, permanent residence or long-term residents (5 kap. 3–3 l, 5, 7, 8, 10 with 6 kap., 17, 18 §§, 5 a, 6, 6 a, 6 b kap., 7 kap. 3 and 7–7 f §§ of utlänningslagen; 4 kap. 4–4 f §§, 5 and 6 kap. of the ordinance) and none on protection, exceptional grounds, spårbyte, enforcement or studies, and if it was decided from 2009 (after the labour-migration reform of 2008-12-15). **97 rulings kept**; 406 out of scope, 32 older. One (MIG 2024:13) has no full text in the source and is kept with its summary.
+- **Unit (D2):** `mig:2017:24`, the whole ruling: summary, cited sections, then the court's text. Dated by the decision date (`valid_from`, no end). A corrected text (or full text added later) withdraws the old one rather than ending it, since both start on the decision date. 1,644 chunks.
+- **Citations (D7):** `cites` links to each cited section's wording on the decision date. Only 71 of 191 citations link: the others cite sections whose only stored wording starts after the ruling (6 kap. 2 § as amended 2026-06-01, for example). Until history is rebuilt (D10, phase 4), D7's check ("this ruling interpreted an earlier wording") cannot be relied on, so answers state each ruling's date and the prompt (rule 3) says to note that the law may have changed since.
+- **Retrieval:** rulings form the "other" group. With an equal share in the interleaving they took about a third of the places: dev R@5 0.53 → 0.46, law 0.69 → 0.62, hold-out 1 0.31 → 0.19, with a ruling in the top 3 for 46 of 48 dev items. Now the group gets **one place, at rank 8** (`RetrievalConfig.other_slots`, `other_rank`; the same rank whatever k a caller asks for, and never in place of a section the question names): dev R@5 0.52, law 0.69, hold-out 1 0.31.
+- **Answers (3 judged runs on dev and hold-out 1 each, against the same day's baseline):**
+
+| | Baseline | With rulings |
+|---|---|---|
+| Dev, judged correct | 41, 40 of 50 (82%, 80%) | 41, 43, 44 of 50–51 (82%, 86%, 86%) |
+| Dev, right kind | 52, 55 of 64 | 52, 53, 52 of 64 |
+| Dev, faithful | 50, 50 | 50, 48, 47 |
+| Hold-out 1, judged correct | 61%, 61%, 50% | 72%, 67%, 50% |
+| Answer cost per dev run | ~$0.105 | ~$0.115 |
+
+  - A small gain (3–4 points on dev, within the run-to-run noise) and no new risk: answers citing a ruling (67 of 208 judged) were 84% correct with 1 unfaithful, against 75% and 7 for the rest; none of the unfaithful claims came from a ruling.
+  - The case that motivated it works: the insurance-history question now cites the precedent the reviewer named, but still labels the question "not settled".
+  - **Kept.** Rulings are the right sources for edge cases at little cost, but they are not a fix for law retrieval on situational questions.
+

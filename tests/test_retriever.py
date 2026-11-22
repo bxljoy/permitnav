@@ -425,3 +425,32 @@ def test_near_duplicate_page_variants_take_one_slot(
     ]
     assert pages(RetrievalConfig()) == ["anstalld" + anchor]  # the general page
     assert pages(RetrievalConfig(), "Jag är artist. " + query) == ["artist" + anchor]
+
+
+def test_rulings_complement_the_results_in_one_last_slot(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    conn.execute("UPDATE unit SET source_type = 'ruling' WHERE id = 'sfs:2005:716/6kap/2§'")
+    query = "lönen medianlönen procent lönekravet"
+    hits = retriever.search(query, as_of=date(2026, 11, 20), k=4)
+    assert [h.unit_id for h in hits][-1] == "sfs:2005:716/6kap/2§"  # best match, placed last
+    assert len(hits) == 4
+    deeper = retriever.search(query, as_of=date(2026, 11, 20), k=10)
+    assert [h.unit_id for h in deeper].index("sfs:2005:716/6kap/2§") == 7  # same rank 8 at k=10
+    shared = Retriever(conn, FAKE, RetrievalConfig(other_slots=None))
+    first = shared.search(query, as_of=date(2026, 11, 20), k=4)[0]
+    assert first.unit_id == "sfs:2005:716/6kap/2§"  # an equal share puts it first
+
+
+def test_a_ruling_never_takes_the_place_of_a_section_the_question_names(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    conn.execute("UPDATE unit SET source_type = 'ruling' WHERE id = 'sfs:2005:716/6kap/2§'")
+    hits = retriever.search(
+        "6 kap. 1, 3 och 4 §§ utlänningslagen lönen medianlönen", date(2026, 11, 20), k=3
+    )
+    assert [h.unit_id for h in hits] == [
+        "sfs:2005:716/6kap/1§",
+        "sfs:2005:716/6kap/3§",
+        "sfs:2005:716/6kap/4§",
+    ]
