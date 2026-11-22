@@ -65,6 +65,7 @@ resource "google_compute_firewall" "iap_ssh" {
   name          = "${local.name}-allow-iap-ssh"
   network       = "default"
   direction     = "INGRESS"
+  priority      = 900                 # before the deny below
   source_ranges = ["35.235.240.0/20"] # Google's IAP TCP forwarding range, nothing else
   target_tags   = ["${local.name}-web"]
   allow {
@@ -72,6 +73,24 @@ resource "google_compute_firewall" "iap_ssh" {
     ports    = ["22"]
   }
   depends_on = [google_project_service.apis]
+}
+
+# The default network allows SSH and RDP from anywhere (default-allow-ssh/-rdp, priority
+# 65534). Those rules belong to the project, not to this module, so they are outranked here
+# for this VM instead of deleted: SSH only through IAP (above), RDP never.
+resource "google_compute_firewall" "deny_ssh_rdp" {
+  name          = "${local.name}-deny-ssh-rdp"
+  network       = "default"
+  direction     = "INGRESS"
+  priority      = 1000
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["${local.name}-web"]
+  deny {
+    protocol = "tcp"
+    ports    = ["22", "3389"]
+  }
+  # The IAP allow rule must have its higher priority before this deny exists.
+  depends_on = [google_project_service.apis, google_compute_firewall.iap_ssh]
 }
 
 # --- Backups ---------------------------------------------------------------------------------
