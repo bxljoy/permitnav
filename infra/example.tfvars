@@ -2,3 +2,5 @@
 project_id = "permitnav-123456"
 # region   = "europe-north1"     # Finland, if Stockholm (europe-north2) is not available
 # zone     = "europe-north1-a"
+domain      = "permitnav.example.com"
+alert_email = "you@example.com"

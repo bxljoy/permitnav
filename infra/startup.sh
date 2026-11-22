@@ -43,9 +43,17 @@ fi
 cat > /etc/permitnav-backup.env <<EOF
 BACKUP_BUCKET=${backup_bucket}
 EOF
+cat > /etc/systemd/system/permitnav-backup-failed.service <<'EOF'
+[Unit]
+Description=Report a failed PermitNav backup (raises the "backup failed" alert)
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/gcloud logging write permitnav-backup "backup service failed (killed or crashed)" --severity=ERROR --quiet
+EOF
 cat > /etc/systemd/system/permitnav-backup.service <<'EOF'
 [Unit]
 Description=PermitNav database backup
+OnFailure=permitnav-backup-failed.service
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/permitnav-backup.env

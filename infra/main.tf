@@ -168,7 +168,7 @@ resource "google_compute_instance" "app" {
 
   service_account {
     email  = google_service_account.vm.email
-    scopes = ["cloud-platform"] # narrowed by the account's IAM: only the backup bucket
+    scopes = ["cloud-platform"] # narrowed by the account's IAM: the backup bucket, writing logs
   }
 
   shielded_instance_config {
