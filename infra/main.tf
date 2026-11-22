@@ -117,8 +117,8 @@ resource "google_storage_bucket" "backups" {
   depends_on = [google_project_service.apis]
 }
 
-# The VM's own identity: it may add backups to that bucket and nothing else. Object creator,
-# not admin: a compromised VM cannot delete or overwrite the backups it has written.
+# The VM's own identity: on that bucket it may create and read backups, and nothing else.
+# Object creator and viewer, not admin: a compromised VM cannot delete or overwrite backups.
 resource "google_service_account" "vm" {
   account_id   = "${local.name}-vm"
   display_name = "PermitNav VM"
@@ -128,6 +128,16 @@ resource "google_service_account" "vm" {
 resource "google_storage_bucket_iam_member" "vm_backups" {
   bucket = google_storage_bucket.backups.name
   role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.vm.email}"
+}
+
+# Read and list too: `gcloud storage cp` reads the destination before writing (measured: 403
+# on storage.objects.get without it), and the restore runbook lists the bucket to find the
+# latest dump. The dumps hold what the VM already holds (the live database: the public corpus
+# today); deleting and overwriting stay impossible (no storage.objects.delete, verified).
+resource "google_storage_bucket_iam_member" "vm_backups_read" {
+  bucket = google_storage_bucket.backups.name
+  role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.vm.email}"
 }
 
