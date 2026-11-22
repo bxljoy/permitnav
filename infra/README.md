@@ -24,7 +24,7 @@ Then:
 2. **Secrets:** open a shell (`ssh` output) and write `/opt/permitnav/.env` (mode 600,
    owned by root):
    ```
-   DOMAIN=<the subdomain>
+   DOMAIN=<the subdomain; the same as `domain` in permitnav.tfvars>
    API_TOKEN=<a new random token, not the local one>
    POSTGRES_PASSWORD=<a new random password; the repo's is for local development only>
    OPENROUTER_API_KEY=<a server-only key with its own monthly credit limit>

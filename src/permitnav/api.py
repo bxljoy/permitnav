@@ -90,6 +90,12 @@ def to_response(answer: Answer, as_of: date) -> AskResponse:
     )
 
 
+def _first_part(error: Exception) -> str:
+    """'OpenRouter HTTP 402: <provider body>' -> 'OpenRouter HTTP 402': the body can carry
+    account or billing details, which do not belong in logs."""
+    return str(error).split(":", 1)[0][:80]
+
+
 def create_app(service: Service | None = None, token: str | None = None) -> FastAPI:
     """The app. Tests pass a fake service and a token; production builds both from the
     environment at startup (loading bge-m3 takes a few seconds)."""
@@ -150,7 +156,7 @@ def create_app(service: Service | None = None, token: str | None = None) -> Fast
             answer = state["service"].answer(question, as_of)
         except LLMError as error:
             # The provider's message can carry account or billing details: logged, not returned.
-            log.error("model call failed: %s", error)
+            log.error("model call failed: %s", _first_part(error))
             raise HTTPException(status_code=502, detail="model call failed") from error
         if answer.kind == "failed":  # unreadable or cut-off reply, even after asking again
             log.error("answer failed: the model's reply could not be read")

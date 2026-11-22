@@ -42,3 +42,13 @@ variable "repo_url" {
   type        = string
   default     = "https://github.com/bxljoy/permitnav.git"
 }
+
+variable "domain" {
+  description = "The service's domain, for the uptime check. Must match DOMAIN in the VM's /opt/permitnav/.env (Caddy serves that one)."
+  type        = string
+}
+
+variable "alert_email" {
+  description = "Where alerts go (kept in permitnav.tfvars, git-ignored)."
+  type        = string
+}
