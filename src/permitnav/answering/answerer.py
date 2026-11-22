@@ -28,12 +28,18 @@ from permitnav.llm.port import LLM, Completion, CompletionRequest, LLMError
 from permitnav.parsing.references import named_units
 from permitnav.prompting import load_prompt
 from permitnav.retrieval.retriever import Hit, Retriever
+from permitnav.retrieval.translate import language_of
 
 KINDS = ("answered", "follow_up", "not_settled", "out_of_scope")
 MARKER = re.compile(r"\[(S\d+)\]")
 # "[S1, S2]", "[S1–S3]", "[S1; S4]": groups the model sometimes writes instead of [S1][S2]
 GROUP = re.compile(r"\[(S\d+(?:\s*[,;–-]\s*S\d+)+)\]")
 MAX_TOKENS_CAP = 16000
+ANSWER_LANGUAGE = {
+    "sv": "Swedish, the language of the question",
+    "en": "English, the language of the question",
+    None: "the language of the question",
+}
 # Sent once when a reply cannot be read (no JSON, or broken JSON such as unescaped quotes);
 # about 1-3% of replies, depending on the prompt (phase 2).
 REASK = (
@@ -107,7 +113,14 @@ class Answerer:
         if not _relevant(question, hits, self.config.min_score):
             return Answer(kind="out_of_scope", text=NOTHING_RELEVANT)
         context = build_context(self._conn, hits, as_of)
-        system = self._template.format(as_of=as_of.isoformat(), sources=context.render())
+        # Told, not left to the model: with an English prompt and mixed sources it answered
+        # more than half of the Swedish dev questions in English (phase 2). Only when the
+        # question is clearly Swedish or English; otherwise (a tie, another language) the
+        # model follows the question.
+        language = ANSWER_LANGUAGE.get(language_of(question), ANSWER_LANGUAGE[None])
+        system = self._template.format(
+            as_of=as_of.isoformat(), sources=context.render(), language=language
+        )
         max_tokens = self.config.max_tokens
         earlier: list[Completion] = []
         messages = [{"role": "user", "content": question}]

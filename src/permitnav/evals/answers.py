@@ -15,6 +15,7 @@ from permitnav.answering.answerer import KINDS, Answer, Answerer
 from permitnav.evals.golden import GoldenItem
 from permitnav.evals.judge import CalibrationItem, Verdict
 from permitnav.llm.port import LLMError
+from permitnav.retrieval.translate import language_of
 
 
 @dataclass(frozen=True)
@@ -151,3 +152,18 @@ def judged_summary(results: list[AnswerResult], verdicts: dict[str, Verdict]) ->
             setattr(row, verdict.correctness, getattr(row, verdict.correctness) + 1)
             row.faithful += verdict.faithful
     return [row for row in rows.values() if row.items]
+
+
+def language_matches(results: list[AnswerResult]) -> tuple[int, int]:
+    """(answers in the question's language, answers whose language could be told), over every
+    reply the model wrote, declines included. An answer whose language the detector cannot
+    tell (quoted passages are ignored; a tie or too few words) is left out, not counted as a
+    mismatch."""
+    written = [
+        r
+        for r in results
+        if r.kind in (*JUDGED_KINDS, "out_of_scope") and r.answer.completion is not None
+    ]
+    languages = [(language_of(r.answer.text), r.item.original_language) for r in written]
+    told = [(a, q) for a, q in languages if a is not None]
+    return sum(a == q for a, q in told), len(told)

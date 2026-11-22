@@ -36,17 +36,32 @@ WORD = re.compile(r"[A-Za-zÅÄÖåäöÉé]+")
 STATUTE_NAME = re.compile(r"\b\w*(?:lagen|förordningen)s?\b", re.IGNORECASE)
 
 
-def is_swedish(text: str) -> bool:
-    """More Swedish than English evidence. Swedish evidence: Swedish function words, and
-    lowercase words with å, ä or ö; English evidence: English function words. Statute names
-    ("utlänningslagens") and capitalised words ("Malmö") are ignored, so an English question
-    that mentions them, or a Swedish term like "uppehållstillstånd", stays English."""
-    words = WORD.findall(STATUTE_NAME.sub(" ", text))
+QUOTED = re.compile(r'"[^"]*"|“[^”]*”|«[^»]*»|„[^“]*“')
+
+
+def language_of(text: str) -> str | None:
+    """ "sv" or "en" when one language has more evidence than the other, None when neither
+    does (a tie, too few words, another language). Swedish evidence: Swedish function words,
+    and lowercase words with å, ä or ö; English evidence: English function words. Statute
+    names ("utlänningslagens"), capitalised words ("Malmö") and quoted passages are ignored,
+    so English text that mentions them, or a Swedish term like "uppehållstillstånd", stays
+    English."""
+    words = WORD.findall(STATUTE_NAME.sub(" ", QUOTED.sub(" ", text)))
     lower = [w.lower() for w in words]
     swedish = sum(w in SWEDISH_WORDS for w in lower)
     swedish += sum(w.islower() and any(ch in "åäö" for ch in w) for w in words)
     english = sum(w in ENGLISH_WORDS for w in lower)
-    return swedish > english
+    # At least two pieces of evidence: one shared word ("in" in German) decides nothing.
+    if swedish > english and swedish >= 2:
+        return "sv"
+    if english > swedish and english >= 2:
+        return "en"
+    return None
+
+
+def is_swedish(text: str) -> bool:
+    """Whether a question is Swedish (and so needs no translation for keyword search)."""
+    return language_of(text) == "sv"
 
 
 class Translator(Protocol):

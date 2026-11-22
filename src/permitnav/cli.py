@@ -571,6 +571,11 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
         cost += translator.cost_usd
         unknown += translator.cost_unknown
     print(f"all            {len(results):>3} {right:>5}")
+    from permitnav.evals.answers import language_matches
+
+    same, checked = language_matches(results)
+    if checked:
+        print(f"in the question's language: {same} of {checked} answers")
     print(
         f"declined without a model call: {skipped}; failed: {failed}; cost ${cost:.4f}"
         + (f" (+ {unknown} replies with unknown cost)" if unknown else "")

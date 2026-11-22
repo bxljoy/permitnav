@@ -285,6 +285,7 @@ def test_the_prompt_ships_with_the_package() -> None:
     from permitnav.answering.answerer import load_prompt
 
     assert "{sources}" in load_prompt() and "{as_of}" in load_prompt()
+    assert "{language}" in load_prompt()  # rule 8: the answer language is set per question
 
 
 @pytest.mark.db
@@ -715,3 +716,49 @@ def test_the_re_ask_covers_a_missing_answer_field_and_costs_are_floats() -> None
     assert '"answer" field' in REASK
     cost = AnswerResult(item("a", "q", []), Answer(kind="out_of_scope", text="x")).cost_usd
     assert cost == 0.0 and isinstance(cost, float)
+
+
+@pytest.mark.db
+def test_the_answer_language_is_set_from_the_question(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    llm = ScriptedLLM(json.dumps({"kind": "answered", "answer": "Svar [S1]."}))
+    answerer = Answerer(conn, stored, llm, AnswerConfig(model="m"))
+    answerer.answer("Hur hög lön krävs för arbetstillstånd?", date(2026, 11, 20))
+    answerer.answer("What salary is required for a work permit?", date(2026, 11, 20))
+    answerer.answer("Kann mein Ehepartner in Schweden arbeiten?", date(2026, 11, 20))
+    answerer.answer("Kan jag få a work permit?", date(2026, 11, 20))  # a tie
+    swedish, english, german, tie = (r.system for r in llm.requests)
+    assert "Answer in Swedish" in swedish and "Answer in English" in english
+    # Neither clearly Swedish nor English: no language is imposed.
+    for system in (german, tie):
+        assert "Answer in the language of the question" in system
+
+
+def test_the_behaviour_eval_counts_answers_in_the_questions_language() -> None:
+    from permitnav.answering.answerer import Answer
+    from permitnav.evals.answers import AnswerResult, language_matches
+    from permitnav.llm.port import Completion
+    from tests.test_retriever import item
+
+    def result(question: str, language: str, text: str, kind: str = "answered") -> AnswerResult:
+        answer = Answer(kind=kind, text=text, completion=Completion(text=text, model="m"))
+        return AnswerResult(item("x", question, [], language=language), answer)
+
+    results = [
+        result("Hur hög lön krävs?", "sv", "Lönen måste vara minst 90 procent av medianlönen."),
+        result("Hur hög lön krävs?", "sv", "The salary must be at least 90 percent of the median."),
+        result("What salary?", "en", "The salary must be at least 90 percent of the median."),
+        # English with quoted Swedish law text is still English.
+        result(
+            "What salary?",
+            "en",
+            'The law says "lönen ska vara minst 90 procent av medianlönen" for the permit [S1].',
+        ),
+        # A decline the model wrote counts; one PermitNav wrote itself (no model call) does not.
+        result("Får jag medborgarskap?", "sv", "This is outside the service.", kind="out_of_scope"),
+        AnswerResult(
+            item("y", "Får jag?", [], language="sv"), Answer(kind="out_of_scope", text="Nothing.")
+        ),
+    ]
+    assert language_matches(results) == (3, 5)
