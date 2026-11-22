@@ -2,7 +2,8 @@
 
 - Scope (D1): work permits for applicants and employers, extensions, changing or losing a job,
   permanent residence and EU long-term resident status, and processing times. Asylum,
-  protection and studies are left out.
+  protection and studies are left out. One page for other parties is in: the trade-union page,
+  the only source for what happens when a union does not comment (found in phase 2).
 - Swedish pages are found in the sitemap; each one's English version comes from its
   `hreflang` link (D6).
 - Every URL is checked against the site's robots.txt before fetching. Its `/flikar/` tab pages
@@ -41,6 +42,7 @@ IN_SCOPE = [
         r"permanent-uppehallstillstand(/|\.html$)",
         r"varaktigt-bosatt-i-sverige(/|\.html$)",
         r"^/kontakta-oss/vantetider\.html$",
+        r"^/andra-aktorer/fackforbund\.html$",
     )
 ]
 # News archives are dated announcements, not current guidance (e.g. last year's salary limit).

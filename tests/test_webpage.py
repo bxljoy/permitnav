@@ -128,6 +128,9 @@ def test_scope_rules() -> None:
     assert in_scope(f"{site}/arbetsgivare/du-vill-anstalla.html")
     assert in_scope(f"{site}/du-vill-ansoka/permanent-uppehallstillstand.html")
     assert in_scope(f"{site}/kontakta-oss/vantetider.html")
+    # The one page for other parties in scope: the only source for a union that doesn't reply.
+    assert in_scope(f"{site}/andra-aktorer/fackforbund.html")
+    assert not in_scope(f"{site}/andra-aktorer/kommuner.html")
     assert not in_scope(f"{site}/du-vill-ansoka/internationellt-skydd-asyl.html")
     assert not in_scope(f"{site}/du-vill-ansoka/studera.html")
     assert not in_scope(
