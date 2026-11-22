@@ -1046,7 +1046,17 @@ def main(argv: list[str] | None = None) -> int:
     jc.add_argument("--out", help="write the judge's verdicts as JSON lines")
     jc.set_defaults(run=cmd_judge_calibrate)
     args = parser.parse_args(argv)
-    return args.run(args)
+    from permitnav import tracing
+
+    # Eval runs ask only golden-set questions, so their traces may hold the full text;
+    # anything else (e.g. `ask`) records metadata only. No exporter configured: no tracing.
+    full = args.run in (cmd_eval_answers, cmd_judge_sample, cmd_judge_calibrate)
+    tracing.configure("permitnav-cli", content="full" if full else "metadata")
+    try:
+        return args.run(args)
+    finally:
+        tracing.flush()  # before the process exits
+        tracing.set_content_mode("metadata")  # full text only for the eval command itself
 
 
 if __name__ == "__main__":

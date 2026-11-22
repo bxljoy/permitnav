@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Protocol
 
+from permitnav import tracing
 from permitnav.llm.port import LLM, CompletionRequest
 from permitnav.prompting import load_prompt
 
@@ -91,13 +92,15 @@ class LLMTranslator:
     def translate(self, question: str) -> str:
         key = f"{self._model}\t{self._version}\t{question}"
         if key not in self._cache:
-            completion = self._llm.complete(
+            completion = tracing.complete(
+                self._llm,
                 CompletionRequest(
                     model=self._model,
                     system=self._prompt,
                     messages=[{"role": "user", "content": question}],
                     max_tokens=MAX_TOKENS,
-                )
+                ),
+                "translate",
             )
             self.calls += 1
             if completion.cost_usd is None:

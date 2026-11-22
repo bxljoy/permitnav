@@ -8,10 +8,32 @@ from collections.abc import Iterator
 
 import psycopg
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from permitnav import db
+from permitnav import db, tracing
+
+# Tests trace into memory, installed before anything else can configure tracing: a test run
+# never exports to Langfuse or a file, whatever keys are set in the developer's shell.
+SPANS = InMemorySpanExporter()
+_test_provider = TracerProvider()
+_test_provider.add_span_processor(SimpleSpanProcessor(SPANS))
+trace.set_tracer_provider(_test_provider)
+tracing._provider = _test_provider
+
+
+@pytest.fixture
+def spans() -> Iterator[InMemorySpanExporter]:
+    SPANS.clear()
+    tracing.set_content_mode("metadata")
+    yield SPANS
+    tracing.set_content_mode("metadata")
+
+
 
 
 @pytest.fixture(scope="session")

@@ -23,6 +23,7 @@ from datetime import date
 
 import psycopg
 
+from permitnav import tracing
 from permitnav.answering.context import Context, Source, build_context
 from permitnav.llm.port import LLM, Completion, CompletionRequest, LLMError
 from permitnav.parsing.references import named_units
@@ -109,6 +110,32 @@ class Answerer:
 
     def answer(self, question: str, as_of: date | None = None) -> Answer:
         as_of = as_of or date.today()
+        with tracing.span(
+            "answer",
+            "chain",
+            **{
+                "permitnav.as_of": as_of.isoformat(),
+                "permitnav.question_chars": len(question),
+                "permitnav.question_language": language_of(question) or "unknown",
+                "permitnav.k": self.config.k,
+            },
+        ) as current:
+            tracing.text(current, input=question)
+            answer = self._answer(question, as_of)
+            tracing.set_attributes(
+                current,
+                **{
+                    "permitnav.kind": answer.kind,
+                    "permitnav.citations": len(answer.citations),
+                    "permitnav.sources": len(answer.sources),
+                    "permitnav.model_calls": len(answer.earlier) + (answer.completion is not None),
+                    "permitnav.cited_units": [c.unit_id for c in answer.citations],
+                },
+            )
+            tracing.text(current, output=answer.text)
+            return answer
+
+    def _answer(self, question: str, as_of: date) -> Answer:
         hits = self._retriever.search(question, as_of=as_of, k=self.config.k)
         if not _relevant(question, hits, self.config.min_score):
             return Answer(kind="out_of_scope", text=NOTHING_RELEVANT)
@@ -126,13 +153,15 @@ class Answerer:
         messages = [{"role": "user", "content": question}]
 
         def ask(messages: list[dict]) -> Completion:
-            return self._llm.complete(
+            return tracing.complete(
+                self._llm,
                 CompletionRequest(
                     model=self.config.model,
                     system=system,
                     messages=messages,
                     max_tokens=max_tokens,
-                )
+                ),
+                "generate",
             )
 
         while True:

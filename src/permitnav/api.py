@@ -18,6 +18,7 @@ from typing import Annotated, Any, Protocol
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, StringConstraints
 
+from permitnav import tracing
 from permitnav.answering.answerer import Answer
 
 NOTICE = "Not legal advice; check with Migrationsverket. You are talking to an AI."
@@ -100,11 +101,13 @@ def create_app(service: Service | None = None, token: str | None = None) -> Fast
             state["token"] = os.environ.get("API_TOKEN", "").strip() or None
         if state["token"] is None and os.environ.get("PERMITNAV_ALLOW_NO_AUTH") != "1":
             raise RuntimeError("API_TOKEN is not set (PERMITNAV_ALLOW_NO_AUTH=1 for local use)")
+        tracing.configure("permitnav-api", content="metadata")  # always: users' questions
         if state["service"] is None:
             from permitnav.service import build_service
 
             state["service"] = build_service()
         yield
+        tracing.flush()  # send the last traces
 
     app = FastAPI(title="PermitNav", version="0.0.1", lifespan=lifespan)
 
@@ -126,11 +129,25 @@ def create_app(service: Service | None = None, token: str | None = None) -> Fast
 
     @app.post("/ask", dependencies=[Depends(authorised)])
     def ask(request: AskRequest) -> AskResponse:
+        as_of = request.as_of or date.today()
+        with tracing.span(
+            "ask",
+            "span",
+            **{
+                "langfuse.trace.name": "ask",
+                "langfuse.environment": os.environ.get("PERMITNAV_ENV", "development"),
+                "permitnav.question_chars": len(request.question),
+            },
+        ) as current:
+            response = _ask(request.question, as_of)
+            current.set_attribute("permitnav.kind", response.kind)
+            return response
+
+    def _ask(question: str, as_of: date) -> AskResponse:
         from permitnav.llm.port import LLMError
 
-        as_of = request.as_of or date.today()
         try:
-            answer = state["service"].answer(request.question, as_of)
+            answer = state["service"].answer(question, as_of)
         except LLMError as error:
             # The provider's message can carry account or billing details: logged, not returned.
             log.error("model call failed: %s", error)

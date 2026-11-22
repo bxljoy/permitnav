@@ -9,6 +9,10 @@ dependencies = [
     "beautifulsoup4>=4.15.0",
     "certifi>=2026.10.23",
     "psycopg[binary]>=3.2",
+    # Tracing (phase 3): plain OpenTelemetry, exported to Langfuse over OTLP/HTTP.
+    "opentelemetry-api>=1.28",
+    "opentelemetry-sdk>=1.28",
+    "opentelemetry-exporter-otlp-proto-http>=1.28",
 ]
 
 [project.optional-dependencies]

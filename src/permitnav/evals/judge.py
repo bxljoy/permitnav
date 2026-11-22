@@ -21,6 +21,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from permitnav import tracing
 from permitnav.answering.answerer import _json_object
 from permitnav.evals.golden import GoldenItem
 from permitnav.llm.port import LLM, Completion, CompletionRequest, LLMError
@@ -120,14 +121,16 @@ class Judge:
         """The judge's JSON reply, asked for once more if unreadable; None if still not."""
         messages = [{"role": "user", "content": material}]
         for _ in range(2):
-            completion = self._llm.complete(
+            completion = tracing.complete(
+                self._llm,
                 CompletionRequest(
                     model=self._model,
                     system=system,
                     messages=messages,
                     max_tokens=self._max_tokens,
                     reasoning_effort=self._reasoning_effort,
-                )
+                ),
+                "judge",
             )
             completions.append(completion)
             data = _json_object(completion.text)

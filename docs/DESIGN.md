@@ -897,3 +897,16 @@ Build order (agreed 2026-11-22): widen the corpus first (MIG rulings, then posit
   - The case that motivated it works: the insurance-history question now cites the precedent the reviewer named, but still labels the question "not settled".
   - **Kept.** Rulings are the right sources for edge cases at little cost, but they are not a fix for law retrieval on situational questions.
 
+### The HTTP API and container
+
+- **`POST /ask`, `GET /health`** (FastAPI, `api.py`) over the same pipeline and default settings as the CLI and the evals (`service.py`). Every `/ask` needs a bearer token; without `API_TOKEN` the app refuses to start unless local use is allowed explicitly. Private until the public beta (D15).
+- **Concurrency:** requests run on worker threads. The embedder and reranker sit behind one lock (Hugging Face tokenizers are not thread-safe); each request gets its own translator with no disk cache, so no question text is stored.
+- **Container:** CPU-only PyTorch on Linux (no CUDA libraries; image 3.3 GB), non-root, migrations on start, bge-m3 weights in a volume. `docker compose up` starts Postgres and the API. Locally: ~1.1 GB of memory, three concurrent questions answered in 10–13 s each.
+
+### Tracing
+
+- **OpenTelemetry, exported to Langfuse Cloud (EU)** over OTLP/HTTP (`tracing.py`); no vendor SDK, so the backend is a configuration choice (LangSmith, for instance, also accepts OTLP). Exporters come from the environment (Langfuse keys, or a local JSON-lines file); with neither, nothing is recorded.
+- **Spans:** `ask` > `answer` > `retrieve` (> `embed`, `translate`, `embed`, `rerank`) and `generate`. Model calls are Langfuse generations with model, tokens and cost.
+- **Privacy:** the content mode is fixed in code, not configuration: the API and `ask` record metadata only (lengths, timings, tokens, costs, answer kind, unit ids); eval commands, which ask golden-set questions only, record full text. Exceptions are recorded by type, never by message (provider errors can hold account details or echo the question). Tests trace into memory only.
+- **Measured (one question, Haiku 5.5):** about 8 s and **$0.0012 per question**: `generate` 6.0 s and $0.0012 (6,368 in / 1,056 out tokens), `translate` 1.0 s and $0.00005, the two embeddings 0.18 s, the database searches ~0.7 s. About $1.25 per 1,000 questions.
+

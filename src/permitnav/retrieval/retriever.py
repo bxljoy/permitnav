@@ -31,6 +31,7 @@ from datetime import date, datetime
 import psycopg
 from psycopg import sql
 
+from permitnav import tracing
 from permitnav.corpus.indexing import EMBEDDING_TABLES, to_pgvector
 from permitnav.embedding.port import Embedder
 from permitnav.parsing.references import named_units
@@ -183,7 +184,36 @@ class Retriever:
         so filters could leave fewer than k; at this corpus size exact search is fast.)
         """
         as_of = as_of or date.today()
-        vector = to_pgvector(self._embedder.embed_query(query))
+        with tracing.span(
+            "retrieve",
+            "retriever",
+            **{
+                "permitnav.k": k,
+                "permitnav.mode": self.config.mode,
+                "permitnav.rerank": self.config.rerank,
+            },
+        ) as current:
+            tracing.text(current, input=query)
+            hits = self._search_all(query, as_of, k)
+            tracing.set_attributes(
+                current,
+                **{
+                    "permitnav.hits": len(hits),
+                    # The best score, not the first hit's: named sections come first.
+                    "permitnav.top_score": round(max(h.score for h in hits), 4) if hits else None,
+                    "permitnav.units": [h.unit_id for h in hits],  # ids, never text
+                },
+            )
+            return hits
+
+    def _embed(self, text: str) -> str:
+        with tracing.span(
+            "embed", "embedding", **{"gen_ai.request.model": self._embedder.model_id}
+        ):
+            return to_pgvector(self._embedder.embed_query(text))
+
+    def _search_all(self, query: str, as_of: date, k: int) -> list[Hit]:
+        vector = self._embed(query)
         swedish = query
         if self._translator is not None and self._uses_translation() and not is_swedish(query):
             swedish = self._translator.translate(query)
@@ -191,7 +221,7 @@ class Retriever:
         law_order = None  # the vector the law is ordered by, when not the question's own
         swedish_vector = None
         if swedish != query and (self.config.translated_vector or self._page_translation()):
-            swedish_vector = to_pgvector(self._embedder.embed_query(swedish))
+            swedish_vector = self._embed(swedish)
         if self.config.translated_vector:
             law_order = swedish_vector
         page_order = swedish_vector if self._page_translation() else None
@@ -255,7 +285,8 @@ class Retriever:
 
     def _rerank(self, question: str, hits: list[Hit]) -> list[Hit]:
         assert self._reranker is not None
-        scores = self._reranker.score(question, [h.text for h in hits])
+        with tracing.span("rerank", "span", **{"permitnav.candidates": len(hits)}):
+            scores = self._reranker.score(question, [h.text for h in hits])
         scored = [dataclasses.replace(h, rerank_score=s) for h, s in zip(hits, scores, strict=True)]
         return sorted(scored, key=_by_rerank_score)  # stable: ties keep their order
 
