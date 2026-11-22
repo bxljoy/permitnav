@@ -1,0 +1,26 @@
+# HTTPS in front of the API (phase 3). Caddy gets and renews a Let's Encrypt certificate for
+# DOMAIN (set in /opt/permitnav/.env; the DNS record must point here, without a proxy).
+{
+	servers {
+		protocols h1 h2  # no HTTP/3: the firewall opens TCP 80/443 only
+	}
+}
+
+{$DOMAIN} {
+	# Access logs: method, path, status and timing, never request bodies (questions).
+	log {
+		output stdout
+		format json
+	}
+	encode zstd gzip
+	reverse_proxy api:8000
+	request_body {
+		max_size 16KB  # a question is at most 2,000 characters
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+}

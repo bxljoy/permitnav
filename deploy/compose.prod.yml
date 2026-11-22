@@ -1,0 +1,35 @@
+# Production overrides for the VM (phase 3), on top of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d --build
+# Only Caddy is reachable from outside (80/443, HTTPS); the API and Postgres are not.
+services:
+  db:
+    ports: !reset []          # no host port: only the API reaches Postgres
+    environment:              # not the development password from the public repo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in /opt/permitnav/.env}
+    restart: unless-stopped
+
+  api:
+    ports: !reset []          # only Caddy reaches the API
+    environment:
+      DATABASE_URL: postgresql://permitnav:${POSTGRES_PASSWORD:?}@db:5432/permitnav
+      PERMITNAV_ENV: production
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.10.2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in /opt/permitnav/.env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # certificates
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
