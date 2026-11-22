@@ -34,8 +34,6 @@ def spans() -> Iterator[InMemorySpanExporter]:
     tracing.set_content_mode("metadata")
 
 
-
-
 @pytest.fixture(scope="session")
 def database_url() -> Iterator[str]:
     base = os.environ.get("DATABASE_URL")
