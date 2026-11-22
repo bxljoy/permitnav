@@ -1,4 +1,5 @@
-# Local development database. The app itself runs natively (on a Mac, so bge-m3 can use the GPU).
+# `docker compose up` starts Postgres with pgvector and the API (phase 3). For development
+# the CLI still runs natively (on a Mac, so bge-m3 can use the GPU): `docker compose up db`.
 services:
   db:
     image: pgvector/pgvector:pg17
@@ -16,5 +17,23 @@ services:
       timeout: 3s
       retries: 15
 
+  api:
+    build: .
+    env_file:         # OPENROUTER_API_KEY, ANSWER_MODEL, API_TOKEN (see .env.example)
+      - path: .env
+        required: false   # `docker compose up db` works on a fresh clone
+    environment:          # container paths, whatever the developer's .env says
+      DATABASE_URL: postgresql://permitnav:permitnav@db:5432/permitnav
+      RAW_DIR: /app/data/raw
+      CACHE_DIR: /app/data/cache
+    ports:
+      - "127.0.0.1:8000:8000"   # local only; production puts a TLS proxy in front
+    volumes:
+      - models:/models          # bge-m3 weights, downloaded once (~2.3 GB)
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  models:

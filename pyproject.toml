@@ -15,6 +15,12 @@ dependencies = [
 # Self-hosted embeddings (D15). Heavy (PyTorch); install locally with `uv sync --extra embed`.
 embed = [
     "sentence-transformers>=3.3",
+    "torch>=2.5",  # direct, so Linux can take the CPU-only build below
+]
+# The HTTP API (phase 3): `uvicorn permitnav.api:app`.
+api = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
 ]
 
 [project.scripts]
@@ -25,7 +31,18 @@ dev = [
     "pytest>=8",
     "ruff>=0.8",
     "pyright>=1.1.390",
+    "httpx>=0.27",  # FastAPI's TestClient
 ]
+
+# Linux (the container, CI) takes PyTorch's CPU-only wheels: the default Linux build bundles
+# ~2.5 GB of CUDA libraries a CPU server never uses. macOS keeps the normal build (MPS).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]

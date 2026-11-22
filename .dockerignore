@@ -1,0 +1,18 @@
+# Only the code, migrations and lock file go into the image: no secrets, no data, no evals.
+.env
+.env.*
+!.env.example
+private/
+data/
+evals/
+tests/
+docs/
+.git/
+.github/
+.venv/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+mlruns/
+*.tfvars
+.terraform/

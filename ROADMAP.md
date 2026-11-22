@@ -165,7 +165,7 @@ Goal: the same system running on a public URL, traceable and reproducible from c
    - **Production: metadata only.** No question or answer text; log lengths, timings, token counts and retrieved chunk IDs. This sets up the privacy rules in phase 6.
    - **Eval runs on the golden set: full text.** There is no user data in them, and reading prompts and outputs is how failures get diagnosed.
 6. **Spend limit:** set a monthly cap with the LLM provider on day 1.
-7. **Add position papers and MIG rulings** to the index and re-run the evals. Check whether edge-case questions improve.
+7. **Add position papers and MIG rulings** to the index and re-run the evals. Check whether edge-case questions improve. *(Done for MIG rulings, 2026-11-22: a small gain, see DESIGN.md. Position papers moved to phase 4, where the freshness pipeline handles versioned documents.)*
 
 ✅ Done when: a deployed URL, a trace for each query, no secrets in the repo, a measured cost per query, and a "with position papers and rulings" row in the results table.
 

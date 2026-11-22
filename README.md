@@ -20,15 +20,31 @@ Needs [uv](https://docs.astral.sh/uv/) and Docker.
 
 ```
 cp .env.example .env               # then fill in the keys
-docker compose up -d --wait        # Postgres + pgvector on localhost:5432
-uv sync                            # Python 3.12 and dependencies
+docker compose up -d --wait db     # Postgres + pgvector on localhost:5432
+uv sync --extra embed --extra api  # Python 3.12 and dependencies
 set -a; source .env; set +a        # load the environment
 uv run permitnav migrate           # create the schema
 uv run pytest                      # tests (database tests need DATABASE_URL)
 uv run ruff check . && uv run pyright
 ```
 
-The app runs natively, not in Docker, so the embedding model can use a Mac's GPU.
+For development the CLI runs natively, not in Docker, so the embedding model can use a Mac's GPU.
+
+### Run the API
+
+```
+docker compose up -d --wait        # Postgres + the API on localhost:8000 (first start
+                                   # downloads bge-m3, ~2.3 GB, into a volume)
+curl -X POST localhost:8000/ask \
+  -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"question": "What salary do I need for a Swedish work permit?"}'
+```
+
+`POST /ask` takes `{"question": …, "as_of": "YYYY-MM-DD"}` (the date defaults to today) and
+returns the answer kind, text, citations with dates and links, source credits and the AI
+notice; a failed model call or an unreadable reply is a 502. `GET /health` checks the database. Every `/ask` needs the `API_TOKEN` from `.env`;
+the service is private until the public beta. The corpus must be ingested and indexed first
+(`permitnav fetch`, `ingest`, `index`).
 
 ## Licence
 

@@ -488,7 +488,7 @@ Notes:
 
 ```
 pyproject.toml              Python 3.12, managed with uv
-docker-compose.yml          Postgres + pgvector (the app runs natively on the Mac, for the GPU)
+docker-compose.yml          Postgres + pgvector, and the API (phase 3); the CLI runs natively on the Mac, for the GPU
 .env.example                DATABASE_URL, OPENROUTER_API_KEY, ANSWER_MODEL, EMBEDDING_MODEL
 migrations/                 001_schema.sql, …
 src/permitnav/
@@ -873,6 +873,8 @@ Hold-out 2 (22 private items, 11 topics in English and Swedish, drafted from Mig
 ## Phase 3
 
 Build order (agreed 2026-11-22): widen the corpus first (MIG rulings, then position papers), because it is the only part of phase 3 that can change answer quality; then the HTTP API and container, tracing, CI eval levels and deployment.
+
+**Position papers move to phase 4** (decided 2026-11-22): Lifos has no API, its search is blocked by robots.txt and Migrationsverket's pages do not link to the papers, so they need a curated list kept fresh through the Lifos RSS feed. They are versioned documents ("version 10.0"), which is what phase 4's freshness pipeline handles, and rulings showed that a new source type brings a small gain here. Phase 3's "with position papers and rulings" row is therefore "with rulings" only.
 
 ### Corpus widening 1: MIG rulings
 

@@ -18,7 +18,7 @@ from permitnav import db
 def database_url() -> Iterator[str]:
     base = os.environ.get("DATABASE_URL")
     if not base:
-        pytest.skip("DATABASE_URL not set; start Postgres with `docker compose up -d`")
+        pytest.skip("DATABASE_URL not set; start Postgres with `docker compose up -d db`")
     name = f"permitnav_test_{uuid.uuid4().hex[:8]}"
     with psycopg.connect(base, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
@@ -51,7 +51,7 @@ def fresh_database_url() -> Iterator[str]:
     """A migrated database of its own, for tests that check what is really committed."""
     base = os.environ.get("DATABASE_URL")
     if not base:
-        pytest.skip("DATABASE_URL not set; start Postgres with `docker compose up -d`")
+        pytest.skip("DATABASE_URL not set; start Postgres with `docker compose up -d db`")
     name = f"permitnav_fresh_{uuid.uuid4().hex[:8]}"
     with psycopg.connect(base, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
