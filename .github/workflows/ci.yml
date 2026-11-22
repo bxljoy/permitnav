@@ -70,7 +70,7 @@ jobs:
       # The eval corpus (public source text with embeddings; evals/README.md). A new
       # snapshot means a new release, a new checksum and, if the numbers move, new minimums.
       EVAL_CORPUS_TAG: eval-corpus-2026-11-22
-      EVAL_CORPUS_SHA256: PLACEHOLDER
+      EVAL_CORPUS_SHA256: 6383d8c5070949a150e39d02dc52e6f0026f288f050f4427728486a509800874
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
