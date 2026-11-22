@@ -834,3 +834,18 @@ Following the hold-out diagnosis, three fixes were tried on the dev set with thr
 - **Decision:** law retrieval is parked. Section naming by a strong model is the only lever that worked and is a later design decision on cost (about 8× the answer's cost per question). The interleaving loss (5 of 44) is small and cheaper to address later.
 - **Gotcha found on the way:** Haiku 5.5 spends its token budget on hidden reasoning first; with `max_tokens=300` it returned empty text. The query translator (400 tokens) was checked: every English dev and hold-out question has a cached translation.
 
+### A softer "not settled" rule: tried and reverted
+
+The spent hold-out was used as private development data for this fix (with the owner's agreement), because the dev set barely shows the over-caution: 0–1 answerable questions got "not settled" per dev run, against 4 of 14 on the hold-out. Hold-out 2 stays untouched.
+
+Rule 6 of `prompts/answer.md` was rewritten to reserve "not settled" for questions whose main point the sources leave open, and to answer when a source states the deciding rule even if it does not mention the person's exact circumstances. Three runs each, with the judge (about $1):
+
+| | Dev, right kind | Dev, judged correct | Hold-out, right kind | Hold-out, answerable → "not settled" |
+|---|---|---|---|---|
+| Old rule 6 (2 dev runs, 3 hold-out runs) | 52, 55 of 64 | 40–41 of 50 | 13–14 of 24 | 4, 4, 4 |
+| New rule 6 | 48, 48, 50 of 64 | 41–43 of 50 | 13–15 of 24 | 3, 4, 4 |
+
+- **No gain where intended, a loss elsewhere:** the hold-out's over-caution barely moved, while dev questions that really are open were answered as settled 7–9 times per run (2–3 before), and an out-of-scope question was answered. Reverted.
+- **The diagnosis overstated this cause.** The hold-out's over-caution is two topics (each in two languages), identical in every run: one whose required sources were not retrieved at all (an honest "the sources do not say", so cause 1 again), and one borderline item where the answer gives the right rule but declines to draw the conclusion the reference draws from it (that a break does not reset a total counted over a period). A general prompt change was the wrong tool for one borderline item.
+- **Where the hold-out findings stand:** law retrieval for situational questions is the real problem; over-caution is mostly its consequence. The one lever that worked for retrieval (a strong model naming the sections) needs a cost decision.
+
