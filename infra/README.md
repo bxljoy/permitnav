@@ -57,7 +57,8 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
 - **Update:** `sudo git pull && sudo $C up -d --build && sudo docker image prune -f`
   (deploy on merge automates this later).
 - **Backups:** nightly at 03:30 UTC (`systemctl list-timers permitnav-backup.timer`), kept
-  30 days. The VM can add backups but not delete or overwrite them. Restore:
+  30 days. The VM can create, list and read backups, but not delete or overwrite them. Restore
+  on the VM:
   ```
   gcloud storage cp gs://<bucket>/db/<file>.dump /tmp/restore.dump
   sudo $C exec -T db pg_restore --clean --if-exists -U permitnav -d permitnav < /tmp/restore.dump
