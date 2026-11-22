@@ -803,3 +803,18 @@ The 24 private hold-out items were reviewed on 2026-11-22 (eight references made
 - **Phase 2's headline is therefore:** dev 81–85% correct, hold-out 61%; retrieval R@5 0.53 dev, 0.31 hold-out.
 - **This hold-out is now spent.** Nothing may be tuned on it. Its failures can be read to find general causes (multi-source retrieval, over-caution), but every fix must be shown on new questions: a fresh hold-out of 20–30 items, reviewed the same way, before the next round of changes is judged.
 
+### Why the hold-out scored lower (diagnosis, read-only)
+
+The hold-out's failures were read to find general causes; nothing was tuned on them, and any fix must be shown on a fresh hold-out. Counts only; the items stay private.
+
+1. **Situational questions do not reach the law, and the dev set hid it.** Of the 20 required sources the hold-out missed (outside the top 10), 17 are law sections. Most were near misses: of 30 required sources, 10 ranked in the top 10, 15 at 11–40, 3 at 41–100 and 2 beyond 100. The dev set's law score (R@5 0.69) was flattered by identifier questions ("What does 6 kap. 2 a § say?"), which the named-section lookup answers perfectly: 8 of 48 dev items, 2 of 18 hold-out items. A question that describes a situation in everyday words ("my family, after I lose my job") misses statute wording ("anknytning", "anställningen har upphört"); Swedish questions miss too, so this is vocabulary, not language.
+2. **Over-caution follows.** With the deciding law section missing, the answer honestly says the sources do not say, which scores as "not settled" or a follow-up where an answer was expected. In one case the right section was retrieved and the answer still hedged: the "not settled" line from the dev tuning is too strong.
+3. **The hold-out is harder in composition:** multi-source items are 6 of 18 (33%) against 8 of 48 (17%) in the dev set.
+4. **Minor:** the waiting-times page ranks low for processing-time questions; the temporary-protection boundary is still unstable.
+
+Candidates for the next round, each to be validated on a fresh hold-out, not this one:
+
+- **Law near misses:** the reranker, since most misses sit at ranks 11–40, exactly the range it reorders (on the dev set it did not help law, 0.69 → 0.67, but there the law items were dominated by identifier questions it cannot improve); and legal-vocabulary query expansion, extending the existing translation step to restate a situation in statute terms.
+- **Over-caution:** reserve "not settled" for questions the sources address but leave open.
+- **Golden sets:** the fresh hold-out should look like real users' questions (mostly situational, few identifier ones), and the dev set should gain situational items so that dev numbers stop flattering law retrieval.
+
