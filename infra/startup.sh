@@ -68,12 +68,42 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+# Deploy on merge: every 5 minutes, take origin/main if its required checks passed
+# (deploy/update.sh); a failed deploy rolls back and raises the "deploy failed" alert.
+cat > /etc/systemd/system/permitnav-deploy-failed.service <<'EOF'
+[Unit]
+Description=Report a failed PermitNav deploy run (raises the "deploy failed" alert)
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/gcloud logging write permitnav-deploy "deploy service failed (killed or crashed)" --severity=ERROR --quiet
+EOF
+cat > /etc/systemd/system/permitnav-deploy.service <<'EOF'
+[Unit]
+Description=PermitNav deploy on merge
+After=google-startup-scripts.service docker.service
+OnFailure=permitnav-deploy-failed.service
+[Service]
+Type=oneshot
+ExecStart=/opt/permitnav/deploy/update.sh
+EOF
+cat > /etc/systemd/system/permitnav-deploy.timer <<'EOF'
+[Unit]
+Description=Check main for a new PermitNav version every 5 minutes
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+[Install]
+WantedBy=timers.target
+EOF
 systemctl daemon-reload
 systemctl enable --now permitnav-backup.timer
+systemctl enable --now permitnav-deploy.timer
 
 # Start (or restart) the service only once the secrets exist.
 if [ -f "$APP/.env" ]; then
   cd "$APP"
-  docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d --build
+  # The deploy timer's lock: a boot-time build and a deploy never run at once.
+  flock /run/permitnav-deploy.lock \
+    docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d --build
   docker image prune -f  # each rebuild leaves the previous ~3.3 GB image behind
 fi

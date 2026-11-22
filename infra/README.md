@@ -54,8 +54,13 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
 ```
 
 - **Logs:** `sudo $C logs -f api caddy` (Caddy's access logs: path, status, timing; no bodies).
-- **Update:** `sudo git pull && sudo $C up -d --build && sudo docker image prune -f`
-  (deploy on merge automates this later).
+- **Updates deploy themselves:** every 5 minutes the VM checks `main`; a new commit whose
+  required checks passed is built and started, and rolled back if it does not become healthy
+  (`deploy/update.sh`; `journalctl -u permitnav-deploy.service`; results in the
+  `permitnav-deploy` log). A failed commit is skipped until a newer one arrives. To deploy now:
+  `sudo systemctl start permitnav-deploy.service`. Changes to `infra/` (Terraform, the startup
+  script) still need `terraform apply`, and the startup script a reboot or
+  `sudo google_metadata_script_runner startup`.
 - **Backups:** nightly at 03:30 UTC (`systemctl list-timers permitnav-backup.timer`), kept
   30 days. The VM can create, list and read backups, but not delete or overwrite them. Restore
   on the VM:

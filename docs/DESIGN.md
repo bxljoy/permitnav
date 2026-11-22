@@ -920,10 +920,28 @@ Build order (agreed 2026-11-22): widen the corpus first (MIG rulings, then posit
 - **One VM in Stockholm** (`europe-north2`, `e2-standard-2`: 2 vCPU, 8 GB), created with Terraform (`infra/`): static IP, firewall, the VM's own service account, an EU backup bucket. Docker Compose with Caddy in front (`deploy/`); the API and Postgres have no host ports. Live at a subdomain of the owner's domain (DNS only, no proxy: a proxy would see questions in plain text). The domain stays in the VM's secrets, not in the repo.
 - **Deliberately minimal** (phase 3 is "small on purpose"): no managed database, load balancer, autoscaling or Secret Manager. These become relevant at the public beta, together with the EU model provider (D15); Compose keeps each upgrade separate.
 - **Security:** from outside only TCP 443, TCP 80 (redirects to HTTPS) and ping (GCP's default ICMP rule) are reachable (verified: 22, 3389, 5432 and 8000 closed); SSH only through Google's IAP tunnel and OS Login; shielded VM; daily automatic security updates; the VM may create, list and read backups but not delete or overwrite them; a production Postgres password; secrets only in a root-owned `/opt/permitnav/.env`, never in Terraform, metadata or the repo; a server-only OpenRouter key with its own limit.
-- **Backups:** nightly `pg_dump` to the EU bucket, versioned, kept 30 days. First run: a 24.7 MB dump. Nothing alerts yet when a nightly run fails.
+- **Backups:** nightly `pg_dump` to the EU bucket, versioned, kept 30 days. First run: a 24.7 MB dump.
 - **The corpus** is loaded from the public eval-corpus snapshot; phase 4 adds re-crawling on the server.
 - **Measured live (HTTPS, from Stockholm):** 7.7 s for an answer (17.1 s for the very first request after start), 4.1 s for an out-of-scope decline; API ~0.97 GB, Postgres ~0.18 GB, Caddy ~0.03 GB of memory; 9.5 GB of the 30 GB disk.
 - **Found and fixed while deploying:** the VM first had `objectAdmin` on the backups (could delete them; now `objectCreator`, plus `objectViewer` because `gcloud storage cp` reads the destination first: the first backup run failed with 403 until then; verified that the VM still cannot delete a backup); GCP's default network allows SSH and RDP from anywhere (outranked by a deny rule for this VM; the default rules are the project's, not the module's); a token appended to a `.env` without a final newline merged into the previous line (the API's start-up check refused the empty token, as designed).
 - **Trial deadline:** the $300 credit runs for 90 days; about $55–60 a month is used. Before it ends, upgrade the billing account or move (a database dump, a new VM, a DNS change).
-- **Not yet:** deploy on merge (updates are a `git pull` and rebuild on the VM, `infra/README.md`); an uptime check; the VM's logs in Cloud Logging (its identity has no logging role).
+
+### Monitoring
+
+- **Cloud Monitoring and Logging** (`infra/monitoring.tf`), within their free allowances, alerts by email (the address only in the git-ignored `permitnav.tfvars`).
+- **Is it up?** An uptime check on `/health` every 5 minutes from six regions (HTTP 200, `"ok"` in the body, a valid certificate); "PermitNav is down" when two or more regions fail (Google's 1200 s alignment recipe).
+- **Did the nightly backup fail?** `backup.sh` writes INFO or ERROR to Cloud Logging: an `EXIT` trap reports every non-zero exit (also a missing variable, which skips an `ERR` trap), and a systemd `OnFailure=` unit reports a killed run. "PermitNav backup failed" fires on any ERROR.
+- **Not:** a "backup missing" absence alert (its window is shorter than a day, so it would fire before every nightly run; a VM that is down is caught by the uptime check), and container log shipping (Docker's `gcplogs` driver can stop containers starting when Cloud Logging is unreachable; logs stay on the VM).
+- **Tested live, end to end:** a real backup logged INFO; a forced failure (a bucket that does not exist) logged ERROR and the alert email arrived; all six regions' uptime checks passed.
+- The API logs only the first part of a provider error (`OpenRouter HTTP 402`), never its body, which can carry account details.
+
+### Deploy on merge (pull-based)
+
+- **The VM pulls, GitHub does not push** (`deploy/update.sh`, a systemd timer every 5 minutes): GitHub needs no credentials for the VM, and nothing outside can reach in; the VM only reads the public repository.
+- **Only checked commits:** the ruleset on `main` already requires *Secret scan*, *Lint, types and tests* and *Retrieval eval (no models)*; the VM checks them again for the exact commit (GitHub's public check-runs API), against a push that bypassed the ruleset. A pending check means "try again later".
+- **Safe switch:** build first (running containers are untouched if the build fails), restart, wait up to 5 minutes for the health check; if the new version is not healthy, roll back to the previous commit. A failed commit is remembered and skipped until a newer one arrives, so a broken merge cannot restart the service every 5 minutes. A commit whose check failed is reported once and not remembered, so a re-run that passes is deployed; a required check missing after an hour (a renamed job) is reported once.
+- **Database migrations:** when `migrations/` changed, a backup is taken before the deploy, and a failed deploy is **not** rolled back automatically (old code on a migrated schema can pass the health check and still fail); the alert says so and points to the restore.
+- **One at a time:** a lock shared with the boot-time build; the timer waits for the startup script; the script runs from a private copy, since a deploy may change the script itself. A changed Caddyfile recreates Caddy (a single-file bind mount keeps the old file).
+- **Alerting:** each deploy logs INFO or ERROR (`permitnav-deploy`); every failure path reports (explicit reports, an `EXIT` trap, an `OnFailure=` unit for a killed run); "PermitNav deploy failed" fires on ERROR.
+- **Not automatic:** changes to `infra/` (Terraform, the startup script) are applied by hand. A deploy reaches the server up to 5 minutes after the merge, plus the build.
 

@@ -88,6 +88,31 @@ resource "google_monitoring_alert_policy" "down" {
   }
 }
 
+# --- Did a deploy fail? -----------------------------------------------------------------------
+
+resource "google_monitoring_alert_policy" "deploy_failed" {
+  display_name = "PermitNav deploy failed"
+  combiner     = "OR"
+  conditions {
+    display_name = "permitnav-deploy wrote an ERROR"
+    condition_matched_log {
+      filter = "logName=\"projects/${var.project_id}/logs/permitnav-deploy\" AND severity>=ERROR"
+    }
+  }
+  alert_strategy {
+    notification_rate_limit {
+      period = "3600s"
+    }
+    auto_close = "86400s"
+  }
+  notification_channels = [google_monitoring_notification_channel.email.id]
+  documentation {
+    content   = "A deploy from main failed and was rolled back (or was skipped: a required check did not pass). On the VM: `sudo journalctl -u permitnav-deploy.service`. The failed commit is in /var/lib/permitnav/failed-deploy; a newer commit on main is tried automatically."
+    mime_type = "text/markdown"
+  }
+  depends_on = [google_project_service.monitoring]
+}
+
 # --- Did the nightly backup fail? ------------------------------------------------------------
 
 resource "google_monitoring_alert_policy" "backup_failed" {
