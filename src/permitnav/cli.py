@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from permitnav import db
+from permitnav.answering.answerer import AnswerConfig
 from permitnav.corpus.chunking import STRATEGIES
 from permitnav.retrieval.retriever import MODES, RetrievalConfig
 
@@ -481,7 +482,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
             config = _retrieval_config(args)
             translator = _translator(config.translate)
             retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
-            answer_config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR)
+            answer_config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR, k=args.k)
             answerer = Answerer(conn, retriever, llm, answer_config)
             answer = answerer.answer(args.question, as_of=as_of)
     except LLMError as error:
@@ -572,7 +573,9 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
         return 1
     with db.connect() as conn:
         retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
-        answerer = Answerer(conn, retriever, llm, AnswerConfig(model=model, min_score=floor))
+        answerer = Answerer(
+            conn, retriever, llm, AnswerConfig(model=model, min_score=floor, k=args.k)
+        )
         results = run_answers(
             items,
             answerer,
@@ -592,7 +595,7 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
         judge_cost = sum(c.cost_usd or 0.0 for v in verdicts.values() for c in v.completions)
 
     label = "DEVELOPMENT RUN, includes drafts, not reportable" if args.include_drafts else "checked"
-    print(f"\nBehaviour eval: {args.file}, model={model}, floor={floor} ({label})")
+    print(f"\nBehaviour eval: {args.file}, model={model}, floor={floor}, k={args.k} ({label})")
     print(f"{'expected kind':<14} {'n':>3} {'right':>5}  given instead")
     for row in kind_table(results):
         instead = ", ".join(f"{kind} {n}" for kind, n in row.got.most_common())
@@ -924,6 +927,7 @@ def main(argv: list[str] | None = None) -> int:
     ask = sub.add_parser("ask", help="answer a question from the stored sources")
     ask.add_argument("question")
     _add_retrieval_options(ask)
+    ask.add_argument("--k", type=int, default=AnswerConfig.k, help="sources given to the model")
     ask.add_argument("--as-of", help="date the answer should apply on (YYYY-MM-DD); default today")
     ask.add_argument(
         "--show-sources", action="store_true", help="list everything shown to the model"
@@ -942,6 +946,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ea.add_argument("--file", default="evals/golden.dev.jsonl")
     _add_retrieval_options(ea)
+    ea.add_argument("--k", type=int, default=AnswerConfig.k, help="sources given to the model")
     ea.add_argument("--include-drafts", action="store_true", help="development run; not reportable")
     ea.add_argument(
         "--kind", nargs="+", choices=["answered", "follow_up", "not_settled", "out_of_scope"]

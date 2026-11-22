@@ -737,7 +737,7 @@ The second judged run (saved with `--out`) flagged 12 answers. Each was traced t
 | Conditions applied loosely | family-spouse-stays-403-en, family-spouse-put-income-401-en | 403 applied the "lived together abroad / well-established relationship" exception to someone it does not cover: 5 kap. 3 j § grants it only when the sponsor is a Swedish, EEA or Swiss citizen. 401 added a way to meet the support requirement ("including through your income") that no source gives. | Prompt rule 11: apply conditions exactly as the sources state them, check whom an exception is for, invent no ways of meeting a requirement. Both answers correct and faithful in both runs since. |
 | Not combining sources | work-extension-insurance-history-204-sv | 6 kap. 4 a § point 4 makes refusal depend on 7 kap. 7 e §; both were in the context, but the answer stopped at "the sources do not say". | Rule 10 extended: combine a section with the one its rule depends on. Right in one of two runs since: not reliably fixed. |
 | Answer language | 13 of 24 Swedish questions | Answered in English despite rule 8, with an English prompt and mixed sources. | The answerer detects the question's language (`language_of`) and tells the model ("Answer in Swedish, the language of the question"); when the question is neither clearly Swedish nor clearly English (another language, a tie, fewer than two words of evidence) no language is imposed. `eval-answers` reports "in the question's language" over every reply the model wrote, declines included, ignoring quoted passages and leaving out replies whose language cannot be told: 49 of 63 before, 63 of 63 in both runs since. |
-| Retrieval depth | work-employer-steps-101-sv | The employer-preparation section ranks 14th: below page intros and a partly relevant section; not a collapsing or translation problem, and the reranker does not lift it into the top 8. | Not tuned for one question. Open point: measure giving the answer model 10–12 sources instead of 8 (R@10 0.67 vs R@5 0.55), with the judge, against the token cost. |
+| Retrieval depth | work-employer-steps-101-sv | The employer-preparation section ranks 14th: below page intros and a partly relevant section; not a collapsing or translation problem, and the reranker does not lift it into the top 8. | Not tuned for one question; the depth was measured as a whole (below) and stays at 8. |
 | Missing source | work-union-statement-102-en/sv | No crawled section said what happens if the union does not reply. The owner found it: Migrationsverket's page for trade unions (`/andra-aktorer/fackforbund.html`, outside the crawl rules): "Om fackförbundet inte har yttrat sig inom 14 dagar kan arbetsgivaren gå vidare i processen utan att vänta in yttrandet", and otherwise Migrationsverket checks the collective agreement and wage statistics. | That page added to the crawl scope (only it, not all of `/andra-aktorer/`); 102 gets a second required group and a precise reference, its `as_of` moved to the day the page was first crawled (pages are dated by observation, D5). The Swedish answer now gives the 14-day rule; the English one does not reach the page (below). |
 | Two words for one application | work-new-or-extension-202-en/sv | Migrationsverket's page says "submit a new application" for a new job; the law (6 kap. 4 a §) and the e-service ("Extend the existing work permit") treat it as an extension. The owner's experience settles it: "new application" means a new decision, because the permit is tied to an employer; the application category for someone with a valid permit is the extension. | References updated to lead with the extension and explain the page's wording; the phone service's advice is in the notes (D23). A prompt sentence for such cases (lead with the law's term, explain the page's) changed nothing in two tries and was removed. 6 kap. 4 a § is in the context (rank 4), yet the answer follows the page and adds "not an extension", which no source says. No crawled section names the e-service option. |
 | Known kind boundary | work-working-while-pending-105-en/sv, oos-deportation-work-permit-602-en | Follow-up vs not settled; an out-of-scope question answered. | Unchanged (measured in the follow-up tuning). |
@@ -759,4 +759,28 @@ Open points from this round:
 - **A page's plain wording over the law's term:** in 202 the answer model prefers Migrationsverket's "new application" to the law's "extension" even with 6 kap. 4 a § in the context, and invents the contrast. A candidate for the answer-model comparison (slice 8): whether a stronger model reads the two together.
 - **The language instruction can still slip:** one `ask` of a Swedish question (102-sv) answered in English, although both judged runs had every reply in the question's language.
 - **More sources outside the crawl rules:** the trade-union page shows that useful guidance can live outside the applicant and employer sections. When an answer says "the sources do not say", check the site before treating it as a gap in the rules.
+
+### Retrieval depth: 8 sources stay
+
+Does giving the answer model more sources (`AnswerConfig.k`, `--k`) help? First without model calls, the share of expected sources that reach the model (search, transitional provisions and references together):
+
+| Sources | Expected sources reaching the model | English | Swedish | Context |
+|---|---|---|---|---|
+| **8 (kept)** | 49 of 72 (68%) | 25/36 | 24/36 | ~3,100 tokens |
+| 10 | 53 of 72 (74%) | 25/36 | 28/36 | ~3,800 |
+| 12 | 55 of 72 (76%) | 26/36 | 29/36 | ~4,400 |
+
+Then judged, two runs each:
+
+| | k = 8 | k = 12 |
+|---|---|---|
+| Correct (of 48) | 41, 40 | 44, 43 |
+| English correct (of 24) | 22, 20 | 22, 21 |
+| Faithful (of 48 judged) | 48, 48 | 46, 45 |
+| Behaviour (of 64) | 52, 55 | 51, 51 |
+| Answer cost, 64 questions | $0.104 | $0.12 |
+
+- **More sources help Swedish questions, not English ones:** about three more correct answers per run, nearly all Swedish; English unchanged.
+- **More sources add unsupported claims, in both languages:** two or three per run, against none at 8. Of the five, three were substantive: content from the artists' page answering a general question (a near-miss variant slipping in), an inference no source states, and a claim about which trips count towards residence time that the cited source does not support.
+- **Kept at 8 (owner's decision, D24):** the English slice is the headline, and there k = 12 adds unsupported claims without making answers more correct; in a legal answer an unsupported confident claim is worse than a missing detail. Not tried: k = 10, which may keep most of the gain with less dilution, and more sources for Swedish questions only (easy, but tuned to a 24-item slice).
 
