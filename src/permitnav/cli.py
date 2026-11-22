@@ -384,6 +384,7 @@ def cmd_index(args: argparse.Namespace) -> int:
 
 def cmd_eval(args: argparse.Namespace) -> int:
     import json
+    from dataclasses import asdict
 
     from permitnav.evals.golden import load_golden
     from permitnav.evals.run import run_retrieval, slices
@@ -401,18 +402,58 @@ def cmd_eval(args: argparse.Namespace) -> int:
             print(f"no checked items in {args.file} ({len(drafts)} drafts); see evals/README.md,")
             print("or run with --include-drafts for a development (not reportable) run")
             return 1
-    try:
-        from permitnav.embedding.bge_m3 import BgeM3Embedder
-
-        embedder = BgeM3Embedder()
-    except ImportError:
-        print("bge-m3 needs the embed extra: uv sync --extra embed")
-        return 1
-    from permitnav.llm.openrouter import LLMError
+    from permitnav.evals.replay import (
+        MissingQuery,
+        QueryCache,
+        RecordingEmbedder,
+        RecordingTranslator,
+        ReplayEmbedder,
+        ReplayTranslator,
+    )
 
     config = _retrieval_config(args)
+    if args.queries and args.record_queries:
+        print("--queries replays recorded queries; --record-queries records them: pick one")
+        return 1
+    if args.queries and config.rerank:
+        print("--queries runs without models; the reranker needs one")
+        return 1
+    settings = {"file": args.file, "include_drafts": args.include_drafts, "config": asdict(config)}
+    replay = None
+    if args.queries:
+        try:
+            replay = QueryCache.load(Path(args.queries))
+        except (OSError, ValueError, KeyError) as error:
+            print(f"cannot read recorded queries {args.queries}: {error}")
+            return 1
+        if replay.settings != settings:
+            print(f"{args.queries} was recorded with other settings: {replay.settings}")
+            print("record it again with the settings of this run (see evals/README.md)")
+            return 1
+    recording = QueryCache(settings=settings) if args.record_queries else None
+    if replay is not None:  # CI: no model, no API key
+        embedder = ReplayEmbedder(replay)
+    else:
+        try:
+            from permitnav.embedding.bge_m3 import BgeM3Embedder
+
+            embedder = BgeM3Embedder()
+        except ImportError:
+            print("bge-m3 needs the embed extra: uv sync --extra embed")
+            return 1
+        if recording is not None:
+            embedder = RecordingEmbedder(embedder, recording)
+    from permitnav.llm.openrouter import LLMError
+
     try:
-        translator = _translator(config.translate)
+        if not config.translate:
+            translator = None
+        elif replay is not None:
+            translator = ReplayTranslator(replay)
+        else:
+            translator = _translator(True)
+            if recording is not None:
+                translator = RecordingTranslator(translator, recording)
         with db.connect() as conn:
             existing = dict(conn.execute("SELECT id, document FROM unit").fetchall())
             retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
@@ -434,6 +475,15 @@ def cmd_eval(args: argparse.Namespace) -> int:
         print(f"query translation failed: {error}")
         print("(the retrieval eval translates English questions; --no-translate runs offline)")
         return 1
+    except MissingQuery as error:
+        print(f"{error}: refresh the recorded queries (see evals/README.md)")
+        return 1
+    if recording is not None:
+        recording.save(Path(args.record_queries))
+        print(
+            f"recorded {len(recording.vectors)} vectors and {len(recording.translations)}"
+            f" translations -> {args.record_queries}"
+        )
 
     label = (
         "DEVELOPMENT RUN, includes drafts, not reportable"
@@ -506,6 +556,45 @@ def cmd_eval(args: argparse.Namespace) -> int:
     if not run.results:
         print("no items could be scored")
         return 1
+    overall = next(s for s in slices(run) if s.name == "all")
+    below = []
+    if args.min_r5 is not None and overall.recall_5 < args.min_r5 - 1e-9:
+        below.append(f"R@5 {overall.recall_5:.4f} < {args.min_r5}")
+    if args.min_mrr is not None and overall.mrr < args.min_mrr - 1e-9:
+        below.append(f"MRR {overall.mrr:.4f} < {args.min_mrr}")
+    if below:
+        print(f"RETRIEVAL REGRESSION: {'; '.join(below)}")
+        return 3
+    if args.min_r5 is not None or args.min_mrr is not None:
+        print(f"gate passed: R@5 {overall.recall_5:.4f}, MRR {overall.mrr:.4f}")
+    return 0
+
+
+def cmd_export_eval_corpus(args: argparse.Namespace) -> int:
+    from permitnav.corpus.snapshot import export_snapshot
+    from permitnav.evals.provenance import git_version
+
+    with db.connect() as conn:
+        manifest = export_snapshot(conn, Path(args.out), git_version())
+    size = Path(args.out).stat().st_size
+    counts = ", ".join(f"{n:,} {t}" for t, n in manifest["counts"].items())
+    print(f"{args.out}: {size / 1e6:.1f} MB, schema {manifest['schema']}: {counts}")
+    return 0
+
+
+def cmd_import_eval_corpus(args: argparse.Namespace) -> int:
+    import psycopg
+
+    from permitnav.corpus.snapshot import import_snapshot
+
+    with db.connect() as conn:
+        try:
+            manifest = import_snapshot(conn, Path(args.file))
+        except (OSError, ValueError, psycopg.Error) as error:
+            print(f"not imported: {error}")
+            return 1
+    counts = ", ".join(f"{n:,} {t}" for t, n in manifest["counts"].items())
+    print(f"imported {args.file} (made {manifest['created']} at {manifest['commit']}): {counts}")
     return 0
 
 
@@ -1005,7 +1094,21 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--include-drafts", action="store_true", help="development run; not reportable")
     ev.add_argument("--verbose", "-v", action="store_true", help="show each item's ranks")
     ev.add_argument("--out", help="write per-item results as JSON")
+    ev.add_argument(
+        "--queries", help="replay recorded question vectors and translations (no model; CI)"
+    )
+    ev.add_argument("--record-queries", help="record question vectors and translations here")
+    ev.add_argument("--min-r5", type=float, help="fail (exit 3) if overall R@5 is below this")
+    ev.add_argument("--min-mrr", type=float, help="fail (exit 3) if overall MRR is below this")
     ev.set_defaults(run=cmd_eval)
+    ex = sub.add_parser(
+        "export-eval-corpus", help="write the eval corpus snapshot (public text; for CI)"
+    )
+    ex.add_argument("--out", required=True, help="e.g. eval-corpus.txt.gz")
+    ex.set_defaults(run=cmd_export_eval_corpus)
+    im = sub.add_parser("import-eval-corpus", help="load an eval corpus snapshot (empty database)")
+    im.add_argument("file")
+    im.set_defaults(run=cmd_import_eval_corpus)
     ea = sub.add_parser(
         "eval-answers", help="run the behaviour eval (answer kinds); calls the model"
     )

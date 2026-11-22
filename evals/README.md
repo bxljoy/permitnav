@@ -96,3 +96,36 @@ The citable units from D2. The validator checks these patterns.
 Chapter and section letters are written without spaces: "5 a kap. 3 b §" is `5akap/3b§`.
 
 **Placeholder for pages not indexed yet:** `web:tbd/<slug>`, e.g. `web:tbd/work-permit-insurances`, marks a Migrationsverket page that answers the item but has no unit ID yet. Replace it with the real `web:` ID once the page is ingested (phase 1). Only `draft` items may contain placeholders.
+
+## The retrieval eval in CI
+
+Every push and pull request runs the retrieval eval on the dev set **without any model or
+API key** (`.github/workflows/ci.yml`, job `retrieval-eval`), so it also works for pull
+requests from forks:
+
+- **The corpus** comes from a public GitHub release asset, `eval-corpus.txt.gz` (tag
+  `eval-corpus-YYYY-MM-DD`): the wordings the sources show now, their links, page
+  translations and `structure` chunks with bge-m3 embeddings. Public source text only:
+  statutes (Källa: Sveriges riksdag), Migrationsverket's text (Källa: Migrationsverket) and
+  MIG rulings (Sveriges Domstolar, CC0). Never the rebuilt statute history or the change log
+  (phase 4). CI checks its sha256.
+- **The questions** are replayed from `queries.dev.json`: each dev question's bge-m3 vector,
+  its Swedish translation and the translation's vector, recorded from a local run.
+- **The gate**: the job fails if overall R@5 or MRR fall below the minimums in the workflow.
+  With the corpus and the queries fixed, the eval is deterministic: a change in its numbers
+  comes from the code under review.
+
+When the golden set, the corpus or the retrieval code changes on purpose:
+
+```
+uv run permitnav eval --record-queries evals/queries.dev.json   # after golden-set changes
+uv run permitnav export-eval-corpus --out eval-corpus.txt.gz    # after re-indexing
+gh release create eval-corpus-YYYY-MM-DD eval-corpus.txt.gz --title "Eval corpus YYYY-MM-DD" \
+  --notes "Public source text for the CI retrieval eval; see evals/README.md."
+shasum -a 256 eval-corpus.txt.gz                                # into the workflow
+```
+
+then update `EVAL_CORPUS_TAG`, `EVAL_CORPUS_SHA256` and, if the numbers moved for a good
+reason, `--min-r5` / `--min-mrr`. Check locally first, in an empty database:
+`permitnav migrate && permitnav import-eval-corpus eval-corpus.txt.gz && permitnav eval
+--queries evals/queries.dev.json`.

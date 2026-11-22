@@ -47,3 +47,42 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run pyright
       - run: uv run pytest -q
+
+  retrieval-eval:
+    name: Retrieval eval (no models)
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: permitnav
+          POSTGRES_PASSWORD: permitnav
+          POSTGRES_DB: permitnav
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U permitnav"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgresql://permitnav:permitnav@localhost:5432/permitnav
+      # The eval corpus (public source text with embeddings; evals/README.md). A new
+      # snapshot means a new release, a new checksum and, if the numbers move, new minimums.
+      EVAL_CORPUS_TAG: eval-corpus-2026-11-22
+      EVAL_CORPUS_SHA256: PLACEHOLDER
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked
+      - name: Download the eval corpus
+        run: |
+          curl -fsSL -o eval-corpus.txt.gz \
+            "https://github.com/${{ github.repository }}/releases/download/$EVAL_CORPUS_TAG/eval-corpus.txt.gz"
+          echo "$EVAL_CORPUS_SHA256  eval-corpus.txt.gz" | sha256sum -c -
+      - run: uv run permitnav migrate
+      - run: uv run permitnav import-eval-corpus eval-corpus.txt.gz
+      - name: Retrieval eval with recorded queries (fails below the minimums)
+        run: >-
+          uv run permitnav eval --queries evals/queries.dev.json
+          --min-r5 0.52 --min-mrr 0.35
