@@ -818,3 +818,19 @@ Candidates for the next round, each to be validated on a fresh hold-out, not thi
 - **Over-caution:** reserve "not settled" for questions the sources address but leave open.
 - **Golden sets:** the fresh hold-out should look like real users' questions (mostly situational, few identifier ones), and the dev set should gain situational items so that dev numbers stop flattering law retrieval.
 
+### Law retrieval for situational questions: what did not work (dev set)
+
+Following the hold-out diagnosis, three fixes were tried on the dev set with throwaway prototypes (nothing was added to the code). Split by question kind, the dev set shows the same problem: law sources for situational questions reach the top 5 in 43% of cases (44 groups), identifier questions in 100% (8 groups).
+
+| Try | Situational law in top 5 | Note |
+|---|---|---|
+| Baseline | 0.43 (0.57 in top 8) | |
+| Reranker (built, opt-in) | 0.45 (0.52 in top 8) | Helps pages (0.35 → 0.50), not the law |
+| Statute-style restatement of the question by Haiku (HyDE for the law), as extra vector and keyword rankings in the law group, weight 1 and 2 | 0.41–0.45 | No effect |
+| Leave out the EU/EEA chapters (3 a and 3 b kap.), which never apply to the service's users | unchanged | Missed sections move up 1–6 places |
+| A model names the likely sections, fetched by the named-section lookup | — | Haiku names 11 of 44 required sections and 4 of the 19 misses; Sonnet 22 of 44 and 8 of the 19, at about $0.012 a question and with 149 of 171 proposals not needed |
+
+- **Why:** inside the law group, 24 of the 44 sources rank in the top 3, 5 rank 4–10 (cut only by interleaving with the other groups) and 15 rank below 10, often very deep (6 kap. 2 § at 99 for an insurance question, 7 kap. 3 § at 52 for a job loss). The missed sections are the long, general central provisions; their wording is too general for word or meaning similarity to pick them out. Only knowledge of the law finds them.
+- **Decision:** law retrieval is parked. Section naming by a strong model is the only lever that worked and is a later design decision on cost (about 8× the answer's cost per question). The interleaving loss (5 of 44) is small and cheaper to address later.
+- **Gotcha found on the way:** Haiku 5.5 spends its token budget on hidden reasoning first; with `max_tokens=300` it returned empty text. The query translator (400 tokens) was checked: every English dev and hold-out question has a cached translation.
+
