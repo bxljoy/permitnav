@@ -53,6 +53,27 @@ def _translator(enabled: bool):
     return LLMTranslator(llm, model.strip(), cache_path=_translations_cache())
 
 
+def _print_provenance(config, answer_model: str | None = None, judge: str | None = None) -> None:
+    """The version behind a report, so its numbers can be tied to one reproducible setup."""
+    from permitnav.evals.provenance import provenance
+
+    translate = None
+    if config.translate:
+        translate = (
+            os.environ.get("TRANSLATE_MODEL", "").strip()
+            or os.environ.get("ANSWER_MODEL", "").strip()
+        )
+    models = {
+        "answer": answer_model,
+        "judge": judge,
+        "translate": translate,
+        "embedder": "BAAI/bge-m3",
+        "reranker": "BAAI/bge-reranker-v2-m3" if config.rerank else None,
+    }
+    for line in provenance(config, models):
+        print(line)
+
+
 def _reranker(enabled: bool):
     """The local cross-encoder (phase 2, slice 6), or None when reranking is off."""
     if not enabled:
@@ -392,6 +413,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         f"\nRetrieval eval: {args.file}, strategy={args.strategy}, mode={args.mode}{weight}"
         f" ({label})"
     )
+    _print_provenance(config)
     columns = ("R@1", "R@5", "95% CI", "R@10", "MRR", "nDCG@5")
     widths = (5, 5, 13, 5, 5, 6)
     header = " ".join(f"{c:>{w}}" for c, w in zip(columns, widths, strict=True))
@@ -596,6 +618,8 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
 
     label = "DEVELOPMENT RUN, includes drafts, not reportable" if args.include_drafts else "checked"
     print(f"\nBehaviour eval: {args.file}, model={model}, floor={floor}, k={args.k} ({label})")
+    effort = f" (reasoning effort {judge_effort})" if judge_effort else ""
+    _print_provenance(config, model, f"{judge_model}{effort}" if judge_model else None)
     print(f"{'expected kind':<14} {'n':>3} {'right':>5}  given instead")
     for row in kind_table(results):
         instead = ", ".join(f"{kind} {n}" for kind, n in row.got.most_common())
