@@ -129,3 +129,24 @@ then update `EVAL_CORPUS_TAG`, `EVAL_CORPUS_SHA256` and, if the numbers moved fo
 reason, `--min-r5` / `--min-mrr`. Check locally first, in an empty database:
 `permitnav migrate && permitnav import-eval-corpus eval-corpus.txt.gz && permitnav eval
 --queries evals/queries.dev.json`.
+
+## The LLM smoke slice
+
+On every merge to `main`, nightly and on demand, CI asks the 12 questions in `smoke.json`
+with the real answer model (job `smoke`; not on pull requests, which never get the
+OpenRouter secret). The questions are replayed from `queries.dev.json` and searched in the
+eval corpus, so the answer model is the only model called: about $0.02 a run, through a
+CI-only OpenRouter key with a $5 monthly credit limit.
+
+Each question must get its expected answer kind, an answer must cite a source, and a reply
+must be in the question's language. The questions were chosen as ones the current
+configuration got right in all five dev runs. A failing question is asked once more and fails
+only if it fails again; one failing question is allowed. Run it locally with
+`permitnav smoke` (bge-m3 and translation live) or `permitnav smoke --queries
+evals/queries.dev.json`.
+
+When the golden set changes, re-record the queries (`permitnav eval --record-queries
+evals/queries.dev.json` records every checked dev question, including those the retrieval
+eval skips). When the answer prompt or model changes on purpose, check the slice still
+passes locally before merging; replace questions only with ones that are stable over
+several runs, never to make a failing change pass.
