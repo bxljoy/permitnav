@@ -849,3 +849,22 @@ Rule 6 of `prompts/answer.md` was rewritten to reserve "not settled" for questio
 - **The diagnosis overstated this cause.** The hold-out's over-caution is two topics (each in two languages), identical in every run: one whose required sources were not retrieved at all (an honest "the sources do not say", so cause 1 again), and one borderline item where the answer gives the right rule but declines to draw the conclusion the reference draws from it (that a break does not reset a total counted over a period). A general prompt change was the wrong tool for one borderline item.
 - **Where the hold-out findings stand:** law retrieval for situational questions is the real problem; over-caution is mostly its consequence. The one lever that worked for retrieval (a strong model naming the sections) needs a cost decision.
 
+### Hold-out 2 and the close of phase 2
+
+Hold-out 2 (22 private items, 11 topics in English and Swedish, drafted from Migrationsverket's own Q&A and rephrased as situations, human-reviewed, never used before) was run once against the frozen commit `71eb06a` (prompt hashes and full config printed in each report). Retrieval once; answers three times with the judge (about $0.30). Aggregate numbers only.
+
+| | Dev set (tuned on) | Hold-out 1 (spent) | **Hold-out 2 (fresh)** |
+|---|---|---|---|
+| Retrieval R@5 [95% CI] | 0.53 [0.41, 0.65] | 0.31 [0.14, 0.50] | **0.61** [0.43, 0.80] |
+| Right kind of answer | ~81% | 58% | **19–20 of 22 (86–91%)** |
+| Judged correct | 81–85% | 61% | **20 of 22 in each run (91%)** |
+| Faithful (judged) | 43–48 of 48 | 18 of 18 | 20–22 of 22 |
+| In the question's language | 63 of 63 | 24 of 24 | 22 of 22 |
+
+- **Not comparable to hold-out 1 as "better":** every hold-out 2 item expects a direct answer, and Migrationsverket's Q&A sections hold their answer in one place, so the set is easier by construction. It measures the answered path on realistic wording; follow-ups, "not settled" and out-of-scope questions are not covered by it.
+- **The law problem shows here too:** items that need a law section (multi-source) have R@5 0.31, against 0.79 for page-only items — the same weakness the hold-out 1 diagnosis found.
+- **Failures are concentrated:** the only incorrect answers are one topic (both languages, every run), answered as "not settled". Three answers in total were judged unfaithful, spread over two topics in single runs.
+- **Hold-out 2 is now spent** once its failures are acted on; the next independent check needs a hold-out 3, which should include follow-up, not-settled and out-of-scope items and questions from real cases.
+
+**Phase 2 closes here.** Its honest results: on fresh questions that should be answered, about 90% judged correct and faithful, in the question's language; on harder situational questions (hold-out 1) about 60%. The main open problem is law retrieval for situational questions (only a strong model naming the sections helped, a cost decision for later); over-caution turned out to be mostly a consequence of it.
+
