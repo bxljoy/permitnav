@@ -2,7 +2,8 @@
 
 One VM in an EU region on Google Cloud, running the same Docker Compose setup as local
 development, with Caddy for HTTPS. Terraform creates the VM, a static IP, the firewall
-(80/443 open; SSH only through Google's IAP tunnel), the VM's service account and an EU
+(80/443 open; SSH only through Google's IAP tunnel; GCP's default allow-SSH and allow-RDP
+rules outranked by a deny rule for this VM), the VM's service account and an EU
 bucket for nightly database backups. Secrets live only in `/opt/permitnav/.env` on the VM.
 
 ## Create
