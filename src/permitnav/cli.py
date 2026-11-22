@@ -471,6 +471,14 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 applying_on,
                 lambda u, d: units_with_same_text(conn, u, d),
             )
+            if recording is not None:
+                # Questions the eval skips (out of scope, nothing findable) are still asked
+                # by the answer evals and the smoke slice: record what retrieval needs for
+                # them too.
+                scored = {r.item.id for r in run.results}
+                for item in items:
+                    if item.id not in scored:
+                        retriever.search(item.question, as_of=item.as_of, k=10)
     except LLMError as error:
         print(f"query translation failed: {error}")
         print("(the retrieval eval translates English questions; --no-translate runs offline)")
@@ -567,6 +575,116 @@ def cmd_eval(args: argparse.Namespace) -> int:
         return 3
     if args.min_r5 is not None or args.min_mrr is not None:
         print(f"gate passed: R@5 {overall.recall_5:.4f}, MRR {overall.mrr:.4f}")
+    return 0
+
+
+def cmd_smoke(args: argparse.Namespace) -> int:
+    """The LLM smoke slice: real answers to a few golden questions (evals/smoke.json)."""
+    from dataclasses import asdict
+
+    from permitnav.answering.answerer import BGE_M3_FLOOR, AnswerConfig, Answerer
+    from permitnav.evals.answers import run_answers
+    from permitnav.evals.golden import load_golden
+    from permitnav.evals.replay import MissingQuery, QueryCache, ReplayEmbedder, ReplayTranslator
+    from permitnav.evals.smoke import SmokeSlice, problems
+    from permitnav.llm.openrouter import LLMError, OpenRouterLLM
+    from permitnav.retrieval.retriever import Retriever
+
+    model = os.environ.get("ANSWER_MODEL", "").strip()
+    if not model:
+        print("ANSWER_MODEL is not set; see .env.example")
+        return 1
+    smoke = SmokeSlice.load(Path(args.smoke))
+    by_id = {i.id: i for i in load_golden(Path(args.file))}
+    missing = [i for i in smoke.items if i not in by_id]
+    if missing:
+        print(f"smoke items not in {args.file}: {', '.join(missing)}")
+        return 1
+    items = [by_id[i] for i in smoke.items]
+    config = _retrieval_config(args)
+    if args.queries and config.rerank:
+        print("--queries runs without local models; the reranker needs one")
+        return 1
+    if args.queries:  # CI: questions replayed, so the only model is the answer model
+        try:
+            cache = QueryCache.load(Path(args.queries))
+        except (OSError, ValueError, KeyError) as error:
+            print(f"cannot read recorded queries {args.queries}: {error}")
+            return 1
+        if cache.settings.get("config") != asdict(config):
+            print(f"{args.queries} was recorded with other retrieval settings")
+            return 1
+        embedder = ReplayEmbedder(cache)
+        translator = ReplayTranslator(cache) if config.translate else None
+    else:
+        try:
+            from permitnav.embedding.bge_m3 import BgeM3Embedder
+
+            embedder = BgeM3Embedder()
+        except ImportError:
+            print("bge-m3 needs the embed extra: uv sync --extra embed")
+            return 1
+        translator = _translator(config.translate)
+    try:
+        llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
+    except LLMError as error:
+        print(f"model call failed: {error}")
+        return 1
+    reranker = _reranker(config.rerank)
+
+    def ask(questions: list) -> list:
+        with db.connect() as conn:
+            retriever = Retriever(conn, embedder, config, translator, reranker)
+            answer_config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR)
+            return run_answers(questions, Answerer(conn, retriever, llm, answer_config))
+
+    try:
+        results = ask(items)
+    except MissingQuery as error:
+        print(f"{error}: refresh the recorded queries (see evals/README.md)")
+        return 1
+    print(f"\nSmoke slice: {len(items)} questions, model={model}")
+    _print_provenance(config, model)
+    failures = 0
+    cost = 0.0
+    unknown_cost = 0
+
+    def add_cost(result) -> None:
+        nonlocal cost, unknown_cost
+        if result.cost_usd is None:
+            unknown_cost += 1
+        else:
+            cost += result.cost_usd
+
+    for result in results:
+        found = problems(result)
+        add_cost(result)
+        kind = result.kind
+        if found:  # asked once more: a real regression fails again, a random flip rarely does
+            (again,) = ask([result.item])
+            add_cost(again)
+            if problems(again):
+                kind = again.kind
+                found = [f"first: {'; '.join(found)}", f"again: {'; '.join(problems(again))}"]
+            else:
+                print(f"  (passed on a second try: {result.item.id}, first {'; '.join(found)})")
+                kind, found = again.kind, []
+        failures += bool(found)
+        print(
+            f"  {'FAIL' if found else 'ok  '} {result.item.id:<40} {kind:<13} {' | '.join(found)}"
+        )
+    costs = f"answers ${cost:.4f}"
+    if unknown_cost:
+        costs += f" (+{unknown_cost} with no cost reported)"
+    if translation := _translation_cost(translator):
+        costs += f"; {translation.strip('[]')}"
+    print(
+        f"{len(results) - failures} of {len(results)} passed"
+        f" (at most {smoke.max_failures} may fail); {costs}"
+    )
+    if failures > smoke.max_failures:
+        print("SMOKE FAILED")
+        return 1
     return 0
 
 
@@ -1101,6 +1219,12 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--min-r5", type=float, help="fail (exit 3) if overall R@5 is below this")
     ev.add_argument("--min-mrr", type=float, help="fail (exit 3) if overall MRR is below this")
     ev.set_defaults(run=cmd_eval)
+    sm = sub.add_parser("smoke", help="the LLM smoke slice (evals/smoke.json); calls the model")
+    sm.add_argument("--file", default="evals/golden.dev.jsonl")
+    sm.add_argument("--smoke", default="evals/smoke.json")
+    sm.add_argument("--queries", help="replay recorded question vectors and translations (CI)")
+    _add_retrieval_options(sm)
+    sm.set_defaults(run=cmd_smoke)
     ex = sub.add_parser(
         "export-eval-corpus", help="write the eval corpus snapshot (public text; for CI)"
     )

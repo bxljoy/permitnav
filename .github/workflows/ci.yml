@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 3 * * *"  # nightly: the smoke slice notices model or provider drift
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -86,3 +89,46 @@ jobs:
         run: >-
           uv run permitnav eval --queries evals/queries.dev.json
           --min-r5 0.52 --min-mrr 0.35
+
+  smoke:
+    # The LLM smoke slice (evals/smoke.json) with the real answer model. Not on pull requests:
+    # it needs the OpenRouter secret, which pull requests from forks never get. Its key has its
+    # own credit limit.
+    name: LLM smoke slice
+    # Only in this repository: a fork's own pushes have no secret either.
+    if: github.event_name != 'pull_request' && github.repository == 'bxljoy/permitnav'
+    needs: retrieval-eval
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: permitnav
+          POSTGRES_PASSWORD: permitnav
+          POSTGRES_DB: permitnav
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U permitnav"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgresql://permitnav:permitnav@localhost:5432/permitnav
+      EVAL_CORPUS_TAG: eval-corpus-2026-11-22
+      EVAL_CORPUS_SHA256: 6383d8c5070949a150e39d02dc52e6f0026f288f050f4427728486a509800874
+      ANSWER_MODEL: anthropic/claude-haiku-5.5
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked
+      - name: Download the eval corpus
+        run: |
+          curl -fsSL -o eval-corpus.txt.gz \
+            "https://github.com/${{ github.repository }}/releases/download/$EVAL_CORPUS_TAG/eval-corpus.txt.gz"
+          echo "$EVAL_CORPUS_SHA256  eval-corpus.txt.gz" | sha256sum -c -
+      - run: uv run permitnav migrate
+      - run: uv run permitnav import-eval-corpus eval-corpus.txt.gz
+      - name: Smoke slice (fails when more than one question fails twice)
+        run: uv run permitnav smoke --queries evals/queries.dev.json
