@@ -27,6 +27,7 @@ CREDITS = {
     "ordinance": "Källa: Sveriges riksdag",
     "web_page": "Källa: Migrationsverket",
     "ruling": "Källa: Sveriges Domstolar",
+    "position_paper": "Källa: Migrationsverket",
 }
 MAX_QUESTION_CHARS = 2000
 log = logging.getLogger("permitnav.api")

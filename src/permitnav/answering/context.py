@@ -144,6 +144,11 @@ def _dates(authority: str, valid_from, valid_to, seen) -> str:
         return f"Migrationsverket's web page as seen on {seen}"
     if authority == "ruling":
         return f"Migration Court of Appeal ruling, decided on {valid_from}"
+    if authority == "position_paper":
+        start = f"this part applies from {valid_from}" if valid_from else "in force"
+        return f"Migrationsverket's legal position, {start}" + (
+            f", until {valid_to}" if valid_to else ""
+        )
     start = f"applies from {valid_from}" if valid_from else "in force (start date not recorded)"
     return f"{start}, until {valid_to}" if valid_to else start
 

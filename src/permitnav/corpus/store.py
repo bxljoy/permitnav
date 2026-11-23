@@ -109,6 +109,74 @@ def ingest_page(conn: psycopg.Connection, raw: RawFetch, page: Page) -> IngestRe
     return report
 
 
+def ingest_position_paper(
+    conn: psycopg.Connection,
+    raw: RawFetch,
+    units: list[ParsedUnit],
+    document: str,
+    version_start: date | None = None,
+) -> IngestReport:
+    """Store one position paper's sections (slice 5). Each version is its own download, so the
+    paper's stored sections are found by document ('rs:RS/084/2021'), not by URL.
+
+    A section's start comes from the revision table, which can be coarse: "2" revised dates
+    2.1.3 too, and a table can omit a changed section ("Redaktionella ändringar"). So, against
+    what is stored: an unchanged section keeps its stored start (the history stays); a changed
+    one starts no earlier than this version (`version_start`, its newest revision); a section
+    this version dropped ends when this version starts."""
+    stored = {s.unit_id: s for s in _open_versions_of(conn, (document,)) if s.valid_to is None}
+    adjusted: list[ParsedUnit] = []
+    for unit in units:
+        old = stored.get(unit.unit_id)
+        if old is not None and old.valid_from is not None:
+            same = old.text_hash == text_hash(unit.text)
+            if same and (unit.valid_from is None or unit.valid_from > old.valid_from):
+                unit = dataclasses.replace(unit, valid_from=old.valid_from)
+            elif (
+                not same
+                and version_start
+                and (unit.valid_from is None or unit.valid_from <= old.valid_from)
+            ):
+                unit = dataclasses.replace(unit, valid_from=max(version_start, old.valid_from))
+        adjusted.append(unit)
+    kept = {u.unit_id for u in units}
+    with conn.transaction():
+        for unit_id, old in stored.items():
+            if unit_id in kept or version_start is None:
+                continue
+            if old.valid_from is not None and version_start <= old.valid_from:
+                continue
+            conn.execute(
+                "UPDATE unit_version SET valid_to = %s, observed_to = %s WHERE id = %s",
+                (version_start, raw.fetched_at, old.id),
+            )
+            conn.execute(
+                "INSERT INTO change_log (observed_at, unit_id, kind, old_version_id, diff)"
+                " VALUES (%s, %s, 'removed', %s, %s)",
+                (raw.fetched_at, unit_id, old.id, f"dropped from the paper from {version_start}"),
+            )
+    return _ingest(
+        conn, raw, adjusted, _Context(repealed={}, in_force={}), [], documents=(document,)
+    )
+
+
+def withdraw_papers_out_of_scope(conn: psycopg.Connection, in_scope: set[str], at: datetime) -> int:
+    """Sections of position papers no longer in scope (a person's decision): they leave the
+    corpus, kept as evidence; they are not a change in the paper itself."""
+    with conn.transaction():
+        rows = conn.execute(
+            """
+            UPDATE unit_version v SET withdrawn = true, observed_to = %(at)s
+            FROM unit u
+            WHERE u.id = v.unit_id AND u.source_type = 'position_paper' AND NOT v.withdrawn
+              AND v.observed_to IS NULL AND NOT (u.document = ANY(%(keep)s))
+            RETURNING v.id
+            """,
+            {"at": at, "keep": sorted(in_scope)},
+        ).fetchall()
+    return len(rows)
+
+
 def ingest_rulings(conn: psycopg.Connection, raw: RawFetch, rulings: Rulings) -> IngestReport:
     """Store rulings (one unit each, dated by the decision date) and link each one to the
     wording of every section it cites that applied on its decision date (D7). A ruling no
@@ -198,6 +266,7 @@ def _ingest(
     units: list[ParsedUnit],
     context: _Context,
     conflicts: list[str],
+    documents: tuple[str, ...] | None = None,  # find stored wordings by document, not by URL
 ) -> IngestReport:
     with conn.transaction():
         # Versions are rewritten in any order; the overlap rule is checked once at the end.
@@ -221,7 +290,10 @@ def _ingest(
             parsed_by_unit.setdefault(unit.unit_id, []).append(unit)
         report.units = len(parsed_by_unit)
         stored_by_unit: dict[str, list[_Stored]] = {}
-        for stored in _open_versions(conn, raw.url):
+        stored_versions = (
+            _open_versions_of(conn, documents) if documents else _open_versions(conn, raw.url)
+        )
+        for stored in stored_versions:
             stored_by_unit.setdefault(stored.unit_id, []).append(stored)
 
         seen_on = raw.fetched_at.date()
@@ -605,6 +677,20 @@ def _reread(gone: list[_Stored], new: list[ParsedUnit]) -> bool:
         and wording.valid_from in (None, old.valid_from)
         and wording.pending == old.pending
     )
+
+
+def _open_versions_of(conn: psycopg.Connection, documents: tuple[str, ...]) -> list[_Stored]:
+    rows = conn.execute(
+        """
+        SELECT v.id, v.unit_id, v.text_hash, v.valid_from, v.valid_to, v.pending,
+               v.dates_estimated, v.time_basis, v.amended_by
+        FROM unit_version v JOIN unit u ON u.id = v.unit_id
+        WHERE u.document = ANY(%s) AND v.observed_to IS NULL AND NOT v.withdrawn
+        ORDER BY v.id
+        """,
+        (list(documents),),
+    ).fetchall()
+    return [_Stored(*row) for row in rows]
 
 
 def _insert_version(

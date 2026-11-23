@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import psycopg
 import pytest
@@ -454,3 +454,45 @@ def test_a_ruling_never_takes_the_place_of_a_section_the_question_names(
         "sfs:2005:716/6kap/3§",
         "sfs:2005:716/6kap/4§",
     ]
+
+
+@pytest.mark.db
+def test_another_kind_of_source_does_not_shift_how_the_law_is_ranked(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    """Each group's BM25 uses its own collection's statistics (slice 5): position papers full
+    of "arbetstillstånd" made it rarer in the law's eyes and reordered law sections."""
+    from permitnav.corpus.store import ingest_position_paper
+    from permitnav.parsing.types import ParsedUnit
+    from permitnav.sources.raw import RawFetch
+
+    searcher = Retriever(conn, FAKE, RetrievalConfig(mode="keyword"))
+
+    def ranking() -> list[str]:  # the law sections, in the order the search ranks them
+        hits = searcher.search(
+            "arbetstillstånd medianlönen anställningsavtal", as_of=date(2026, 11, 20), k=10
+        )
+        return [h.unit_id for h in hits if h.unit_id.startswith("sfs:")]
+
+    before = ranking()
+    papers = [
+        ParsedUnit(
+            unit_id=f"rs:RS/900/2026/{i}",
+            source_type="position_paper",
+            authority="position_paper",
+            language="sv",
+            document="rs:RS/900/2026",
+            heading=f"RS/900/2026 {i}",
+            url="https://lifos/x",
+            text="Arbetstillstånd och anställningsavtal. " * 40,
+            valid_from=date(2026, 1, 1),
+        )  # fmt: skip
+        for i in range(30)
+    ]
+    raw = RawFetch("lifos", "https://lifos/pdf", datetime(2026, 11, 20, tzinfo=UTC), b"%PDF",
+                   "h", 200)  # fmt: skip
+    ingest_position_paper(conn, raw, papers, "rs:RS/900/2026")
+    build_chunks(conn, "structure")
+    embed_chunks(conn, FAKE)
+    after = ranking()  # a paper may now take the "other" slot, so one law section can drop off
+    assert len(after) >= len(before) - 1 and after == before[: len(after)]

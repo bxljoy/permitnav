@@ -25,6 +25,9 @@ class Http(Protocol):
     def get(self, url: str) -> HttpResponse: ...
 
 
+EXTRA_CHAIN = Path(__file__).parent / "certs" / "root-yr-by-x1.pem"
+
+
 class LiveHttp:
     """Real HTTP with a per-host minimum interval between requests (crawling rules: 1/s)."""
 
@@ -44,6 +47,12 @@ class LiveHttp:
         self._last_request: dict[str, float] = {}
         # Mozilla's CA bundle: Python builds don't always find the OS certificate store.
         self._tls = ssl.create_default_context(cafile=certifi.where())
+        # Let's Encrypt's newer "Root YR" (lifos.migrationsverket.se chains to it) is not in
+        # Mozilla's list yet. Its cross-signed copy, signed by ISRG Root X1 (which is), lets
+        # the chain end at X1: no new root of trust is added. From
+        # https://letsencrypt.org/certs/gen-y/root-yr-by-x1.pem, sha256
+        # 07:26:39:D0:…:5C:07:CF:76, valid until 2032-09-02.
+        self._tls.load_verify_locations(cafile=str(EXTRA_CHAIN))
 
     def get(self, url: str) -> HttpResponse:
         host = urlsplit(url).netloc

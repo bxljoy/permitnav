@@ -74,6 +74,7 @@ The third paragraph excludes the following from that permission: maps, technical
 - **Feed:** RSS for the legal department's news: `http://lifos.migrationsverket.se/2.339945412c72922c2280000/12.39a9cd9514a346077211abc.portlet?state=rss&sv.contenttype=text/xml;charset=UTF-8`. It returned valid RSS 2.0 with the RS titles, dates and links on 2026-11-19. There is a separate RSS feed for country information.
 - **API:** none found (**unverified** that none exists).
 - **Versioning:** papers are reissued as new versions (e.g. "ersätter version 9.0 som fastställdes 2026-09-17"). PermitNav should key on RS number plus version.
+- **Update 2026-11-23:** `robots.txt` has `Disallow: /sokning*` ("Migv Added 20260415"): the detailed search, its result pages and "Nya RÄS och dokument" are closed to crawlers. The feed's links go to `/rattsavd-nyhetsarkiv/<date>-<title>.html` (allowed; the archive has no index page). The feed now redirects to https. TLS chains to Let's Encrypt "Root YR" (not in Mozilla's CA list as of certifi 2026.11.20); its cross-signed copy by ISRG Root X1 completes the chain. Papers follow the StyrD5 template: revision table on page 1, numbered (older: unnumbered) table of contents on page 2.
 - **Note:** Lifos showed a banner "8/4 2026. Vi utför underhållsarbete" (maintenance). The site worked when checked.
 
 ## 3. Svensk författningssamling (SFS): official publication point

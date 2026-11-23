@@ -21,6 +21,8 @@ COPY migrations ./migrations
 # The public dev golden set and its recorded questions: the daily refresh checks retrieval
 # against the live corpus with them (deploy/refresh.sh).
 COPY evals/golden.dev.jsonl evals/queries.dev.json ./evals/
+# Which Lifos position papers are in scope: a person's decision (phase 4, slice 5)
+COPY curation/position_papers.csv ./curation/
 RUN uv sync --locked --no-dev --extra embed --extra api
 
 RUN useradd --create-home --uid 10001 app \

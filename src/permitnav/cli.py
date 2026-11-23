@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from permitnav import db
@@ -260,6 +261,8 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             failed.append("sfs feed")
             print(f"sfs feed: failed: {error}")
         failed += _fetch_history_acts(http, args.sfs or list(STATUTES))
+    if args.source in ("lifos", "all"):
+        failed += _fetch_lifos(http)
     if args.source in ("domstol", "all"):
         from permitnav.sources.domstol import fetch_rulings
 
@@ -348,6 +351,8 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             if (rulings_raw := latest_rulings(_raw_dir())) is not None:
                 links = relink_rulings(conn, parse_rulings(rulings_raw.content))
                 print(f"domstol: {links} ruling links rebuilt")
+        if args.source in ("lifos", "all"):
+            status = _ingest_lifos(conn) or status
         if args.source in ("domstol", "all"):
             from permitnav.corpus.store import ingest_rulings
             from permitnav.parsing.ruling import parse_rulings
@@ -561,6 +566,157 @@ def _ingest_register(conn, statutes: Iterable[str]) -> int:
         if undated:
             print(f"  acts without a usable date: {', '.join(describe(a) for a in undated[-5:])}")
     return status
+
+
+def _fetch_lifos(http) -> list[str]:
+    """Position papers (slice 5): follow the feed's new versions of in-scope papers, report
+    papers not in the review file, and fetch each in-scope paper's latest version once."""
+    import csv
+
+    from permitnav.sources.lifos import (
+        REVIEW_FILE,
+        Known,
+        document_id_of,
+        fetch_feed,
+        fetch_paper,
+        latest_known,
+        remember,
+    )  # fmt: skip
+
+    failed: list[str] = []
+    known = latest_known(_raw_dir())
+    if not known:
+        print(f"lifos: no papers marked include in {REVIEW_FILE}")
+        return failed
+    decided: set[str] = set()
+    with REVIEW_FILE.open(encoding="utf-8", newline="") as f:
+        decided = {row["rs"] for row in csv.DictReader(f) if row["rs"]}
+    try:
+        items = fetch_feed(http)
+    except (RuntimeError, OSError, ValueError) as error:
+        failed.append("lifos feed")
+        print(f"lifos feed: failed: {error}")
+        items = []
+    for item in items:  # one item failing does not stop the others
+        current = known.get(item.rs)
+        if current is None:
+            if item.rs not in decided:
+                print(f"NEW POSITION PAPER (not in the review file): {item.title}")
+            continue
+        if tuple(map(int, item.version.split("."))) <= tuple(map(int, current.version.split("."))):
+            continue
+        try:
+            document_id = document_id_of(http, item.link, item.rs, item.version)
+        except (RuntimeError, OSError, ValueError) as error:
+            failed.append(f"lifos {item.rs}")
+            print(f"lifos feed {item.rs} version {item.version}: failed: {error}")
+            continue
+        known[item.rs] = Known(item.rs, item.version, document_id)
+        remember(_raw_dir(), known[item.rs])
+        print(f"NEW VERSION: {item.rs} version {item.version} (document {document_id})")
+    fetched = 0
+    for paper in known.values():
+        try:
+            fetch_paper(http, _raw_dir(), paper.document_id)
+            fetched += 1
+        except (RuntimeError, OSError) as error:
+            failed.append(f"lifos {paper.rs}")
+            print(f"lifos {paper.rs}: failed: {error}")
+    print(f"lifos: {fetched} of {len(known)} in-scope papers on disk")
+    return failed
+
+
+def _ingest_lifos(conn) -> int:
+    """Each in-scope paper's latest known version, one unit per numbered section."""
+    import re as _re
+    from datetime import UTC, datetime
+
+    from permitnav.corpus.store import ingest_position_paper, withdraw_papers_out_of_scope
+    from permitnav.parsing.position_paper import parse_paper, units
+    from permitnav.parsing.sfs_act import pdf_pages
+    from permitnav.sources.lifos import latest_known, paper_folder
+    from permitnav.sources.raw import latest_raw
+
+    status = 0
+    totals = {"papers": 0, "sections": 0, "new": 0, "unchanged": 0, "closed": 0}
+    known = latest_known(_raw_dir())
+    for paper in known.values():
+        folder = paper_folder(_raw_dir(), paper.document_id)
+        page, pdf = latest_raw(folder / "page"), latest_raw(folder / "pdf")
+        if page is None or pdf is None:
+            print(f"lifos {paper.rs}: not downloaded yet; run `permitnav fetch --source lifos`")
+            status = 1
+            continue
+        heading = _re.search(
+            r"Rättsligt ställningstagande\.\s*(.*?)\s*-?\s*RS/\d{3}/\d{4}",
+            page.content.decode("utf-8", errors="replace"),
+        )
+        title = heading.group(1).strip(" -") if heading else paper.rs
+        try:
+            parsed = parse_paper(pdf_pages(pdf.content), paper.rs, title, paper.version)
+        except Exception as error:  # noqa: BLE001  pypdf and pdfminer raise many kinds
+            print(f"lifos {paper.rs}: PDF not readable: {type(error).__name__}")
+            status = 1
+            continue
+        if parsed.warnings or not parsed.sections:
+            print(f"lifos {paper.rs}: not ingested: {parsed.warnings or ['no sections']}")
+            status = 1
+            continue
+        version_start = max((d for d, _, _ in parsed.revisions), default=parsed.in_force)
+        report = ingest_position_paper(
+            conn, pdf, units(parsed, page.url), f"rs:{paper.rs}", version_start
+        )
+        totals["papers"] += 1
+        totals["sections"] += report.units
+        totals["new"] += report.new_versions
+        totals["unchanged"] += report.unchanged_versions
+        totals["closed"] += report.closed_versions
+    withdrawn = withdraw_papers_out_of_scope(conn, {f"rs:{rs}" for rs in known}, datetime.now(UTC))
+    if withdrawn:
+        print(f"lifos: {withdrawn} sections of papers no longer in scope withdrawn")
+    print(
+        f"lifos: {totals['papers']} papers, {totals['sections']} sections, {totals['new']} new,"
+        f" {totals['unchanged']} unchanged, {totals['closed']} closed"
+    )
+    return status
+
+
+def cmd_import_lifos_results(args: argparse.Namespace) -> int:
+    """Read Lifos result pages a person saved from the browser (the search is closed to
+    crawlers) into the position-paper review file. Nothing is fetched."""
+    import csv
+
+    from permitnav.parsing.lifos import COLUMNS, curate, merge_review, parse_results
+
+    folder = Path(args.folder).expanduser()
+    pages = sorted(folder.glob("*.html"))
+    if not pages:
+        print(f"no saved .html pages in {folder}")
+        return 1
+    hits = []
+    for page in pages:
+        found = parse_results(page.read_text(encoding="utf-8", errors="replace"))
+        if not found:
+            print(f"  {page.name}: no results found (not a Lifos result page?)")
+        hits += found
+    papers = curate(hits)
+    out = Path(args.out)
+    existing = []
+    if out.exists():
+        with out.open(encoding="utf-8", newline="") as f:
+            existing = list(csv.DictReader(f))
+    rows = merge_review(papers, existing)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    decided = Counter(r["decision"] or "undecided" for r in rows)
+    print(
+        f"{len(pages)} pages, {len(hits)} hits, {len(papers)} papers -> {out}: "
+        + ", ".join(f"{n} {d}" for d, n in decided.most_common())
+    )
+    return 0
 
 
 def cmd_index(args: argparse.Namespace) -> int:
@@ -795,6 +951,23 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+SOURCES = ["riksdagen", "migrationsverket", "domstol", "sfsr", "lifos"]
+
+
+def refresh_steps() -> list[tuple[str, Callable[[argparse.Namespace], int], argparse.Namespace]]:
+    """The refresh's steps: each source fetched on its own (one site being down does not stop
+    the others), then one ingest of all of them, then the index."""
+    fetches = [
+        (f"fetch {source}", cmd_fetch, argparse.Namespace(source=source, sfs=[]))
+        for source in SOURCES
+    ]
+    return [
+        *fetches,
+        ("ingest", cmd_ingest, argparse.Namespace(source="all", sfs=[])),
+        ("index", cmd_index, argparse.Namespace(strategy=["structure"], no_embed=False)),
+    ]
+
+
 def cmd_refresh(args: argparse.Namespace) -> int:
     """The daily refresh (phase 4): fetch every source, ingest, index the strategy production
     searches, and summarise the "what changed" log for this run. A failed step is reported
@@ -802,18 +975,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     from datetime import UTC, datetime
 
     started = datetime.now(UTC)
-    steps = [  # fetched per source: one site being down does not stop the others
-        ("fetch riksdagen", cmd_fetch, argparse.Namespace(source="riksdagen", sfs=[])),
-        (
-            "fetch migrationsverket",
-            cmd_fetch,
-            argparse.Namespace(source="migrationsverket", sfs=[]),
-        ),
-        ("fetch domstol", cmd_fetch, argparse.Namespace(source="domstol", sfs=[])),
-        ("fetch sfsr", cmd_fetch, argparse.Namespace(source="sfsr", sfs=[])),
-        ("ingest", cmd_ingest, argparse.Namespace(source="all", sfs=[])),
-        ("index", cmd_index, argparse.Namespace(strategy=["structure"], no_embed=False)),
-    ]
+    steps = refresh_steps()
     failed = []
     for name, step, step_args in steps:
         print(f"== {name}")
@@ -1041,7 +1203,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     credits = []
     if any(c.authority in ("law", "ordinance") for c in answer.citations):
         credits.append("Källa: Sveriges riksdag")
-    if any(c.authority == "web_page" for c in answer.citations):
+    if any(c.authority in ("web_page", "position_paper") for c in answer.citations):
         credits.append("Källa: Migrationsverket")
     if any(c.authority == "ruling" for c in answer.citations):
         credits.append("Källa: Sveriges Domstolar")
@@ -1451,7 +1613,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="permitnav")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="apply database migrations").set_defaults(run=cmd_migrate)
-    sources = ["riksdagen", "migrationsverket", "domstol", "sfsr", "all"]
+    sources = [*SOURCES, "all"]
     fetch = sub.add_parser("fetch", help="download statutes and Migrationsverket pages")
     fetch.add_argument("sfs", nargs="*", help="SFS numbers, e.g. 2005:716 (default: all in scope)")
     fetch.add_argument("--source", default="all", choices=sources)
@@ -1460,6 +1622,13 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("sfs", nargs="*", help="SFS numbers (default: all in scope)")
     ingest.add_argument("--source", default="all", choices=sources)
     ingest.set_defaults(run=cmd_ingest)
+    il = sub.add_parser(
+        "import-lifos-results",
+        help="read saved Lifos result pages into the position-paper review file (no fetching)",
+    )
+    il.add_argument("folder", help="folder with the result pages saved from the browser")
+    il.add_argument("--out", default="curation/position_papers.csv")
+    il.set_defaults(run=cmd_import_lifos_results)
     index = sub.add_parser("index", help="build chunks and embeddings for stored versions")
     index.add_argument("--strategy", nargs="+", default=list(STRATEGIES), choices=list(STRATEGIES))
     index.add_argument("--no-embed", action="store_true", help="only build chunks")
