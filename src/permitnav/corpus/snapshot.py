@@ -4,11 +4,16 @@ Contents: every stored wording, their units, downloads (metadata only, never pag
 content), citation and transitional links, page translations, and `structure` chunks with
 their bge-m3 embeddings. All of it, so the eval in CI sees what a local run sees (a golden
 item may expect a section a page no longer shows, or a date before the current wording).
-Every stored wording is, today, text as a source published it; when phase 4 rebuilds statute
-history from amending acts, those rebuilt versions must be left out here. It is published as a
-public GitHub release asset, so it holds public source text only: statutes (no copyright),
-Migrationsverket's text (free reuse with attribution) and rulings (CC0). Never the rebuilt
-statute history or the change log (phase 4): those are served by the app, not published.
+This includes the statute history rebuilt from the amending acts (phase 4), so the CI eval can
+test questions whose answer depends on which wording applies. It is published as a public
+GitHub release asset, so it holds public source text only: statutes and the wordings rebuilt
+from the official SFS acts (no copyright, 9 § upphovsrättslagen), Migrationsverket's text
+(free reuse with attribution) and rulings (CC0). Never the change log (the service's own
+record of what changed when): it is not exported.
+
+Publishing the rebuilt history was decided on 2026-11-23, reversing an earlier note that kept it
+private: it is derived only from free official sources, and the code that rebuilds it is
+public in this repository, so publishing the data gives little away.
 
 Format: gzip text. A header line, a JSON manifest line, then per table a `TABLE name cols`
 line, PostgreSQL COPY text rows, and a `\\.` line.
