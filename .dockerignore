@@ -1,10 +1,13 @@
-# Only the code, migrations and lock file go into the image: no secrets, no data, no evals.
+# Only the code, migrations, lock file and the public dev golden set (with its recorded
+# questions, for the daily refresh's retrieval check) go into the image: no secrets, no data.
 .env
 .env.*
 !.env.example
 private/
 data/
-evals/
+evals/*
+!evals/golden.dev.jsonl
+!evals/queries.dev.json
 tests/
 docs/
 .git/

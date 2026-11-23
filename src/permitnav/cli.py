@@ -188,14 +188,19 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     from permitnav.sources.http import LiveHttp
 
     http = LiveHttp(user_agent=_user_agent())
+    failed: list[str] = []
     if args.source in ("riksdagen", "all"):
         from permitnav.sources.riksdagen import fetch_statute
 
         for sfs in args.sfs or STATUTES:
-            statute_fetch = fetch_statute(http, sfs, _raw_dir())
+            try:
+                statute_fetch = fetch_statute(http, sfs, _raw_dir())
+            except (RuntimeError, OSError) as error:  # HTTP error or network failure
+                failed.append(sfs)
+                print(f"{sfs}: failed: {error}")
+                continue
             size = len(statute_fetch.content)
             print(f"{sfs}: {size:,} bytes -> {statute_fetch.storage_path}")
-    failed: list[str] = []
     if args.source in ("migrationsverket", "all"):
         from permitnav.parsing.webpage import parse_page
         from permitnav.sources.migrationsverket import (
@@ -231,7 +236,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 else:
                     failed.append(target)
                 print(f"\n  {'gone' if error.gone else 'failed'}: {error}")
-            except (PermissionError, ValueError) as error:
+            except (PermissionError, ValueError, OSError) as error:  # OSError: network
                 failed.append(target)
                 print(f"\n  failed: {error}")
             print(f"\r  {n}/{len(swedish)} pages (with English versions)", end="", flush=True)
@@ -576,6 +581,56 @@ def cmd_eval(args: argparse.Namespace) -> int:
     if args.min_r5 is not None or args.min_mrr is not None:
         print(f"gate passed: R@5 {overall.recall_5:.4f}, MRR {overall.mrr:.4f}")
     return 0
+
+
+def cmd_refresh(args: argparse.Namespace) -> int:
+    """The daily refresh (phase 4): fetch every source, ingest, index the strategy production
+    searches, and summarise the "what changed" log for this run. A failed step is reported
+    and the later steps still run, so one site being down does not stop the others."""
+    from datetime import UTC, datetime
+
+    started = datetime.now(UTC)
+    steps = [  # fetched per source: one site being down does not stop the others
+        ("fetch riksdagen", cmd_fetch, argparse.Namespace(source="riksdagen", sfs=[])),
+        (
+            "fetch migrationsverket",
+            cmd_fetch,
+            argparse.Namespace(source="migrationsverket", sfs=[]),
+        ),
+        ("fetch domstol", cmd_fetch, argparse.Namespace(source="domstol", sfs=[])),
+        ("ingest", cmd_ingest, argparse.Namespace(source="all", sfs=[])),
+        ("index", cmd_index, argparse.Namespace(strategy=["structure"], no_embed=False)),
+    ]
+    failed = []
+    for name, step, step_args in steps:
+        print(f"== {name}")
+        try:
+            status = step(step_args)
+        except Exception as error:  # a crash in one step must not stop the others
+            print(f"{name} crashed: {type(error).__name__}: {error}")
+            status = 1
+        if status:
+            failed.append(name)
+    with db.connect() as conn:
+        counts = dict(
+            conn.execute(
+                "SELECT kind, count(*) FROM change_log WHERE observed_at >= %s GROUP BY kind",
+                (started,),
+            ).fetchall()
+        )
+        units = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT unit_id FROM change_log WHERE observed_at >= %s"
+                " ORDER BY unit_id LIMIT 20",
+                (started,),
+            ).fetchall()
+        ]
+    summary = ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) or "no changes"
+    print(f"REFRESH SUMMARY: {summary}" + (f"; failed: {', '.join(failed)}" if failed else ""))
+    for unit in units:
+        print(f"  changed: {unit}")
+    return 1 if failed else 0
 
 
 def cmd_smoke(args: argparse.Namespace) -> int:
@@ -1219,6 +1274,10 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--min-r5", type=float, help="fail (exit 3) if overall R@5 is below this")
     ev.add_argument("--min-mrr", type=float, help="fail (exit 3) if overall MRR is below this")
     ev.set_defaults(run=cmd_eval)
+    rf = sub.add_parser(
+        "refresh", help="fetch, ingest and index everything; summarise what changed (daily)"
+    )
+    rf.set_defaults(run=cmd_refresh)
     sm = sub.add_parser("smoke", help="the LLM smoke slice (evals/smoke.json); calls the model")
     sm.add_argument("--file", default="evals/golden.dev.jsonl")
     sm.add_argument("--smoke", default="evals/smoke.json")

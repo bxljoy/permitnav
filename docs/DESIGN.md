@@ -954,3 +954,19 @@ Build order (agreed 2026-11-22): widen the corpus first (MIG rulings, then posit
 - **Dependencies:** Dependabot (`.github/dependabot.yml`) opens weekly pull requests for Python (`uv.lock`, minor and patch updates grouped), GitHub Actions and the Docker base image, each gated by CI. `pip-audit` checks the hashed lock file (all extras) on every CI run; not a required check, since a new advisory can turn it red without any change here. First run: no known vulnerabilities in 243 locked packages.
 - **Actions pinned to commit SHAs** (with the version as a comment, which Dependabot keeps current): a moved or compromised tag cannot change what runs.
 
+---
+
+## Phase 4
+
+Build order (agreed 2026-11-23): 1. a daily re-crawl on the server with a "what changed" log and alerts; 2. amending acts (SFS RSS) and in-force dates (SFSR); 3. rebuilding history back to 2023 (checked against lagen.nu); 4. version selection (asking for the application date when a transitional provision depends on it) with a version-dependent eval slice; 5. position papers (curated list + Lifos RSS) and the golden-set drift check.
+
+### Slice 1: the daily refresh
+
+- **`permitnav refresh`:** fetch each source separately (statutes, Migrationsverket, rulings: one site being down does not stop the others; a failing page or statute is recorded, not fatal), ingest, build and embed `structure` chunks (the strategy production searches; only changed sections get new chunks), then summarise the change log for the run.
+- **On the VM** (`deploy/refresh.sh`, systemd timer at 02:30 UTC, before the 03:30 backup): a one-off container from the running image, sharing the deploy lock; raw downloads kept as evidence in a volume. After the refresh, the retrieval eval runs on the **live** corpus with the recorded dev questions (the image carries the public dev set): below the CI gate, or a golden item's source gone, is an alert. Results go to Cloud Logging ("PermitNav refresh failed" on any ERROR; kills and crashes through an `OnFailure` unit).
+- **The "what changed" log** (`change_log`, migration 004): one row per section added, changed, removed or re-dated, with a unified diff for changes; a page that disappears logs its sections as removed; a corrected ruling as changed. Replaced wordings are paired with the most similar new text (a download can also announce a future wording, which is "added"). It is the service's own data: not in the public eval-corpus snapshot.
+- **Unchanged downloads are not stored again** (~100 MB a day otherwise): the existing file is reused, with this fetch's time, so what is seen again is observed from today.
+- **A bug found on the way:** a section whose text changed without a new amending act (a published correction, or a parser change) kept its start date, and ingest crashed on the overlap rule: every daily run would have failed. A new wording with the same start date now replaces the old one for its whole period, and the old one is withdrawn.
+- **Snapshots from an older schema import:** migrations only add, and COPY names its columns, so the eval corpus need not be republished after each migration; a snapshot from a schema the database has not reached is refused.
+- **First real run (local, 2026-11-23):** statutes, 227 Migrationsverket pages (3,072 sections) and 97 rulings all unchanged since 2026-11-20: "no changes". The phase's first check (a real source change caught and logged) waits for a real change; the mechanics are covered by tests that edit a page, a statute section and a ruling.
+

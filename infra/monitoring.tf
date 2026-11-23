@@ -113,6 +113,31 @@ resource "google_monitoring_alert_policy" "deploy_failed" {
   depends_on = [google_project_service.monitoring]
 }
 
+# --- Did the daily refresh fail? -------------------------------------------------------------
+
+resource "google_monitoring_alert_policy" "refresh_failed" {
+  display_name = "PermitNav refresh failed"
+  combiner     = "OR"
+  conditions {
+    display_name = "permitnav-refresh wrote an ERROR"
+    condition_matched_log {
+      filter = "logName=\"projects/${var.project_id}/logs/permitnav-refresh\" AND severity>=ERROR"
+    }
+  }
+  alert_strategy {
+    notification_rate_limit {
+      period = "3600s"
+    }
+    auto_close = "86400s"
+  }
+  notification_channels = [google_monitoring_notification_channel.email.id]
+  documentation {
+    content   = "The daily refresh failed: a source could not be fetched or parsed, indexing failed, or retrieval on the live corpus fell below the gate (or a golden item's source disappeared). The service keeps serving the last good versions. On the VM: `sudo journalctl -u permitnav-refresh.service`; the changes are in the change_log table."
+    mime_type = "text/markdown"
+  }
+  depends_on = [google_project_service.monitoring]
+}
+
 # --- Did the nightly backup fail? ------------------------------------------------------------
 
 resource "google_monitoring_alert_policy" "backup_failed" {

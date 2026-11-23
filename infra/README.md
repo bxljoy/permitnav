@@ -70,6 +70,12 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
   backup if needed, `sudo git checkout <commit>`, set `PERMITNAV_IMAGE=<that commit's image
   digest>` in `.env` (the alert names it; empty means build from the checkout), then
   `sudo $C up -d`.
+- **Daily refresh (02:30 UTC):** fetches every source, ingests what changed, embeds it, then
+  checks retrieval on the live corpus (`deploy/refresh.sh`; `journalctl -u permitnav-refresh`;
+  results in the `permitnav-refresh` log, failures raise "PermitNav refresh failed"). What
+  changed is in the `change_log` table:
+  `sudo $C exec db psql -U permitnav -c "SELECT observed_at, kind, unit_id FROM change_log ORDER BY id DESC LIMIT 20"`.
+  To run it now: `sudo systemctl start permitnav-refresh.service`.
 - **Backups:** nightly at 03:30 UTC (`systemctl list-timers permitnav-backup.timer`), kept
   30 days. The VM can create, list and read backups, but not delete or overwrite them. Restore
   on the VM:
