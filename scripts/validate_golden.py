@@ -48,7 +48,7 @@ UNIT_PATTERNS = [
     re.compile(r"^sfs:\d{4}:\d+/\d+[a-z]?kap/\d+[a-z]?§$"),
     re.compile(r"^sfs:\d{4}:\d+/\d+[a-z]?§$"),
     re.compile(r"^sfs:\d{4}:\d+/övergång/\d+$"),
-    re.compile(r"^rs:RS/\d{3}/\d{4}/\d+$"),
+    re.compile(r"^rs:RS/\d{3}/\d{4}/\d+(?:\.\d+)*$"),  # numbered sections: 2.3.3.1
     re.compile(r"^mig:\d{4}:\d+$"),
     re.compile(r"^web:(sv|en)/[a-z0-9\-/]+(#[a-z0-9\-]+)?$"),
 ]
