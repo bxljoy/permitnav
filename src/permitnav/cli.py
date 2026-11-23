@@ -259,6 +259,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         except (RuntimeError, OSError) as error:
             failed.append("sfs feed")
             print(f"sfs feed: failed: {error}")
+        failed += _fetch_history_acts(http, args.sfs or list(STATUTES))
     if args.source in ("domstol", "all"):
         from permitnav.sources.domstol import fetch_rulings
 
@@ -338,6 +339,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             status = status or (1 if totals["failed"] else 0)
         if args.source in ("sfsr", "all"):
             status = _ingest_register(conn, args.sfs or STATUTES) or status
+            status = _rebuild_history(conn, args.sfs or list(STATUTES)) or status
         if args.source in ("riksdagen", "sfsr"):  # statute dates moved under the rulings' links
             from permitnav.corpus.store import relink_rulings  # ("all" rebuilds them below)
             from permitnav.parsing.ruling import parse_rulings
@@ -367,6 +369,137 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 )
                 for number in rulings.no_text:
                     print(f"  note: {number} has no full text in the source; summary only")
+    return status
+
+
+def _statute_kind(sfs: str) -> str:
+    """How the statute's act markers read: "Lag (2026:385)." or "Förordning (2026:1746)."."""
+    return "Förordning" if STATUTES.get(sfs, "").lower().endswith("förordning") else "Lag"
+
+
+def _history_inputs(sfs: str):
+    """The rebuild's view of one statute's register; None (with the reason printed) when the
+    register is missing or unreadable, so the other sources still run."""
+    from permitnav.corpus.history import inputs_from_register
+    from permitnav.parsing.sfsr import parse_register
+    from permitnav.sources.sfsr import latest_register
+
+    raw = latest_register(_raw_dir(), sfs)
+    if raw is None:
+        return None
+    try:
+        register = parse_register(raw.content.decode("utf-8"), sfs)
+        return inputs_from_register(register, _statute_kind(sfs))
+    except (ValueError, UnicodeDecodeError) as error:
+        print(f"history {sfs}: register not readable: {error}")
+        return None
+
+
+# Parsed act PDFs, kept for the process (pdfminer is slow; refresh fetches and ingests in
+# one run): (SFS number, content hash) -> ParsedAct.
+_ACTS: dict = {}
+
+
+def _parsed_acts(unreadable: list[str] | None = None) -> dict:
+    """Every act PDF on disk, parsed once: SFS number -> ParsedAct. A PDF that cannot be read
+    is left out and named in `unreadable`; the walks that need it stop on a missing act."""
+    from permitnav.parsing.sfs_act import parse_act, pdf_pages
+    from permitnav.sources.sfs_acts import acts_on_disk, latest_act
+
+    acts = {}
+    for sfs in acts_on_disk(_raw_dir()):
+        raw = latest_act(_raw_dir(), sfs)
+        if raw is None:
+            continue
+        key = (sfs, raw.content_hash)
+        if key not in _ACTS:
+            try:
+                _ACTS[key] = parse_act(pdf_pages(raw.content), sfs)
+            except Exception as error:  # noqa: BLE001  pypdf and pdfminer raise many kinds
+                if unreadable is not None:
+                    unreadable.append(f"{sfs} ({type(error).__name__})")
+                continue
+        acts[sfs] = _ACTS[key]
+    return acts
+
+
+def _fetch_history_acts(http, statutes: Iterable[str]) -> list[str]:
+    """The amending acts' PDFs a rebuild back to 2023 reads (slice 3). An act never changes,
+    so only new ones are downloaded; the acts they name are fetched in turn."""
+    from permitnav.corpus.history import needed_acts
+    from permitnav.sources.sfs_acts import fetch_act
+
+    failed: list[str] = []
+    for sfs in statutes:
+        inputs = _history_inputs(sfs)
+        if inputs is None:
+            continue  # the register fetch failed or is unreadable, reported already
+        tried: set[str] = set()
+        new = 0
+        acts: dict = {}
+        for _ in range(6):  # each round follows the acts the previous round's acts name
+            acts = _parsed_acts()
+            wanted = needed_acts(sfs, acts, inputs.in_force, inputs.scopes) - tried
+            if not wanted:
+                break
+            for number in sorted(wanted):
+                tried.add(number)
+                try:
+                    fetch_act(http, _raw_dir(), number)
+                    new += 1
+                except (RuntimeError, OSError) as error:
+                    failed.append(f"sfs act {number}")
+                    print(f"sfs act {number}: failed: {error}")
+        print(f"sfs acts for {sfs}: {new} downloaded, {len(acts)} on disk")
+    return failed
+
+
+def _rebuild_history(conn, statutes: Iterable[str]) -> int:
+    """Older wordings from the amending acts, back to 2023 (slice 3)."""
+    from datetime import UTC, datetime
+
+    from permitnav.corpus.history import rebuild_history
+    from permitnav.corpus.store import _record_download, relink_transitional
+    from permitnav.parsing.statute import parse_statute
+    from permitnav.sources.riksdagen import latest_fetch
+    from permitnav.sources.sfs_acts import latest_act
+
+    unreadable: list[str] = []
+    acts = _parsed_acts(unreadable)
+    status = 0
+    if unreadable:
+        print(f"history: act PDFs not readable: {', '.join(unreadable)}")
+        status = 1
+    for sfs in statutes:
+        inputs = _history_inputs(sfs)
+        if inputs is None or sfs not in acts:
+            print(f"history {sfs}: register or statute PDF missing; fetch --source sfsr first")
+            status = 1
+            continue
+        with conn.transaction():
+            downloads = {}
+            for number in acts:
+                raw = latest_act(_raw_dir(), number)
+                assert raw is not None
+                downloads[number] = _record_download(conn, raw)[0]
+            report = rebuild_history(
+                conn, inputs.statute, acts, inputs.in_force, inputs.kinds, downloads,
+                datetime.now(UTC), inputs.scopes,
+            )  # fmt: skip
+        stops = ", ".join(f"{n} {why}" for why, n in report.stops.most_common())
+        print(
+            f"history {sfs}: {report.sections} sections walked, {report.wordings} older wordings"
+            f" stored, {report.replaced} replaced, {report.unchanged} unchanged,"
+            f" {report.reached_cutoff} back to 2023" + (f"; stopped: {stops}" if stops else "")
+        )
+        if report.missing_acts:
+            print(f"  act PDFs missing: {', '.join(sorted(report.missing_acts))}")
+            status = 1
+        statute_raw = latest_fetch(_raw_dir(), sfs)
+        if (report.wordings or report.replaced) and statute_raw is not None:
+            # transitional provisions link the wordings their act introduced and ended (D4)
+            statute = parse_statute(statute_raw.content.decode("utf-8"), url=statute_raw.url)
+            relink_transitional(conn, statute)
     return status
 
 

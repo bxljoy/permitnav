@@ -337,6 +337,7 @@ Checked SFS 2024:1220, "Lag om ändring i utlänningslagen (2005:716)", issued 5
 - **Pre-2018 acts:** these are needed when a "Senaste lydelse" footnote points before April 2018, e.g. 2013:606.
   - Lagrummet says `https://rkrattsdb.gov.se/sfspdf/` holds printed-SFS PDFs "från och med SFS 1998:306 till och med SFS 2018:159" (`https://www.lagrummet.se/rattskalla/`).
   - On 2026-11-19 that host presented an **expired TLS certificate**: WebFetch failed with "certificate has expired" and curl with exit 60. Its PDF URL pattern and content are **unverified**.
+  - **Update 2026-11-23:** the certificate is valid again. The PDF pattern is `https://rkrattsdb.gov.se/SFSdoc/<yy>/<yy><nnnn>.PDF` (e.g. `/SFSdoc/13/130606.PDF` for 2013:606); text extracts without OCR. No robots.txt. lagen.nu keeps a consolidation after each amending act at `https://lagen.nu/2005:716/konsolidering/<act>` (robots.txt allows content pages), used as an independent check.
 
 **How reconstruction works**
 
