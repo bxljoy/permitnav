@@ -74,8 +74,8 @@ jobs:
       DATABASE_URL: postgresql://permitnav:permitnav@localhost:5432/permitnav
       # The eval corpus (public source text with embeddings; evals/README.md). A new
       # snapshot means a new release, a new checksum and, if the numbers move, new minimums.
-      EVAL_CORPUS_TAG: eval-corpus-2026-11-22
-      EVAL_CORPUS_SHA256: 6383d8c5070949a150e39d02dc52e6f0026f288f050f4427728486a509800874
+      EVAL_CORPUS_TAG: eval-corpus-2026-11-23
+      EVAL_CORPUS_SHA256: 1dcaeca23c2c78b08b24a90e3d7f984e54676963be0c66a41d3d399caeecc116
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
@@ -91,6 +91,12 @@ jobs:
         run: >-
           uv run permitnav eval --queries evals/queries.dev.json
           --min-r5 0.52 --min-mrr 0.35
+      # Questions whose answer depends on which wording applies (transitional provisions,
+      # historical dates): they need the rebuilt statute history in the corpus (phase 4).
+      - name: Version-dependent slice with recorded queries (fails below the minimums)
+        run: >-
+          uv run permitnav eval --file evals/golden.versions.jsonl
+          --queries evals/queries.versions.json --min-r5 0.66 --min-mrr 0.30
 
   audit:
     # Known vulnerabilities in the locked dependencies (PyPI advisory database). Not a required
@@ -163,8 +169,8 @@ jobs:
           --health-retries 15
     env:
       DATABASE_URL: postgresql://permitnav:permitnav@localhost:5432/permitnav
-      EVAL_CORPUS_TAG: eval-corpus-2026-11-22
-      EVAL_CORPUS_SHA256: 6383d8c5070949a150e39d02dc52e6f0026f288f050f4427728486a509800874
+      EVAL_CORPUS_TAG: eval-corpus-2026-11-23
+      EVAL_CORPUS_SHA256: 1dcaeca23c2c78b08b24a90e3d7f984e54676963be0c66a41d3d399caeecc116
       ANSWER_MODEL: anthropic/claude-haiku-5.5
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:

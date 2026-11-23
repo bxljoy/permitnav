@@ -5,7 +5,7 @@ The questions PermitNav is measured against. The design behind the format is in 
 | File | What | Public? |
 |---|---|---|
 | `evals/golden.dev.jsonl` | Dev set, 60–80 items. Used for tuning. | Yes |
-| `evals/golden.versions.jsonl` | Version-dependent slice (phase 4): 6 scenarios × EN/SV where the answer depends on which wording applies: transitional provisions (granted/registered dates) and historical `as_of` dates (2024). Needs the rebuilt history, so it runs against a live corpus, not the CI snapshot. | Yes |
+| `evals/golden.versions.jsonl` | Version-dependent slice (phase 4): 6 scenarios × EN/SV where the answer depends on which wording applies: transitional provisions (granted/registered dates) and historical `as_of` dates (2024). Needs the rebuilt history; in CI since `eval-corpus-2026-11-23`. | Yes |
 | `private/golden.holdout.jsonl` | Hold-out, 30–40 items. Run once per milestone, never tuned on. | **No**, never committed |
 | `private/questions-inbox.md` | Raw real questions, before sanitising. | **No**, never committed |
 
@@ -108,10 +108,13 @@ requests from forks:
   `eval-corpus-YYYY-MM-DD`): the wordings the sources show now, their links, page
   translations and `structure` chunks with bge-m3 embeddings. Public source text only:
   statutes (Källa: Sveriges riksdag), Migrationsverket's text (Källa: Migrationsverket) and
-  MIG rulings (Sveriges Domstolar, CC0). Never the rebuilt statute history or the change log
-  (phase 4). CI checks its sha256.
+  MIG rulings (Sveriges Domstolar, CC0), and since `eval-corpus-2026-11-23` the statute history
+  rebuilt from the official SFS acts (phase 4; also no copyright). Never the change log. CI
+  checks its sha256.
 - **The questions** are replayed from `queries.dev.json`: each dev question's bge-m3 vector,
-  its Swedish translation and the translation's vector, recorded from a local run.
+  its Swedish translation and the translation's vector, recorded from a local run. The
+  version-dependent slice (`golden.versions.jsonl`) has its own, `queries.versions.json`, and
+  its own minimums.
 - **The gate**: the job fails if overall R@5 or MRR fall below the minimums in the workflow.
   With the corpus and the queries fixed, the eval is deterministic: a change in its numbers
   comes from the code under review.
@@ -120,6 +123,7 @@ When the golden set, the corpus or the retrieval code changes on purpose:
 
 ```
 uv run permitnav eval --record-queries evals/queries.dev.json   # after golden-set changes
+uv run permitnav eval --file evals/golden.versions.jsonl --record-queries evals/queries.versions.json
 uv run permitnav export-eval-corpus --out eval-corpus.txt.gz    # after re-indexing
 gh release create eval-corpus-YYYY-MM-DD eval-corpus.txt.gz --title "Eval corpus YYYY-MM-DD" \
   --notes "Public source text for the CI retrieval eval; see evals/README.md."
