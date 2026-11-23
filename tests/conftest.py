@@ -20,7 +20,7 @@ from permitnav import db, tracing
 # Tests trace into memory, installed before anything else can configure tracing: a test run
 # never exports to Langfuse or a file, whatever keys are set in the developer's shell.
 SPANS = InMemorySpanExporter()
-_test_provider = TracerProvider()
+_test_provider = TracerProvider(sampler=tracing._questions_only())  # as in production
 _test_provider.add_span_processor(SimpleSpanProcessor(SPANS))
 trace.set_tracer_provider(_test_provider)
 tracing._provider = _test_provider
