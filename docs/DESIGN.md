@@ -1048,3 +1048,21 @@ Build order (agreed 2026-11-23): 1. a daily re-crawl on the server with a "what 
 - **Baseline (2026-11-23):** retrieval R@5 0.12, MRR 0.08; right kind 3 of 8; judged correct 4 of 8, faithful 8 of 8. **When the paper reached the context, the answer used it and was correct** (both conduct items, the paper at rank 8 in the "other" slot); mostly it did not reach the context at all: papers share the single "other" slot (rank 8) with the rulings. So the limit is retrieval of position papers, not the model: the next experiment (and phase 5's `get_position_paper` tool) is measured on this slice.
 - **Not in CI yet:** the CI corpus snapshot (2026-11-23) predates the papers; the recorded queries (`queries.interpretation.json`) are ready for when it is re-exported with them.
 
+### Experiment: retrieving position papers (measured on the interpretation slice)
+
+- **Question:** papers reach the model only through the single "other" slot (rank 8), shared with rulings; on the interpretation slice the expected paper section was among the answer's 8 sources in 3 of 8 items. Two variants, both options, **off by default**:
+  - (a) `paper_slots` (`--paper-slots`): papers get a group and a slot of their own, at rank 7, before the "other" slot;
+  - (b) `paper_follow_law` (`--paper-follow-law N`): with a paper slot, prefer the paper sections that cite one of the top N law sections found (a paper interprets the law it cites; citations read with the reference parser, once per wording) over the best match among all papers.
+- **Results** (recorded queries, no model):
+
+| Variant | Paper section among the 8 sources (interpretation slice) | Dev R@5 | Dev R@10 |
+|---|---|---|---|
+| shared "other" slot (default) | 3 of 8 | 0.52 | 0.67 |
+| (a) own slot | 4 of 8 | 0.52 | 0.63 |
+| (a) + (b), following the top 3 or 5 law sections | 4 of 8 | 0.52 | 0.63 |
+| two paper slots + (b) | 4 of 8 | 0.52 | 0.60 |
+
+- **Why (b) changed nothing:** for the items that miss, the law search itself misses the law the paper interprets (the family-employer question retrieves 5 kap. 18 §, 9 kap. 17 §, 6 kap. 6 c § instead of 5 kap. 3 j §; the late-extension question 6 b kap. 7 §, 5 kap. 3 § instead of 5 kap. 18 §), the known phase 2 weakness for situational questions. The citations are right (RS/008/2026 2.3.3.1 cites 5 kap. 3 j §; RS/082/2021 2.3 cites 5 kap. 18 §). On these questions the papers are not the bottleneck; one-pass law retrieval is. That is phase 5's job: an agent that searches, judges the evidence and searches again (for instance a paper first, then the law it cites).
+- **Decision:** neither variant becomes the default (one more item, against dev R@10 0.67 → 0.63); both stay as options, like the reranker, for phase 5 to reuse.
+- **Found on the way:** recorded queries were refused whenever *any* retrieval option was added (the recording kept the whole config), which would have failed CI the next time an option appeared. Replay now compares only the settings that decide which texts are embedded or translated (the golden file, drafts, mode, translation settings, keyword weight); a text that was never recorded still fails the replay.
+

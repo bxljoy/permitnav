@@ -104,6 +104,24 @@ TRANSLATED_KEYWORD_WEIGHT = 0.5
 TRANSLATED_PAGE_WEIGHT = 1.0
 
 
+# The settings that decide which texts a run embeds or translates, and so what a recording of
+# its queries holds. How results are laid out (slots, ranks, candidates) does not: a new layout
+# option must not invalidate every recording. A text never recorded still fails the replay.
+QUERY_SETTINGS = (
+    "mode", "translate", "translated_vector", "translated_page_weight",
+    "translated_pages_untranslated_only", "keyword_weight",
+)  # fmt: skip
+
+
+def _query_settings(settings: dict) -> dict:
+    config = settings.get("config", {})
+    return {
+        "file": settings.get("file"),
+        "include_drafts": settings.get("include_drafts"),
+        **{name: config.get(name) for name in QUERY_SETTINGS},
+    }
+
+
 def _retrieval_config(args: argparse.Namespace) -> RetrievalConfig:
     # Checked before any model is loaded, so a bad option fails at once with a message.
     if args.mix == "rerank" and not args.rerank:
@@ -134,6 +152,8 @@ def _retrieval_config(args: argparse.Namespace) -> RetrievalConfig:
         translated_page_weight=page_weight,
         rerank=args.rerank,
         rerank_depth=args.rerank_depth,
+        paper_slots=getattr(args, "paper_slots", RetrievalConfig.paper_slots),
+        paper_follow_law=getattr(args, "paper_follow_law", RetrievalConfig.paper_follow_law),
         mix=args.mix,
     )
 
@@ -155,6 +175,18 @@ def _add_retrieval_options(parser: argparse.ArgumentParser) -> None:
         "--rerank", action="store_true", help="reorder candidates with bge-reranker-v2-m3 (local)"
     )
     parser.add_argument("--rerank-depth", type=int, default=RetrievalConfig.rerank_depth)
+    parser.add_argument(
+        "--paper-slots",
+        type=int,
+        default=RetrievalConfig.paper_slots,
+        help="give position papers their own slots (from rank 7), not the rulings' (0: shared)",
+    )
+    parser.add_argument(
+        "--paper-follow-law",
+        type=int,
+        default=RetrievalConfig.paper_follow_law,
+        help="with paper slots: prefer papers citing one of the top N law sections (0: off)",
+    )
     parser.add_argument(
         "--mix",
         default=RetrievalConfig.mix,
@@ -857,7 +889,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         except (OSError, ValueError, KeyError) as error:
             print(f"cannot read recorded queries {args.queries}: {error}")
             return 1
-        if replay.settings != settings:
+        if _query_settings(replay.settings) != _query_settings(settings):
             print(f"{args.queries} was recorded with other settings: {replay.settings}")
             print("record it again with the settings of this run (see evals/README.md)")
             return 1

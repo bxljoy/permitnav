@@ -128,6 +128,14 @@ class RetrievalConfig:
     # The rank the "other" slots start at (1-based), the same whatever k a caller asks for,
     # so the eval (k=10) and the answerer (k=8) see the same ranking: the answer's k.
     other_rank: int = 8
+    # Slots for position papers of their own (phase 4 experiment): 0 leaves them in "other",
+    # competing with the rulings for its slot; n gives them a group and n slots from
+    # `paper_rank`, before the "other" slots.
+    paper_slots: int = 0
+    paper_rank: int = 7
+    # With paper slots: prefer the paper sections that cite one of the top n law sections found
+    # (a paper interprets the law it cites), over the best match among all papers. 0: off.
+    paper_follow_law: int = 0
     # Hybrid: the keyword ranking's weight in the fusion, relative to the vector ranking's 1.
     # 0 keeps only the vector ranking and the lookup of sections the question names. Measured
     # in phase 2 (dev set, 48 items): without translation R@5 0.47 at 0, 0.46 at 0.3, 0.40 at
@@ -149,6 +157,7 @@ class Retriever:
         self._embedder = embedder
         self._translator = translator
         self._reranker = reranker
+        self._citations: dict[int, set[str]] = {}
         self.config = config or RetrievalConfig()
         if self.config.rerank and reranker is None:
             raise ValueError("rerank=True needs a reranker")
@@ -252,7 +261,11 @@ class Retriever:
         if self.config.mix == "none":
             rest = ranked(None, False, None)
         else:
-            groups = [(t, False) for t in SOURCE_GROUPS.values()] + [(LISTED_TYPES, True)]
+            papers = ("position_paper",) if self.config.paper_slots else ()
+            groups = [(t, False) for t in SOURCE_GROUPS.values()]
+            if papers:
+                groups.append((papers, False))
+            groups.append((LISTED_TYPES + papers, True))
             rankings = [
                 ranked(
                     t,
@@ -265,6 +278,19 @@ class Retriever:
             other: list[Hit] = []
             if self.config.other_slots is not None:  # the last group is "other"
                 other = rankings.pop()[: self.config.other_slots]
+            paper_hits: list[Hit] = []
+            if papers:  # the group before "other"
+                paper_hits = rankings.pop()[: self.config.paper_slots]
+                follow = self.config.paper_follow_law
+                law_hits = rankings[0] if rankings else []  # the law group comes first
+                if follow and law_hits:
+                    laws = {h.unit_id for h in law_hits[:follow]}
+                    deep = self._ranking(  # past the first few: all candidates
+                        keyword, vector, as_of, max(fetch, self.config.candidates), papers, False,
+                        None,
+                    )  # fmt: skip
+                    citing = [h for h in deep if self._cites(h.version_id) & laws]
+                    paper_hits = (citing or paper_hits)[: self.config.paper_slots]
             rankings = [hits for hits in rankings if hits]
             if self.config.mix == "rerank":  # one ranking: reranker scores compare across groups
                 rest = sorted((hit for hits in rankings for hit in hits), key=_by_rerank_score)
@@ -277,10 +303,17 @@ class Retriever:
                     for hits in rankings
                     if position < len(hits)
                 ]
-            if other:  # at a fixed rank, never in place of a section the question names
+            if other or paper_hits:  # fixed ranks, never in place of a section the question names
                 ordered = _unique(first + rest)
-                at = max(len(_unique(first)), min(k, self.config.other_rank) - len(other))
-                return _unique(ordered[:at] + other + ordered[at:])[:k]
+                named = len(_unique(first))
+                if paper_hits:
+                    at = max(named, min(k, self.config.paper_rank) - len(paper_hits))
+                    ordered = _unique(ordered[:at] + paper_hits + ordered[at:])
+                    named = max(named, at + len(paper_hits))
+                if other:
+                    at = max(named, min(k, self.config.other_rank) - len(other))
+                    ordered = _unique(ordered[:at] + other + ordered[at:])
+                return ordered[:k]
         return _unique(first + rest)[:k]
 
     def _rerank(self, question: str, hits: list[Hit]) -> list[Hit]:
@@ -312,6 +345,16 @@ class Retriever:
             or (config.translated_vector and config.mix != "none")
             or self._page_translation()
         )
+
+    def _cites(self, version_id: int) -> set[str]:
+        """The statute sections a stored wording cites ("5 kap. 3 j § utlänningslagen"),
+        worked out once per wording."""
+        if version_id not in self._citations:
+            row = self._conn.execute(
+                "SELECT text FROM unit_version WHERE id = %s", (version_id,)
+            ).fetchone()
+            self._citations[version_id] = set(named_units(row[0])) if row else set()
+        return self._citations[version_id]
 
     def _ranking(
         self,

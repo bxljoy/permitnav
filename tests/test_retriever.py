@@ -496,3 +496,65 @@ def test_another_kind_of_source_does_not_shift_how_the_law_is_ranked(
     embed_chunks(conn, FAKE)
     after = ranking()  # a paper may now take the "other" slot, so one law section can drop off
     assert len(after) >= len(before) - 1 and after == before[: len(after)]
+
+
+def _papers(conn: psycopg.Connection, texts: dict[str, str]) -> None:
+    from permitnav.corpus.store import ingest_position_paper
+    from permitnav.parsing.types import ParsedUnit
+    from permitnav.sources.raw import RawFetch
+
+    units = [
+        ParsedUnit(
+            unit_id=f"rs:RS/900/2026/{n}",
+            source_type="position_paper",
+            authority="position_paper",
+            language="sv",
+            document="rs:RS/900/2026",
+            heading=f"RS/900/2026 {n}",
+            url="https://lifos/x",
+            text=text,
+            valid_from=date(2026, 1, 1),
+        )  # fmt: skip
+        for n, text in texts.items()
+    ]
+    raw = RawFetch("lifos", "https://lifos/pdf", datetime(2026, 11, 20, tzinfo=UTC), b"%PDF",
+                   "h", 200)  # fmt: skip
+    ingest_position_paper(conn, raw, units, "rs:RS/900/2026")
+    build_chunks(conn, "structure")
+    embed_chunks(conn, FAKE)
+
+
+QUERY = "lönen medianlönen procent lönekravet"
+
+
+@pytest.mark.db
+def test_position_papers_can_have_a_slot_of_their_own(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    _papers(conn, {"1": "Lönen och lönekravet: medianlönen i procent."})
+    shared = Retriever(conn, FAKE, RetrievalConfig(mode="keyword"))
+    own = Retriever(conn, FAKE, RetrievalConfig(mode="keyword", paper_slots=1, paper_rank=2))
+    as_of = date(2026, 11, 20)
+    assert [h.unit_id for h in own.search(QUERY, as_of=as_of, k=5)][1] == "rs:RS/900/2026/1"
+    # without its own slot, a paper only gets the "other" slot, after the law found
+    found = [h.unit_id for h in shared.search(QUERY, as_of=as_of, k=5)]
+    assert found[:2] == ["sfs:2005:716/6kap/2§", "sfs:2005:716/6kap/9§"]
+
+
+@pytest.mark.db
+def test_following_the_law_prefers_the_paper_that_cites_it(
+    conn: psycopg.Connection, retriever: Retriever
+) -> None:
+    _papers(conn, {
+        "1": "Lönen, medianlönen, procent och lönekravet. " * 5,  # closer, cites nothing
+        "2": "Lönen bedöms enligt 6 kap. 2 § utlänningslagen.",  # cites the top law hit
+    })  # fmt: skip
+    as_of = date(2026, 11, 20)
+    plain = Retriever(conn, FAKE, RetrievalConfig(mode="keyword", paper_slots=1, paper_rank=2))
+    follow = Retriever(
+        conn,
+        FAKE,
+        RetrievalConfig(mode="keyword", paper_slots=1, paper_rank=2, paper_follow_law=3),
+    )
+    assert plain.search(QUERY, as_of=as_of, k=5)[1].unit_id == "rs:RS/900/2026/1"
+    assert follow.search(QUERY, as_of=as_of, k=5)[1].unit_id == "rs:RS/900/2026/2"

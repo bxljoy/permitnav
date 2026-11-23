@@ -212,3 +212,20 @@ def test_a_missing_queries_file_is_a_message_not_a_traceback(tmp_path: Path, cap
 def test_recording_wrappers_refuse_document_embedding() -> None:
     with pytest.raises(NotImplementedError):
         RecordingEmbedder(FAKE, QueryCache()).embed_documents(["chunk text"])
+
+
+def test_a_recording_survives_options_that_only_lay_results_out(tmp_path: Path, capsys) -> None:
+    """Recorded queries hold question vectors and translations: slots and ranks don't change
+    them, so a new layout option must not invalidate every recording (CI would fail)."""
+    from permitnav import cli
+
+    settings = {
+        "file": "evals/golden.dev.jsonl", "include_drafts": False,
+        "config": {"mode": "hybrid", "translate": True, "translated_vector": False,
+                   "translated_page_weight": 1.0, "translated_pages_untranslated_only": True,
+                   "keyword_weight": 0.5, "other_slots": 1},
+    }  # fmt: skip
+    same_texts = {**settings, "config": {**settings["config"], "paper_slots": 1, "other_rank": 9}}
+    assert cli._query_settings(same_texts) == cli._query_settings(settings)
+    other_texts = {**settings, "config": {**settings["config"], "translate": False}}
+    assert cli._query_settings(other_texts) != cli._query_settings(settings)
