@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 from permitnav import db
@@ -242,6 +243,22 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             print(f"\r  {n}/{len(swedish)} pages (with English versions)", end="", flush=True)
         finish_crawl(_raw_dir(), fetched, failed)
         print(f"\nmigrationsverket: {len(fetched)} fetched, {gone} gone, {len(failed)} failed")
+    if args.source in ("sfsr", "all"):
+        from permitnav.sources.sfsr import fetch_feed, fetch_register
+
+        for sfs in args.sfs or STATUTES:
+            try:
+                register = fetch_register(http, _raw_dir(), sfs)
+                print(f"sfsr {sfs}: {len(register.content):,} bytes -> {register.storage_path}")
+            except (RuntimeError, OSError) as error:
+                failed.append(f"sfsr {sfs}")
+                print(f"sfsr {sfs}: failed: {error}")
+        try:
+            feed = fetch_feed(http, _raw_dir())
+            print(f"sfs feed: {len(feed.content):,} bytes -> {feed.storage_path}")
+        except (RuntimeError, OSError) as error:
+            failed.append("sfs feed")
+            print(f"sfs feed: failed: {error}")
     if args.source in ("domstol", "all"):
         from permitnav.sources.domstol import fetch_rulings
 
@@ -287,14 +304,6 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 notes = report.conflicts + [f"estimated change date: {u}" for u in report.estimated]
                 for line in notes:
                     print(f"  note: {line}")
-        if args.source == "riksdagen":  # statute dates may have moved under the rulings' links
-            from permitnav.corpus.store import relink_rulings
-            from permitnav.parsing.ruling import parse_rulings
-            from permitnav.sources.domstol import latest_rulings
-
-            if (rulings_raw := latest_rulings(_raw_dir())) is not None:
-                links = relink_rulings(conn, parse_rulings(rulings_raw.content))
-                print(f"domstol: {links} ruling links rebuilt")
         if args.source in ("migrationsverket", "all"):
             from permitnav.parsing.webpage import parse_page
             from permitnav.sources.migrationsverket import saved_pages
@@ -327,6 +336,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 f"{totals['failed']} failed"
             )
             status = status or (1 if totals["failed"] else 0)
+        if args.source in ("sfsr", "all"):
+            status = _ingest_register(conn, args.sfs or STATUTES) or status
+        if args.source in ("riksdagen", "sfsr"):  # statute dates moved under the rulings' links
+            from permitnav.corpus.store import relink_rulings  # ("all" rebuilds them below)
+            from permitnav.parsing.ruling import parse_rulings
+            from permitnav.sources.domstol import latest_rulings
+
+            if (rulings_raw := latest_rulings(_raw_dir())) is not None:
+                links = relink_rulings(conn, parse_rulings(rulings_raw.content))
+                print(f"domstol: {links} ruling links rebuilt")
         if args.source in ("domstol", "all"):
             from permitnav.corpus.store import ingest_rulings
             from permitnav.parsing.ruling import parse_rulings
@@ -348,6 +367,66 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 )
                 for number in rulings.no_text:
                     print(f"  note: {number} has no full text in the source; summary only")
+    return status
+
+
+def _ingest_register(conn, statutes: Iterable[str]) -> int:
+    """Amending acts from the register and the feed; in-force dates for undated wordings."""
+    from datetime import UTC, datetime
+
+    from permitnav.corpus.dates import apply_in_force_dates, record_acts
+    from permitnav.corpus.store import _record_download, relink_transitional
+    from permitnav.parsing.sfsr import describe, parse_feed, parse_register
+    from permitnav.parsing.statute import parse_statute
+    from permitnav.sources.riksdagen import latest_fetch
+    from permitnav.sources.sfsr import latest_feed, latest_register
+
+    registers, raws = [], []
+    for sfs in statutes:
+        raw = latest_register(_raw_dir(), sfs)
+        if raw is None:
+            print(f"sfsr {sfs}: nothing downloaded yet; run `permitnav fetch --source sfsr`")
+            return 1
+        try:
+            registers.append(parse_register(raw.content.decode("utf-8"), sfs))
+        except ValueError as error:
+            print(f"sfsr {sfs}: not ingested: {error}")
+            return 1
+        raws.append(raw)
+    status = 0
+    feed: list = []
+    if (feed_raw := latest_feed(_raw_dir())) is not None:
+        try:  # the feed is early notice only: dating from the register still runs without it
+            feed = parse_feed(feed_raw.content.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as error:
+            print(f"sfs feed: not read: {error}")
+            status = 1
+    # This run's time, not the download's: an unchanged register page keeps its first fetch
+    # time, and the refresh summary counts change-log rows written since it started.
+    seen = datetime.now(UTC)
+    new = record_acts(conn, registers, feed, seen)
+    for item in new:
+        print(f"NEW AMENDING ACT: {item.sfs} {item.title} (published {item.published})")
+    for register, raw in zip(registers, raws, strict=True):
+        with conn.transaction():
+            download_id, _ = _record_download(conn, raw)
+        with conn.transaction():
+            report = apply_in_force_dates(conn, register, download_id, seen)
+        statute_raw = latest_fetch(_raw_dir(), register.statute)
+        if statute_raw is not None and (report.from_acts or report.transitional):
+            statute = parse_statute(statute_raw.content.decode("utf-8"), url=statute_raw.url)
+            relink_transitional(conn, statute)  # "ended" links follow the new start dates
+        skipped = ", ".join(f"{n} {why}" for why, n in sorted(report.skipped.items()))
+        print(
+            f"sfsr {register.statute}: {len(register.acts)} acts; dated {report.from_acts} by"
+            f" their act, {report.original} original, {report.transitional} transitional"
+            + (f"; left undated: {skipped}" if skipped else "")
+        )
+        for conflict in report.conflicts:
+            print(f"  conflict: {conflict}")
+        undated = [a for a in register.acts if a.in_force is None or a.partly_pending]
+        if undated:
+            print(f"  acts without a usable date: {', '.join(describe(a) for a in undated[-5:])}")
     return status
 
 
@@ -598,6 +677,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
             argparse.Namespace(source="migrationsverket", sfs=[]),
         ),
         ("fetch domstol", cmd_fetch, argparse.Namespace(source="domstol", sfs=[])),
+        ("fetch sfsr", cmd_fetch, argparse.Namespace(source="sfsr", sfs=[])),
         ("ingest", cmd_ingest, argparse.Namespace(source="all", sfs=[])),
         ("index", cmd_index, argparse.Namespace(strategy=["structure"], no_embed=False)),
     ]
@@ -1238,7 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="permitnav")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="apply database migrations").set_defaults(run=cmd_migrate)
-    sources = ["riksdagen", "migrationsverket", "domstol", "all"]
+    sources = ["riksdagen", "migrationsverket", "domstol", "sfsr", "all"]
     fetch = sub.add_parser("fetch", help="download statutes and Migrationsverket pages")
     fetch.add_argument("sfs", nargs="*", help="SFS numbers, e.g. 2005:716 (default: all in scope)")
     fetch.add_argument("--source", default="all", choices=sources)

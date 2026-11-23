@@ -70,7 +70,9 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
   backup if needed, `sudo git checkout <commit>`, set `PERMITNAV_IMAGE=<that commit's image
   digest>` in `.env` (the alert names it; empty means build from the checkout), then
   `sudo $C up -d`.
-- **Daily refresh (02:30 UTC):** fetches every source, ingests what changed, embeds it, then
+- **Daily refresh (02:30 UTC):** fetches every source (statutes, Migrationsverket, rulings, the
+  amendment register and the SFS feed), ingests what changed, dates undated wordings from the
+  register, embeds what changed, then
   checks retrieval on the live corpus (`deploy/refresh.sh`; `journalctl -u permitnav-refresh`;
   results in the `permitnav-refresh` log, failures raise "PermitNav refresh failed"). What
   changed is in the `change_log` table:
