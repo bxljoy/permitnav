@@ -133,6 +133,106 @@ def test_context_follows_a_transitional_point_back_to_the_older_wording(
 
 
 @pytest.mark.db
+def test_a_retrieved_transitional_point_brings_the_sections_it_names_in_both_wordings(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    """Phase 4, slice 4: "… gäller 6 kap. 2 § första stycket 1 i den äldre lydelsen" is no use
+    to the model without 6 kap. 2 § in today's wording and in the older one it keeps alive."""
+    point, section = "sfs:2026:295/övergång/2", "sfs:2005:716/6kap/2§"
+    current = conn.execute(
+        "SELECT id, download_id FROM unit_version WHERE unit_id = %s AND NOT withdrawn"
+        " AND pending IS DISTINCT FROM 'starts' AND valid_from <= '2026-11-20'"
+        " AND (valid_to IS NULL OR valid_to > '2026-11-20') ORDER BY valid_from DESC LIMIT 1",
+        (section,),
+    ).fetchone()
+    assert current is not None
+    older = conn.execute(
+        "INSERT INTO unit_version (unit_id, text, text_hash, time_basis, valid_from, valid_to,"
+        " amended_by, observed_from, download_id) VALUES (%s, 'Äldre lydelse: god försörjning.',"
+        " 'h', 'valid', '2023-11-01', '2026-06-01', '2022:1847', now(), %s) RETURNING id",
+        (section, current[1]),
+    ).fetchone()
+    assert older is not None
+    conn.execute(
+        "INSERT INTO unit_link (from_unit_id, to_version_id, kind)"
+        " VALUES (%s, %s, 'transitional_ended')",
+        (point, older[0]),
+    )
+    query = "förlängning arbetstillstånd registrerats Migrationsverket senast 1 december 2026"
+    hits = [h for h in stored.search(query, as_of=date(2026, 11, 20), k=30) if h.unit_id == point]
+    assert hits, "the point itself is retrieved"
+    roles = [
+        (s.role, s.unit_id, s.version_id)
+        for s in build_context(conn, hits, date(2026, 11, 20)).sources
+    ]
+    assert ("referenced", section, current[0]) in roles  # the wording that applies today
+    assert ("older_wording", section, older[0]) in roles  # the one the point keeps alive
+
+
+def _point_and_section_hits(stored: Retriever) -> tuple:
+    query = "förlängning arbetstillstånd registrerats Migrationsverket senast 1 december 2026"
+    hits = stored.search(query, as_of=date(2026, 11, 20), k=40)
+    point = next(h for h in hits if h.unit_id == "sfs:2026:295/övergång/2")
+    section = next(
+        h
+        for h in stored.search("lönen medianlönen procent lönekravet", as_of=date(2026, 11, 20))
+        if h.unit_id == "sfs:2005:716/6kap/2§"
+    )
+    return point, section
+
+
+@pytest.mark.db
+def test_a_named_section_that_is_also_retrieved_keeps_its_place_as_a_hit(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    point, section = _point_and_section_hits(stored)
+    sources = build_context(conn, [point, section], date(2026, 11, 20)).sources
+    roles = [(s.role, s.unit_id) for s in sources if s.unit_id == section.unit_id]
+    assert roles == [("retrieved", section.unit_id)]  # not shortened as a `referenced` source
+
+
+@pytest.mark.db
+def test_a_point_naming_its_statute_still_brings_the_section(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    point, _ = _point_and_section_hits(stored)
+    conn.execute(  # "6 kap. 2 § utlänningslagen …": the statute's name follows the section
+        "UPDATE unit_version SET text = replace(text, '6 kap. 2 § första stycket 1',"
+        " '6 kap. 2 § utlänningslagen (2005:716) första stycket 1') WHERE id = %s",
+        (point.version_id,),
+    )
+    units = [s.unit_id for s in build_context(conn, [point], date(2026, 11, 20)).sources]
+    assert "sfs:2005:716/6kap/2§" in units
+
+
+@pytest.mark.db
+def test_sections_brought_by_points_have_a_budget(
+    conn: psycopg.Connection, stored: Retriever, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from permitnav.answering import context
+
+    point, _ = _point_and_section_hits(stored)
+    monkeypatch.setattr(context, "MAX_NAMED", 0)
+    assert [s.unit_id for s in build_context(conn, [point], date(2026, 11, 20)).sources] == [
+        point.unit_id
+    ]
+
+
+@pytest.mark.db
+def test_a_transitional_point_naming_no_section_brings_nothing(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    point = "sfs:2026:295/övergång/1"  # "Denna lag träder i kraft den 1 juni 2026."
+    hits = [
+        h
+        for h in stored.search("träder i kraft 1 juni 2026", as_of=date(2026, 11, 20), k=40)
+        if h.unit_id == point
+    ]
+    assert hits
+    assert [s.unit_id for s in build_context(conn, hits, date(2026, 11, 20)).sources] == [point]
+
+
+@pytest.mark.db
 def test_answerer_sends_sources_and_the_date_and_returns_cited_answers(
     conn: psycopg.Connection, stored: Retriever
 ) -> None:

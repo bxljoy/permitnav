@@ -5,6 +5,7 @@ The questions PermitNav is measured against. The design behind the format is in 
 | File | What | Public? |
 |---|---|---|
 | `evals/golden.dev.jsonl` | Dev set, 60–80 items. Used for tuning. | Yes |
+| `evals/golden.versions.jsonl` | Version-dependent slice (phase 4): 6 scenarios × EN/SV where the answer depends on which wording applies: transitional provisions (granted/registered dates) and historical `as_of` dates (2024). Needs the rebuilt history, so it runs against a live corpus, not the CI snapshot. | Yes |
 | `private/golden.holdout.jsonl` | Hold-out, 30–40 items. Run once per milestone, never tuned on. | **No**, never committed |
 | `private/questions-inbox.md` | Raw real questions, before sanitising. | **No**, never committed |
 

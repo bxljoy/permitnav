@@ -14,6 +14,13 @@ reference requires: at most MAX_REFERENCES_PER_HIT per section and MAX_REFERENCE
 Transitional links are broad (every point of an amending act links to every section the act
 changed). A point that names specific sections ("6 kap. 2 §") is only added for those
 sections; a point that names none is kept, up to a limit.
+
+The links are followed the other way too (phase 4, slice 4): a retrieved transitional point
+that names sections ("… gäller 6 kap. 2 § första stycket 1 i den äldre lydelsen") brings
+those sections, in the wording that applies on the date and in the older wording it keeps
+alive. Without them the model sees "the older wording applies" with neither wording to
+compare: asked about an extension registered too late for the transition, it said the
+new rule applied but could not say what it requires.
 """
 
 from __future__ import annotations
@@ -27,13 +34,15 @@ import psycopg
 from psycopg import sql
 
 from permitnav.corpus.chunking import estimate_tokens
-from permitnav.parsing.references import cited_units, section_refs
+from permitnav.parsing.references import cited_units, ordered_section_refs, section_refs
 from permitnav.retrieval.retriever import APPLIES_ON, Hit
 
 WHOLE_UNIT_TOKENS = 800
 MAX_PROVISIONS_PER_HIT = 3
 MAX_REFERENCES_PER_HIT = 2
 MAX_REFERENCES = 4
+MAX_NAMED_PER_PROVISION = 2  # sections a retrieved transitional point brings
+MAX_NAMED = 4  # sources all retrieved points together bring (current + older wordings)
 STATUTE_TYPES = ("statute",)
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 UNIT_SECTION = re.compile(r"^(sfs:\d{4}:\d+)/(\d+[a-z]?)kap/(\d+[a-z]?)§$")
@@ -78,6 +87,7 @@ def build_context(conn: psycopg.Connection, hits: list[Hit], as_of: date) -> Con
     context = Context()
     seen_versions: set[int] = set()
     references_left = MAX_REFERENCES
+    named_left = MAX_NAMED
     hit_versions = {hit.version_id for hit in hits}  # a reference never takes a hit's place
 
     def add(unit_id, version_id, role, authority, heading, url, text, dates) -> None:
@@ -108,6 +118,12 @@ def build_context(conn: psycopg.Connection, hits: list[Hit], as_of: date) -> Con
             add(*provision)
             for older in _older_wordings(conn, provision[0], hit.unit_id):
                 add(*older)
+        # a named section that is itself a hit comes in whole, as that hit, not shortened here
+        for named in _named_sections(conn, hit, text, as_of, seen_versions | hit_versions):
+            if named_left <= 0:
+                break
+            add(*named)
+            named_left -= 1
         if references_left > 0:
             limit = min(MAX_REFERENCES_PER_HIT, references_left)
             # Only what the model sees: a long section is shown as its matching chunk.
@@ -200,6 +216,61 @@ def _older_wordings(conn: psycopg.Connection, provision_unit: str, unit_id: str)
         )
         for vid, auth, heading, url, text, vf, vt in rows
     ]
+
+
+def _named_sections(
+    conn: psycopg.Connection, hit: Hit, text: str, as_of: date, skip: set[int]
+) -> list[tuple]:
+    """For a retrieved transitional point: the sections it names, in the order it names them,
+    each in the wording that applies on `as_of` and in the older wording the point keeps
+    alive, both shortened like references. Only sections the point is linked to (its act
+    changed them); each is matched in its own statute's terms, so "5 kap. 8 a §
+    utlänningsförordningen" counts for the ordinance. A point naming no section ("Äldre
+    föreskrifter gäller …") brings nothing. Versions in `skip` (already in the context, or
+    retrieved themselves) are left out. Chapterless statutes are not handled (none in scope)."""
+    if "/övergång/" not in hit.unit_id:  # transitional points: 'sfs:2026:295/övergång/2'
+        return []
+    linked = conn.execute(
+        """
+        SELECT DISTINCT v.unit_id FROM unit_link l JOIN unit_version v ON v.id = l.to_version_id
+        WHERE l.from_unit_id = %s AND l.kind LIKE 'transitional_%%'
+        """,
+        (hit.unit_id,),
+    ).fetchall()
+    by_ref: dict[tuple[str, str, str], str] = {}
+    for (unit,) in linked:
+        section = _section_of(unit)
+        if section is not None:
+            by_ref[section] = unit
+    named_in_order: list[str] = []  # an act amends one statute: its refs come in text order
+    for document in dict.fromkeys(s[0] for s in by_ref):
+        for ref in ordered_section_refs(text, document):
+            unit = by_ref.get((document, *ref))
+            if unit and unit not in named_in_order:
+                named_in_order.append(unit)
+    named: list[tuple] = []
+    for unit in named_in_order[:MAX_NAMED_PER_PROVISION]:
+        row = conn.execute(
+            sql.SQL(
+                """
+                SELECT v.id, u.authority, u.heading, u.url, v.text, v.valid_from, v.valid_to
+                FROM unit_version v JOIN unit u ON u.id = v.unit_id
+                WHERE v.unit_id = %(u)s AND {applies}
+                ORDER BY v.valid_from DESC NULLS LAST, v.id DESC LIMIT 1
+                """
+            ).format(applies=sql.SQL(APPLIES_ON)),  # pyright: ignore[reportArgumentType]
+            {"u": unit, "d": as_of},
+        ).fetchone()
+        if row is not None and row[0] not in skip:
+            version_id, authority, heading, url, body, valid_from, valid_to = row
+            dates = _dates(authority, valid_from, valid_to, None)
+            named.append(
+                (unit, version_id, "referenced", authority, heading, url, _shortened(body), dates)
+            )
+        for older in _older_wordings(conn, hit.unit_id, unit):
+            if older[1] not in skip:
+                named.append((*older[:6], _shortened(older[6]), older[7]))
+    return named
 
 
 def _references(
