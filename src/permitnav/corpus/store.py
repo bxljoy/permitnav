@@ -618,6 +618,13 @@ def _link_transitional(conn: psycopg.Connection, statute: Statute) -> int:
     return count
 
 
+def relink_transitional(conn: psycopg.Connection, statute: Statute) -> int:
+    """Rebuild a statute's transitional links, e.g. after its wordings got start dates
+    ("ended" links match a version's start to the replaced one's end)."""
+    with conn.transaction():
+        return _link_transitional(conn, statute)
+
+
 def relink_rulings(conn: psycopg.Connection, rulings: Rulings) -> int:
     """Rebuild the rulings' citation links, e.g. after statute wordings changed their dates
     or were withdrawn (links point at versions, so they can go stale)."""
