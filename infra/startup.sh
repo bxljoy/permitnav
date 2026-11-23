@@ -103,7 +103,11 @@ systemctl enable --now permitnav-deploy.timer
 if [ -f "$APP/.env" ]; then
   cd "$APP"
   # The deploy timer's lock: a boot-time build and a deploy never run at once.
+  # Once deploy/update.sh has run, .env names the image CI built: run it. Before that (a new
+  # VM), build from the checkout.
+  build=--build
+  grep -q '^PERMITNAV_IMAGE=.' .env && build=
   flock /run/permitnav-deploy.lock \
-    docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d --build
+    docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d $build
   docker image prune -f  # each rebuild leaves the previous ~3.3 GB image behind
 fi
