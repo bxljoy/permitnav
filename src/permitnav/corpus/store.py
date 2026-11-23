@@ -26,6 +26,7 @@ versions those replaced. Re-ingesting a download already recorded changes nothin
 
 from __future__ import annotations
 
+import dataclasses
 import difflib
 import hashlib
 from dataclasses import dataclass, field
@@ -66,6 +67,7 @@ class _Stored:
     pending: str | None
     dates_estimated: bool
     time_basis: str
+    amended_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,9 @@ class _Context:
 
     repealed: dict[str, str]
     in_force: dict[str, date]
+    # The download has the same bytes as the previous one from this URL: any wording that
+    # reads differently now is the parser reading it differently, not the source changing.
+    same_source: bool = False
 
 
 def text_hash(text: str) -> str:
@@ -198,6 +203,14 @@ def _ingest(
         # Versions are rewritten in any order; the overlap rule is checked once at the end.
         conn.execute("SET CONSTRAINTS one_wording_per_day DEFERRED")
         download_id, already = _record_download(conn, raw)
+        previous = conn.execute(
+            "SELECT content_hash FROM download WHERE url = %s AND id <> %s"
+            " AND fetched_at <= %s ORDER BY fetched_at DESC, id DESC LIMIT 1",
+            (raw.url, download_id, raw.fetched_at),
+        ).fetchone()
+        context = dataclasses.replace(
+            context, same_source=previous is not None and previous[0] == raw.content_hash
+        )
         report = IngestReport(
             download_id=download_id, already_recorded=already, conflicts=list(conflicts)
         )
@@ -285,6 +298,36 @@ def _apply_unit(
             redated.append(hit)
         else:
             report.unchanged_versions += 1
+
+    if context.same_source and _reread(unmatched_stored, new):
+        # The same source bytes read differently: a parser fix, not a change in the law (the
+        # law only changes with new text). The new reading takes the old one's place for its
+        # whole period, with its dates; the old reading is withdrawn, kept as evidence.
+        gone, wording = unmatched_stored[0], new[0]
+        conn.execute(
+            "UPDATE unit_version SET observed_to = %s, withdrawn = true WHERE id = %s",
+            (raw.fetched_at, gone.id),
+        )
+        report.closed_versions += 1
+        report.withdrawn_versions += 1
+        # Its start carries over only if it still names the same amending act (the start came
+        # from that act); otherwise it is left for the register to date. Its end is what the
+        # source says now: an end date the new reading does not have is cleared.
+        same_act = wording.amended_by == gone.amended_by
+        version_id = _insert_version(
+            conn, wording, raw, download_id, None,
+            dates=(
+                gone.valid_from if same_act else wording.valid_from,
+                wording.valid_to,
+                gone.dates_estimated and same_act,
+            ),
+        )  # fmt: skip
+        report.new_versions += 1
+        _log_changes(
+            conn, gone.unit_id, [gone], [(version_id, wording.text)], redated, raw, download_id,
+            report,
+        )  # fmt: skip
+        return
 
     # A new wording with no start date (and not waiting for a decision) replaces a gone
     # current wording now: both ends of the change are estimated as the day it was seen.
@@ -539,7 +582,7 @@ def _open_versions(conn: psycopg.Connection, url: str) -> list[_Stored]:
     rows = conn.execute(
         """
         SELECT v.id, v.unit_id, v.text_hash, v.valid_from, v.valid_to, v.pending,
-               v.dates_estimated, v.time_basis
+               v.dates_estimated, v.time_basis, v.amended_by
         FROM unit_version v JOIN download d ON d.id = v.download_id
         WHERE d.url = %s AND v.observed_to IS NULL
         ORDER BY v.id
@@ -549,13 +592,33 @@ def _open_versions(conn: psycopg.Connection, url: str) -> list[_Stored]:
     return [_Stored(*row) for row in rows]
 
 
+def _reread(gone: list[_Stored], new: list[ParsedUnit]) -> bool:
+    """Called only when the source bytes are the same as last time: one wording gone and one
+    wording new, undated or with the same start, is the same wording read differently (e.g. a
+    chapter the parser used to miss). Several wordings of one section changed at once fall
+    back to the ordinary path (an estimated change), which has not been seen to happen."""
+    if len(gone) != 1 or len(new) != 1:
+        return False
+    old, wording = gone[0], new[0]
+    return (
+        old.time_basis == wording.time_basis == "valid"
+        and wording.valid_from in (None, old.valid_from)
+        and wording.pending == old.pending
+    )
+
+
 def _insert_version(
     conn: psycopg.Connection,
     parsed: ParsedUnit,
     raw: RawFetch,
     download_id: int,
     estimated_start: date | None,
+    dates: tuple[date | None, date | None, bool] | None = None,  # (from, to, estimated) kept
 ) -> int:
+    valid_from, valid_to, estimated = (
+        dates if dates is not None
+        else (estimated_start or parsed.valid_from, parsed.valid_to, estimated_start is not None)
+    )  # fmt: skip
     row = conn.execute(
         """
         INSERT INTO unit_version (unit_id, text, text_hash, time_basis, valid_from, valid_to,
@@ -568,11 +631,11 @@ def _insert_version(
             parsed.text,
             text_hash(parsed.text),
             parsed.time_basis,
-            estimated_start or parsed.valid_from,
-            parsed.valid_to,
+            valid_from,
+            valid_to,
             parsed.amended_by,
             parsed.pending,
-            estimated_start is not None,
+            estimated,
             raw.fetched_at,
             download_id,
         ),
