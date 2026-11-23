@@ -162,7 +162,7 @@ A claim that hasn't passed the verifier is never shown.
 
 - Intake fills it from what the user said. A missing field the rules depend on becomes a stated branch in the answer; the assistant asks at most one question, and only when the answer splits into more than two or three branches (revised 2026-11-23 from "at most 3 questions": see "Phase 5 plan").
 - The user sees it as a small editable panel.
-- It lives on the client and is sent with each request: session only, never stored on the server. Because the fields are fixed, the privacy page can say exactly what is held.
+- It lives on the client and is sent with each request, together with the last several turns of the conversation: never stored on the server. The front end keeps the conversation in the browser's local storage (phase 6), with a delete button, so it survives closing the tab on that device. Because the fields are fixed, the privacy page can say exactly what is held.
 
 ### D15. Model choice
 
@@ -1075,6 +1075,8 @@ The roadmap's phase 5 was written before anything was measured. Five changes, ea
 - **Intake extracts; at most one question.** Phase 2 (answer rule 5) and phase 4 slice 4 both measured that stating the branches beats asking. This narrows D14's "at most 3 questions" to one, asked only when the answer splits into more than two or three branches.
 - **Memory on the client.** The API is stateless; the client sends the "your situation" structure back with each request, so nothing is stored on the server (D14's "session only, never persisted", kept by construction).
 - **Verifier cheap-first.** Faithfulness is already 43–48 of 48, so the gain may be small: deterministic checks first (numbers, dates and sections in the answer appear in the cited source, in the wording valid on `as_of`), an LLM claim check only if they miss real errors.
+
+- **Conversation and learning (added 2026-11-23).** A narrow assistant is fine; what makes one feel bad is a clumsy refusal, not feeling like a conversation, and slow answers. So: the client sends the last several turns, not one (sources are still searched fresh each turn); the conversation is saved in the browser with delete and export, and progress is shown while answering (both phase 6). Learning without storing what people ask: production traces already hold the answer kind, the sections retrieved and cited, the top score, timing and cost, but no text; a coarse topic label is added to them, and the question text comes only through the two consent paths of phase 6 (the thumbs-down form and the off-by-default question donation). This learns more slowly than logging everything, which is the accepted price for questions about people's immigration situations.
 
 **What the eval lacks for an agent:** 4 follow-up items, no multi-turn items, 8 interpretation items. Before building: about 10 multi-turn items and more situational-law items, three runs per variant, a fresh holdout for the final number.
 
