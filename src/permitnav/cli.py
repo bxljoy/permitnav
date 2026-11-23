@@ -1131,7 +1131,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         except (OSError, ValueError, KeyError) as error:
             print(f"cannot read recorded queries {args.queries}: {error}")
             return 1
-        if cache.settings.get("config") != asdict(config):
+        recorded = _query_settings({"config": cache.settings.get("config", {})})
+        if recorded != _query_settings({"config": asdict(config)}):
             print(f"{args.queries} was recorded with other retrieval settings")
             return 1
         embedder = ReplayEmbedder(cache)

@@ -81,3 +81,26 @@ def test_every_smoke_question_is_recorded_for_replay() -> None:
         if not is_swedish(question):
             translation = cache.translations.get(question)
             assert translation in cache.vectors, f"{item_id}: translation not recorded"
+
+
+def test_the_smoke_replay_survives_options_that_only_lay_results_out(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """The smoke slice compares recorded settings too: a new layout option (e.g. paper slots)
+    must not refuse a recording, as it did on main after paper_slots was added."""
+    from dataclasses import asdict
+
+    from permitnav import cli
+    from permitnav.evals.replay import QueryCache
+    from permitnav.retrieval.retriever import RetrievalConfig
+
+    old = {k: v for k, v in asdict(RetrievalConfig()).items() if not k.startswith("paper_")}
+    assert cli._query_settings({"config": old}) == cli._query_settings(
+        {"config": asdict(RetrievalConfig())}
+    )
+    QueryCache(settings={"config": {**old, "translate": not old["translate"]}}).save(
+        tmp_path / "q.json"
+    )
+    monkeypatch.setenv("ANSWER_MODEL", "test/model")  # refused before any model is called
+    status = cli.main(["smoke", "--queries", str(tmp_path / "q.json")])
+    assert status == 1 and "recorded with other retrieval settings" in capsys.readouterr().out
