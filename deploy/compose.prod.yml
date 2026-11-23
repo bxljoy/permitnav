@@ -1,5 +1,7 @@
 # Production overrides for the VM (phase 3), on top of docker-compose.yml:
-#   docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d --build
+#   docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d
+# The API image is the one CI built, named by digest in .env (PERMITNAV_IMAGE, set by
+# deploy/update.sh); only a brand-new VM builds it from the checkout (infra/startup.sh).
 # Only Caddy is reachable from outside (80/443, HTTPS); the API and Postgres are not.
 services:
   db:

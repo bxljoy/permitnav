@@ -19,6 +19,9 @@ services:
 
   api:
     build: .
+    # Production runs the image CI built (deploy/update.sh sets PERMITNAV_IMAGE to its
+    # digest); without it, this is the image built from this checkout.
+    image: ${PERMITNAV_IMAGE:-permitnav-api}
     env_file:         # OPENROUTER_API_KEY, ANSWER_MODEL, API_TOKEN (see .env.example)
       - path: .env
         required: false   # `docker compose up db` works on a fresh clone

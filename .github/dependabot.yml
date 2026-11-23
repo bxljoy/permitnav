@@ -1,0 +1,25 @@
+# Dependency updates as pull requests, each gated by CI like any other change.
+version: 2
+updates:
+  - package-ecosystem: uv          # pyproject.toml + uv.lock
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions   # keeps the SHA pins in ci.yml current
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker      # the python base image in the Dockerfile
+    directory: /
+    schedule:
+      interval: weekly

@@ -1,8 +1,9 @@
 #!/bin/bash
 # Deploy on merge, pull-based (phase 3): a systemd timer runs this every 5 minutes. When
-# origin/main has a new commit whose required checks passed, the VM checks it out, rebuilds
-# and restarts the containers, waits for the health check, and rolls back to the previous
-# commit if the new one does not become healthy.
+# origin/main has a new commit whose required checks passed, the VM checks it out (for the
+# Compose files and the Caddyfile), pulls the API image CI built for that commit and runs it
+# by digest, waits for the health check, and rolls back to the previous commit and image if
+# the new one does not become healthy. The VM never builds: it runs exactly what CI built.
 #
 # Pull, not push: GitHub needs no credentials for the VM, and nothing outside can reach in;
 # the VM only reads the public repository. The ruleset on main already requires the checks;
@@ -16,7 +17,8 @@ set -euo pipefail
 
 APP=/opt/permitnav
 REPO=bxljoy/permitnav
-REQUIRED=("Secret scan" "Lint, types and tests" "Retrieval eval (no models)")
+REQUIRED=("Secret scan" "Lint, types and tests" "Retrieval eval (no models)" "Build image")
+IMAGES=ghcr.io/bxljoy/permitnav-api # pushed by CI's "Build image" job, tagged sha-<commit>
 STATE=/var/lib/permitnav
 FAILED=$STATE/failed-deploy  # a commit that failed to deploy: skipped until main moves on
 NOTED=$STATE/noted-check     # a commit whose check problem was already reported once
@@ -82,7 +84,8 @@ for check in "${REQUIRED[@]}"; do
 import json, sys
 name = sys.argv[1]
 runs = [r for r in json.load(sys.stdin).get("check_runs", []) if r["name"] == name]
-print("missing" if not runs else runs[0]["conclusion"] if runs[0]["status"] == "completed" else "pending")
+run = max(runs, key=lambda r: r.get("started_at") or "") if runs else None  # the latest run
+print("missing" if not run else run["conclusion"] if run["status"] == "completed" else "pending")
 ' "$check")
   case "$conclusion" in
     success) ;;
@@ -97,6 +100,29 @@ print("missing" if not runs else runs[0]["conclusion"] if runs[0]["status"] == "
   esac
 done
 
+# The image for the target commit, by digest (immutable, unlike a tag).
+if ! docker pull -q "$IMAGES:sha-$target" >/dev/null 2>&1; then
+  built=$(printf '%s' "$runs" | python3 -c '
+import datetime, json, sys
+runs = [r for r in json.load(sys.stdin)["check_runs"] if r["name"] == "Build image"]
+done = max(r["completed_at"] for r in runs)
+print(int(datetime.datetime.fromisoformat(done.replace("Z", "+00:00")).timestamp()))
+')
+  [ $(($(date +%s) - built)) -lt "$CHECK_WAIT" ] && exit 0 # just pushed: try again next run
+  note_once "$target" "deploy of $short waiting: cannot pull $IMAGES:sha-$target after an hour (is the package public?)"
+fi
+new_image=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGES:sha-$target")
+old_image=$(sed -n 's/^PERMITNAV_IMAGE=//p' "$APP/.env")
+
+set_image() { # the image Compose runs, kept in the VM's .env so a reboot runs it too
+  local tmp
+  tmp=$(mktemp "$APP/.env.XXXXXX")
+  # grep exits 1 when no line is left (fine) and 2 on an error: never replace .env then.
+  grep -v '^PERMITNAV_IMAGE=' "$APP/.env" > "$tmp" || [ $? -eq 1 ] || { rm -f "$tmp"; return 1; }
+  [ -n "$1" ] && echo "PERMITNAV_IMAGE=$1" >> "$tmp"
+  chmod 600 "$tmp" && mv "$tmp" "$APP/.env"
+}
+
 healthy() {
   for _ in $(seq 1 60); do # up to 5 minutes: a first start loads the embedding model
     [ "$(docker inspect -f '{{.State.Health.Status}}' permitnav-api-1 2>/dev/null)" = healthy ] && return 0
@@ -105,10 +131,11 @@ healthy() {
   return 1
 }
 
-deploy() { # check out a commit and start it; each step checked (set -e is off inside `if`)
+deploy() { # commit, image, previous commit; each step checked (set -e is off inside `if`)
   git -c advice.detachedHead=false checkout -q "$1" || return 1
-  "${C[@]}" up -d --build --remove-orphans || return 1
-  if ! git diff --quiet "$2" "$1" -- deploy/Caddyfile; then
+  set_image "$2" || return 1
+  "${C[@]}" up -d --remove-orphans || return 1
+  if ! git diff --quiet "$3" "$1" -- deploy/Caddyfile; then
     # A single-file bind mount keeps the old file after checkout: recreate Caddy.
     "${C[@]}" up -d --force-recreate caddy || return 1
   fi
@@ -122,8 +149,8 @@ if [ "$migrations_changed" = 1 ]; then
     "$APP/deploy/backup.sh" || fail "deploy of $short stopped: the pre-migration backup failed"
 fi
 
-if deploy "$target" "$current" && healthy; then
-  docker image prune -f >/dev/null || true
+if deploy "$target" "$new_image" "$current" && healthy; then
+  docker image prune -af >/dev/null || true # images no container uses; a rollback re-pulls
   rm -f "$FAILED"
   report INFO "deployed $short (was ${current:0:7})"
   exit 0
@@ -132,9 +159,9 @@ fi
 mkdir -p "$STATE" && echo "$target" > "$FAILED"
 if [ "$migrations_changed" = 1 ]; then
   # Old code on a migrated schema may look healthy and still fail: no automatic rollback.
-  fail "deploy of $short failed after migrating the database; NOT rolled back. Fix forward, or restore the pre-migration backup and check out ${current:0:7} (infra/README.md)"
+  fail "deploy of $short failed after migrating the database; NOT rolled back. Fix forward, or restore the pre-migration backup, check out ${current:0:7} and set PERMITNAV_IMAGE=${old_image:-<empty: build>} in .env (infra/README.md)"
 fi
-if deploy "$current" "$target" && healthy; then
+if deploy "$current" "$old_image" "$target" && healthy; then
   fail "deploy of $short failed; rolled back to ${current:0:7}"
 fi
 fail "deploy of $short failed and the rollback to ${current:0:7} is not healthy"
