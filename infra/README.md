@@ -62,10 +62,10 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
   `sudo systemctl start permitnav-deploy.service`. Changes to `infra/` (Terraform, the startup
   script) still need `terraform apply`, and the startup script a reboot or
   `sudo google_metadata_script_runner startup`.
-- **The image package must be public** (once, after CI first pushes it): GitHub creates a new
-  package as private, and the VM pulls without credentials. On GitHub: the profile's Packages
-  → `permitnav-api` → Package settings → Change visibility → Public. The image holds only the
-  public code.
+- **The image package is public:** the VM pulls without credentials. GitHub made the package
+  public on its first push because the image's `org.opencontainers.image.source` label links it
+  to this public repository (checked: an anonymous pull works). If a pull ever fails with
+  "unauthorized", check the package's visibility (profile → Packages → `permitnav-api`).
 - **Rolling back by hand** (e.g. after a failed deploy that migrated the database): restore the
   backup if needed, `sudo git checkout <commit>`, set `PERMITNAV_IMAGE=<that commit's image
   digest>` in `.env` (the alert names it; empty means build from the checkout), then
