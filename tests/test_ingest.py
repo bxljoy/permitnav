@@ -10,7 +10,7 @@ import psycopg
 import pytest
 
 from permitnav.corpus.store import ingest_statute, versions_on
-from permitnav.parsing.statute import parse_statute
+from permitnav.parsing.statute import Statute, parse_statute
 from permitnav.sources.riksdagen import RawFetch
 
 pytestmark = pytest.mark.db
@@ -282,3 +282,115 @@ def test_a_replaced_version_has_its_pending_end_cleared(conn: psycopg.Connection
         "SELECT pending FROM unit_version WHERE unit_id = %s AND observed_to IS NOT NULL", (S4,)
     ).fetchall()
     assert rows == [(None,)]
+
+
+@pytest.mark.db
+def test_the_same_source_read_differently_corrects_the_wording_in_place(
+    conn: psycopg.Connection,
+) -> None:
+    """A parser fix (chapter 22 was read into 21 kap. 10 §) is not a change in the law: the
+    same bytes give a new reading, which takes the old one's place with its dates."""
+    import dataclasses
+
+    from permitnav.corpus.store import ingest_statute
+
+    ingest(conn, FIXTURE, 20)
+    unit = "sfs:2005:716/6kap/3§"
+    conn.execute(  # dated by the register (slice 2), as on the server
+        "UPDATE unit_version SET valid_from = '2006-03-31' WHERE unit_id = %s", (unit,)
+    )
+    raw = RawFetch(
+        source="riksdagen",
+        url=URL,
+        fetched_at=datetime(2026, 11, 24, 9, 0, tzinfo=UTC),
+        content=FIXTURE.encode(),  # the very same bytes
+        content_hash=hashlib.sha256(FIXTURE.encode()).hexdigest(),
+        http_status=200,
+    )
+    statute = parse_statute(FIXTURE, url=URL)
+    statute = dataclasses.replace(
+        statute,
+        units=[
+            dataclasses.replace(u, text="Rättad läsning.") if u.unit_id == unit else u
+            for u in statute.units
+        ],
+    )
+    report = ingest_statute(conn, raw, statute)
+    assert unit not in report.estimated
+    rows = conn.execute(
+        "SELECT text, valid_from, valid_to, withdrawn, dates_estimated FROM unit_version"
+        " WHERE unit_id = %s ORDER BY id",
+        (unit,),
+    ).fetchall()
+    assert [r[3] for r in rows] == [True, False]  # the old reading withdrawn
+    assert rows[1][:3] == ("Rättad läsning.", date(2006, 3, 31), None)
+    assert rows[1][4] is False
+
+
+def _raw(text: str, day: int) -> RawFetch:
+    return RawFetch(
+        source="riksdagen",
+        url=URL,
+        fetched_at=datetime(2026, 11, day, 9, 0, tzinfo=UTC),
+        content=text.encode(),
+        content_hash=hashlib.sha256(text.encode()).hexdigest(),
+        http_status=200,
+    )
+
+
+def _reread(source: str, unit: str, **changes: object) -> Statute:
+    """The statute as a fixed parser would read `source`: one unit read differently."""
+    import dataclasses
+
+    statute = parse_statute(source, url=URL)
+    return dataclasses.replace(
+        statute,
+        units=[
+            dataclasses.replace(u, **changes) if u.unit_id == unit else u  # type: ignore[arg-type]
+            for u in statute.units
+        ],
+    )
+
+
+@pytest.mark.db
+def test_a_reread_is_a_correction_even_when_the_wording_came_from_an_older_download(
+    conn: psycopg.Connection,
+) -> None:
+    """The wording was read from download A; the source then changed elsewhere (B). A parser
+    fix ingested on B's bytes again is still a correction: same bytes as last time."""
+    from permitnav.corpus.store import ingest_statute
+
+    unit = "sfs:2005:716/6kap/3§"
+    ingest(conn, FIXTURE, 20)  # A
+    conn.execute("UPDATE unit_version SET valid_from = '2006-03-31' WHERE unit_id = %s", (unit,))
+    changed = FIXTURE.replace("Lag (2022:303).", "Lag (2022:303). ", 1)  # another section
+    ingest_statute(conn, _raw(changed, 22), parse_statute(changed, url=URL))  # B
+    report = ingest_statute(conn, _raw(changed, 24), _reread(changed, unit, text="Rättad."))
+    assert unit not in report.estimated
+    current = conn.execute(
+        "SELECT text, valid_from FROM unit_version WHERE unit_id = %s AND NOT withdrawn",
+        (unit,),
+    ).fetchall()
+    assert current == [("Rättad.", date(2006, 3, 31))]
+
+
+@pytest.mark.db
+def test_a_reread_naming_another_act_or_no_end_date_does_not_inherit_those_dates(
+    conn: psycopg.Connection,
+) -> None:
+    from permitnav.corpus.store import ingest_statute
+
+    unit = "sfs:2005:716/6kap/3§"
+    ingest(conn, FIXTURE, 20)
+    conn.execute(  # the old reading: dated by an act it no longer names, with an end date
+        "UPDATE unit_version SET valid_from = '2026-07-12', valid_to = '2027-01-01',"
+        " amended_by = '2026:1142' WHERE unit_id = %s",
+        (unit,),
+    )
+    ingest_statute(conn, _raw(FIXTURE, 24), _reread(FIXTURE, unit, text="Rättad."))
+    row = conn.execute(
+        "SELECT valid_from, valid_to, amended_by FROM unit_version"
+        " WHERE unit_id = %s AND NOT withdrawn",
+        (unit,),
+    ).fetchone()
+    assert row == (None, None, None)  # left for the register to date; no stale end

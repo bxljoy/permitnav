@@ -136,7 +136,38 @@ def _blocks(text: str) -> list[str]:
             current = []
     if current:
         blocks.append("\n".join(current))
-    return blocks
+    return _join_bare_chapter_headings(blocks)
+
+
+BARE_CHAPTER = re.compile(r"^\d+(?: [a-z])? kap\.$")
+
+
+def _join_bare_chapter_headings(blocks: list[str]) -> list[str]:
+    """A chapter heading printed with its title on a line of its own ("22 kap." / blank line /
+    "Tribunalvittnen") is joined into one block, as the other chapters are printed ("21 kap.
+    Tillfälligt skydd"). Without this the chapter is not seen and its sections are read as
+    part of the last section before it. Only a short, single-line title in capitals is
+    joined, never a section ("1 § …") or a paragraph."""
+    joined: list[str] = []
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
+        title = blocks[i + 1] if i + 1 < len(blocks) else ""
+        lines = title.splitlines()
+        if (
+            BARE_CHAPTER.match(block)
+            and title[:1].isupper()
+            and len(lines) <= 3  # a title can wrap ("Särskilda bemyndiganden och / andra …")
+            and len(title) <= 160
+            and not any(line.rstrip().endswith((".", ":", ";", ",")) for line in lines)
+            and not SECTION.match(title)
+        ):
+            joined.append(f"{block} {' '.join(line.strip() for line in lines)}")
+            i += 2
+            continue
+        joined.append(block)
+        i += 1
+    return joined
 
 
 def _amended_through(blocks: list[str]) -> str | None:
@@ -276,6 +307,10 @@ def _parse_sections(statute: Statute, blocks: list[str], url: str) -> None:
         if current is None:
             statute.warnings.append(f"text outside any section: {block[:60]!r}")
             continue
+        if BARE_CHAPTER.match(block):
+            # a chapter heading whose title could not be joined: its sections would silently
+            # become text of the section before it, so stop the statute's ingest instead
+            statute.warnings.append(f"chapter heading without a title: {block!r}")
         current.paragraphs.append(block)
 
     finish()

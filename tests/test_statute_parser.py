@@ -113,6 +113,42 @@ def test_wrapped_chapter_titles_are_joined() -> None:
     )
 
 
+def test_a_chapter_title_on_a_line_of_its_own_still_starts_the_chapter() -> None:
+    """The consolidated text prints chapter 22 as "22 kap. " / blank line / "Tribunalvittnen";
+    read as text, the whole chapter ended up inside 21 kap. 10 §."""
+    text = (
+        "Utlänningslag (2005:716)\n\nSFS nr:     2005:716\n\n\n"
+        "21 kap. Tillfälligt skydd\n\n"
+        "10 § Beslut enligt detta kapitel meddelas av Migrationsverket.\n\n"
+        "22 kap. \r\n\r\nTribunalvittnen\n\n"
+        "1 § I detta kapitel finns bestämmelser om skydd för vittnen.\n\n"
+        "2 § Ett tidsbegränsat uppehållstillstånd ska ges. Lag (2026:1142).\n"
+    )
+    statute = parse_statute(text, url=URL)
+    assert one(statute, "sfs:2005:716/21kap/10§").text == (
+        "Beslut enligt detta kapitel meddelas av Migrationsverket."
+    )
+    assert one(statute, "sfs:2005:716/22kap/1§").heading == "22 kap. Tribunalvittnen, 1 §"
+    assert one(statute, "sfs:2005:716/22kap/2§").amended_by == "2026:1142"
+
+
+def test_a_wrapped_title_on_its_own_lines_is_joined_and_a_bare_heading_warns() -> None:
+    head = "Utlänningslag (2005:716)\n\nSFS nr:     2005:716\n\n\n"
+    wrapped = (
+        head + "22 kap. Tribunalvittnen\n\n7 § Beslut får inte överklagas.\n\n"
+        "23 kap.\n\nSärskilda bemyndiganden och\nandra bestämmelser\n\n"
+        "1 § Regeringen får meddela föreskrifter.\n"
+    )
+    statute = parse_statute(wrapped, url=URL)
+    assert one(statute, "sfs:2005:716/23kap/1§").heading == (
+        "23 kap. Särskilda bemyndiganden och andra bestämmelser, 1 §"
+    )
+    bare = head + "22 kap. Tribunalvittnen\n\n7 § Text.\n\n23 kap.\n\n1 § Regeringen får.\n"
+    assert any(
+        "chapter heading without a title" in w for w in parse_statute(bare, url=URL).warnings
+    )
+
+
 def test_repealed_sections_are_listed_not_returned_as_units(statute) -> None:
     assert units(statute, "sfs:2005:716/5kap/1c§") == []
     assert units(statute, "sfs:2005:716/5kap/2§") == []
