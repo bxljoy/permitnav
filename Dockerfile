@@ -18,10 +18,13 @@ RUN uv sync --locked --no-dev --extra embed --extra api --no-install-project
 
 COPY src ./src
 COPY migrations ./migrations
+# The public dev golden set and its recorded questions: the daily refresh checks retrieval
+# against the live corpus with them (deploy/refresh.sh).
+COPY evals/golden.dev.jsonl evals/queries.dev.json ./evals/
 RUN uv sync --locked --no-dev --extra embed --extra api
 
 RUN useradd --create-home --uid 10001 app \
- && mkdir -p /models /app/data \
+ && mkdir -p /models /app/data/raw \
  && chown -R app:app /models /app/data
 USER app
 ENV PATH=/app/.venv/bin:$PATH

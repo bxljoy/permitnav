@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from dataclasses import dataclass
@@ -31,9 +32,22 @@ def save_raw(
     suffix: str,
     now: datetime | None,
 ) -> RawFetch:
-    """Write content and a metadata file to folder/<UTC timestamp>.<suffix> (+ .json)."""
+    """Write content and a metadata file to folder/<UTC timestamp>.<suffix> (+ .json).
+
+    A download identical to the newest one saved for the same URL is not written again: that
+    one is returned, with this fetch's time. Daily re-crawls (phase 4) would otherwise store
+    every unchanged page each day."""
     fetched_at = (now or datetime.now(UTC)).astimezone(UTC)
     content_hash = hashlib.sha256(content).hexdigest()
+    latest = latest_raw(folder) if folder.is_dir() else None
+    if latest and (latest.url, latest.content_hash, latest.http_status) == (
+        url,
+        content_hash,
+        status,
+    ):
+        # The same bytes, seen again now: no new file, but this fetch's time, so that ingest
+        # dates what it sees by today (a page that comes back is observed from today).
+        return dataclasses.replace(latest, fetched_at=fetched_at)
     folder.mkdir(parents=True, exist_ok=True)
     stem = fetched_at.strftime("%Y%m%dT%H%M%S.%fZ")  # UTC, unique per download
     path = folder / f"{stem}.{suffix}"

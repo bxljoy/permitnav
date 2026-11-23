@@ -95,8 +95,37 @@ OnUnitInactiveSec=5min
 [Install]
 WantedBy=timers.target
 EOF
+# Daily refresh (phase 4): fetch, ingest and index every source, then check retrieval on the
+# live corpus (deploy/refresh.sh). 02:30 UTC, before the 03:30 backup.
+cat > /etc/systemd/system/permitnav-refresh-failed.service <<'EOF'
+[Unit]
+Description=Report a failed PermitNav refresh run (raises the "refresh failed" alert)
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/gcloud logging write permitnav-refresh "refresh service failed (killed or crashed)" --severity=ERROR --quiet
+EOF
+cat > /etc/systemd/system/permitnav-refresh.service <<'EOF'
+[Unit]
+Description=PermitNav daily refresh of the sources
+After=google-startup-scripts.service docker.service
+OnFailure=permitnav-refresh-failed.service
+[Service]
+Type=oneshot
+TimeoutStartSec=2h
+ExecStart=/opt/permitnav/deploy/refresh.sh
+EOF
+cat > /etc/systemd/system/permitnav-refresh.timer <<'EOF'
+[Unit]
+Description=Refresh PermitNav's sources daily
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
 systemctl daemon-reload
 systemctl enable --now permitnav-backup.timer
+systemctl enable --now permitnav-refresh.timer
 systemctl enable --now permitnav-deploy.timer
 
 # Start (or restart) the service only once the secrets exist.

@@ -16,7 +16,8 @@ parsed wordings are matched one-to-one to the stored wordings that are still obs
    - otherwise on the day the change was seen (estimate).
    A wording whose end would fall on or before its own start never took effect: it is marked
    `withdrawn` and never applies. A wording that was waiting for a government decision just
-   stops being observed.
+   stops being observed. A new wording with the same start date is a correction of the old
+   one: it replaces it for its whole period, and the old one is withdrawn.
 3. **New** (in the text, not stored): inserted.
 
 Transitional provisions are then linked to the versions their act introduced and to the
@@ -25,6 +26,7 @@ versions those replaced. Re-ingesting a download already recorded changes nothin
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -50,6 +52,7 @@ class IngestReport:
     withdrawn_versions: int = 0
     links: int = 0
     estimated: list[str] = field(default_factory=list)  # units whose change date was guessed
+    changes: dict[str, int] = field(default_factory=dict)  # change_log rows written, by kind
     conflicts: list[str] = field(default_factory=list)  # from the parser
 
 
@@ -108,45 +111,80 @@ def ingest_rulings(conn: psycopg.Connection, raw: RawFetch, rulings: Rulings) ->
     with conn.transaction():
         withdrawn = _withdraw_changed_rulings(conn, raw, rulings)
     report = _ingest(conn, raw, rulings.units, _Context(repealed={}, in_force={}), [])
-    report.withdrawn_versions += withdrawn
+    report.withdrawn_versions += len(withdrawn)
+    with conn.transaction():  # the log saw the new text as "added": it replaced an old one
+        for unit_id, old_id, old_text in withdrawn:
+            cur = conn.execute(
+                """
+                UPDATE change_log c SET kind = 'changed', old_version_id = %(old)s,
+                  diff = %(diff)s
+                FROM unit_version v
+                WHERE c.unit_id = %(u)s AND c.kind = 'added' AND c.observed_at = %(at)s
+                  AND v.id = c.new_version_id
+                RETURNING c.id
+                """,
+                {"old": old_id, "u": unit_id, "at": raw.fetched_at, "diff": ""},
+            ).fetchone()
+            if cur is not None:
+                new_text = conn.execute(
+                    "SELECT v.text FROM change_log c JOIN unit_version v ON v.id = c.new_version_id"
+                    " WHERE c.id = %s",
+                    (cur[0],),
+                ).fetchone()
+                conn.execute(
+                    "UPDATE change_log SET diff = %s WHERE id = %s",
+                    (_diff(old_text, new_text[0] if new_text else ""), cur[0]),
+                )
+                report.changes["added"] -= 1
+                report.changes["changed"] = report.changes.get("changed", 0) + 1
     with conn.transaction():
         report.links = _link_rulings(conn, rulings)
     return report
 
 
-def _withdraw_changed_rulings(conn: psycopg.Connection, raw: RawFetch, rulings: Rulings) -> int:
+def _withdraw_changed_rulings(
+    conn: psycopg.Connection, raw: RawFetch, rulings: Rulings
+) -> list[tuple[str, int, str]]:
     """A ruling whose stored text differs from the new one (a correction, or full text added
     to a summary) keeps one wording: the old text is withdrawn, not ended. Both would start on
     the decision date, so ending the old one would overlap the new one (one_wording_per_day);
     the decision itself has not changed, only how the source renders it."""
-    count = 0
+    withdrawn: list[tuple[str, int, str]] = []  # (unit, old version, old text) for the log
     for unit in rulings.units:
-        cur = conn.execute(
+        rows = conn.execute(
             """
             UPDATE unit_version SET withdrawn = true, observed_to = %(at)s
             WHERE unit_id = %(u)s AND observed_to IS NULL AND NOT withdrawn
               AND text_hash <> %(h)s
+            RETURNING id, text
             """,
             {"u": unit.unit_id, "h": text_hash(unit.text), "at": raw.fetched_at},
-        )
-        count += cur.rowcount
-    return count
+        ).fetchall()
+        withdrawn += [(unit.unit_id, version_id, text) for version_id, text in rows]
+    return withdrawn
 
 
 def close_documents(conn: psycopg.Connection, keep: set[str], at: datetime) -> int:
     """Close the still-observed sections of web pages not in `keep` (pages that disappeared
     from the site or its sitemap). Returns the number of sections closed."""
     with conn.transaction():
-        cur = conn.execute(
+        closed = conn.execute(
             """
             UPDATE unit_version v SET observed_to = %(at)s
             FROM unit u
             WHERE u.id = v.unit_id AND u.source_type = 'web_page'
               AND v.observed_to IS NULL AND NOT (u.document = ANY(%(keep)s))
+            RETURNING v.id, v.unit_id
             """,
             {"at": at, "keep": list(keep)},
-        )
-        return cur.rowcount
+        ).fetchall()
+        with conn.cursor() as cur:  # the "what changed" log: the page's sections are gone
+            cur.executemany(
+                "INSERT INTO change_log (observed_at, unit_id, kind, old_version_id)"
+                " VALUES (%s, %s, 'removed', %s)",
+                [(at, unit_id, version_id) for version_id, unit_id in closed],
+            )
+        return len(closed)
 
 
 def _ingest(
@@ -234,6 +272,7 @@ def _apply_unit(
     # Match one-to-one by text, in order; identical texts with different dates stay distinct.
     unmatched_stored = list(stored)
     new: list[ParsedUnit] = []
+    redated: list[_Stored] = []
     for wording in parsed:
         h = text_hash(wording.text)
         hit = next((s for s in unmatched_stored if s.text_hash == h), None)
@@ -243,6 +282,7 @@ def _apply_unit(
         unmatched_stored.remove(hit)
         if _update_dates(conn, hit, wording):
             report.updated_versions += 1
+            redated.append(hit)
         else:
             report.unchanged_versions += 1
 
@@ -263,6 +303,7 @@ def _apply_unit(
     if estimated_change:
         report.estimated.append(stored[0].unit_id)
 
+    inserted: list[tuple[int, str]] = []
     for wording in new:
         estimate = (
             estimated_change
@@ -271,8 +312,71 @@ def _apply_unit(
             and wording.pending != "starts"
             and (wording.valid_to is None or wording.valid_to > seen_on)
         )
-        _insert_version(conn, wording, raw, download_id, seen_on if estimate else None)
+        version_id = _insert_version(conn, wording, raw, download_id, seen_on if estimate else None)
+        inserted.append((version_id, wording.text))
         report.new_versions += 1
+
+    unit_id = (parsed or stored)[0].unit_id
+    _log_changes(conn, unit_id, unmatched_stored, inserted, redated, raw, download_id, report)
+
+
+MAX_DIFF_CHARS = 4000
+
+
+def _log_changes(
+    conn: psycopg.Connection,
+    unit_id: str,
+    gone: list[_Stored],
+    inserted: list[tuple[int, str]],
+    redated: list[_Stored],
+    raw: RawFetch,
+    download_id: int,
+    report: IngestReport,
+) -> None:
+    """The "what changed" log: one row per wording added, changed (an old one replaced by a
+    new one), removed or re-dated, with a unified diff for changes."""
+    rows: list[tuple[str, int | None, int | None, str]] = []
+    # Pair each replaced wording with the most similar new one (a download can also announce a
+    # future wording of the same unit, which is "added", not a replacement of the current one).
+    old_texts = {old.id: _version_text(conn, old.id) for old in gone}
+    unpaired_new = list(inserted)
+    unpaired_old = list(gone)
+    while unpaired_old and unpaired_new:
+        old, (new_id, new_text) = max(
+            ((o, n) for o in unpaired_old for n in unpaired_new),
+            key=lambda pair: difflib.SequenceMatcher(
+                None, old_texts[pair[0].id], pair[1][1]
+            ).ratio(),
+        )
+        rows.append(("changed", old.id, new_id, _diff(old_texts[old.id], new_text)))
+        unpaired_old.remove(old)
+        unpaired_new.remove((new_id, new_text))
+    for old in unpaired_old:
+        rows.append(("removed", old.id, None, ""))
+    for new_id, _ in unpaired_new:
+        rows.append(("added", None, new_id, ""))
+    for version in redated:
+        rows.append(("dates", version.id, version.id, ""))
+    for kind, old_id, new_id, diff in rows:
+        conn.execute(
+            "INSERT INTO change_log (observed_at, download_id, unit_id, kind, old_version_id,"
+            " new_version_id, diff) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (raw.fetched_at, download_id, unit_id, kind, old_id, new_id, diff),
+        )
+        report.changes[kind] = report.changes.get(kind, 0) + 1
+
+
+def _version_text(conn: psycopg.Connection, version_id: int) -> str:
+    row = conn.execute("SELECT text FROM unit_version WHERE id = %s", (version_id,)).fetchone()
+    return row[0] if row else ""
+
+
+def _diff(old: str, new: str) -> str:
+    lines = difflib.unified_diff(
+        old.splitlines(), new.splitlines(), "before", "after", lineterm="", n=1
+    )
+    diff = "\n".join(lines)
+    return diff if len(diff) <= MAX_DIFF_CHARS else diff[:MAX_DIFF_CHARS] + "\n[…]"
 
 
 def _update_dates(conn: psycopg.Connection, stored: _Stored, parsed: ParsedUnit) -> bool:
@@ -325,6 +429,19 @@ def _close(
         )
         return False
     if gone.pending == "starts":  # never took effect; just no longer announced
+        conn.execute(
+            "UPDATE unit_version SET observed_to = %s, withdrawn = true WHERE id = %s",
+            (raw.fetched_at, gone.id),
+        )
+        report.withdrawn_versions += 1
+        return False
+
+    if gone.valid_from is not None and any(
+        w.valid_from == gone.valid_from and w.pending != "starts" for w in new
+    ):
+        # The same wording corrected in place (a published correction, or a parser change):
+        # the new text starts on the same day, so it replaces this one for its whole period.
+        # Ending this one on the day the change was seen would overlap the new one.
         conn.execute(
             "UPDATE unit_version SET observed_to = %s, withdrawn = true WHERE id = %s",
             (raw.fetched_at, gone.id),
@@ -438,12 +555,13 @@ def _insert_version(
     raw: RawFetch,
     download_id: int,
     estimated_start: date | None,
-) -> None:
-    conn.execute(
+) -> int:
+    row = conn.execute(
         """
         INSERT INTO unit_version (unit_id, text, text_hash, time_basis, valid_from, valid_to,
           amended_by, pending, dates_estimated, observed_from, download_id)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
         """,
         (
             parsed.unit_id,
@@ -458,7 +576,9 @@ def _insert_version(
             raw.fetched_at,
             download_id,
         ),
-    )
+    ).fetchone()
+    assert row is not None
+    return row[0]
 
 
 def _link_transitional(conn: psycopg.Connection, statute: Statute) -> int:

@@ -142,7 +142,7 @@ def test_a_snapshot_from_another_schema_is_refused(
 
     path = tmp_path / "old.txt.gz"
     with gzip.open(path, "wt") as f:
-        f.write(f'{HEADER}\n{{"schema": "001_schema.sql", "counts": {{}}}}\n')
+        f.write(f'{HEADER}\n{{"schema": "999_future.sql", "counts": {{}}}}\n')
     with pytest.raises(ValueError, match="schema"):
         import_snapshot(conn, path)
 

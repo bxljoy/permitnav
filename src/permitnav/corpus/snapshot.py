@@ -120,12 +120,15 @@ def read_manifest(path: Path) -> dict:
 def import_snapshot(conn: psycopg.Connection, path: Path) -> dict:
     """Load a snapshot into a migrated, empty database. Returns the manifest."""
     manifest = read_manifest(path)
-    schema = latest_migration(conn)
-    if manifest["schema"] != schema:
+    applied = {r[0] for r in conn.execute("SELECT name FROM schema_migration").fetchall()}
+    if manifest["schema"] not in applied:
         raise ValueError(
-            f"snapshot made at schema {manifest['schema']!r}, database is at {schema!r}:"
-            " export a new snapshot"
+            f"snapshot made at schema {manifest['schema']!r}, which this database has not"
+            f" reached (latest: {latest_migration(conn)!r}): migrate first, or use a matching"
+            " snapshot"
         )
+    # A snapshot from an older schema imports too: migrations only add tables and columns,
+    # and COPY names its columns, so an incompatible change still fails, loudly.
     for table, _ in TABLES:
         row = conn.execute(
             sql.SQL("SELECT EXISTS (SELECT 1 FROM {})").format(sql.Identifier(table))
