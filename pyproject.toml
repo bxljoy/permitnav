@@ -13,6 +13,8 @@ dependencies = [
     "opentelemetry-api>=1.28",
     "opentelemetry-sdk>=1.28",
     "opentelemetry-exporter-otlp-proto-http>=1.28",
+    "pdfminer-six>=20240706",
+    "pypdf>=5",
 ]
 
 [project.optional-dependencies]

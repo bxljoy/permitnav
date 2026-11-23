@@ -137,3 +137,70 @@ def _tag(item: str, name: str) -> str:
 def describe(act: Act) -> str:
     when = act.in_force.isoformat() if act.in_force else "no single date in the register"
     return f"{act.sfs} ({when}{', partly pending' if act.partly_pending else ''})"
+
+
+@dataclass(frozen=True)
+class ScopeItem:
+    op: str  # "upph" (repealed), "ändr" (changed), "ny" (added), "betecknas" (renumbered)
+    chapter: str  # "6 a"
+    first: str | None  # "16 a"; None: the whole chapter
+    last: str | None  # end of a range ("16 a–18"), else the same as first
+
+
+# "6 a kap." (a chapter, maybe whole) or "16 a", "16 a–18" (a section or range) before "," "och" "§"
+NUM = r"\d+(?: ?[a-z])?"
+SCOPE_PART = re.compile(
+    rf"({NUM}) kap\.?(?=[\s,]|$)|({NUM})(?:\s*[–-]\s*({NUM}))?\s*(?=,|\s+och\s|\s*§)"
+)
+HEADING_ITEM = re.compile(
+    r",?\s*rubr(?:iker|\.)\s+(?:närmast\s+)?(?:före|efter)\s+[^§;]*?§§?|,?\s*rubr\.[^,;]*"
+)
+OPS = {"upph": "upph", "ändr": "ändr", "ändring": "ändr", "ny": "ny", "nya": "ny"}
+
+
+def parse_scope(scope: str) -> list[ScopeItem]:
+    """The register's "Omfattning" line: which sections (or whole chapters) an act repealed,
+    changed or added. "upph. 4 kap., 1 kap. 3, 6 a §§; ändr. 5 kap. 16 a–18 §§; nya 9 a kap."
+    Headings ("rubr. närmast före 1 kap. 3 §") and renumberings are left out."""
+    items: list[ScopeItem] = []
+    for clause in scope.split(";"):
+        clause = clause.strip()
+        head = re.match(r"(upph|ändring|ändr|nya|ny)\.?\s+(.*)$", clause)
+        if head is None:
+            continue
+        # drop only the heading items ("rubr. närmast före 8 kap. 21 §"); what follows counts
+        op, rest = OPS[head.group(1)], HEADING_ITEM.sub(" ", head.group(2))
+        if "betecknas" in rest:
+            continue
+        chapter: str | None = None
+        for part in SCOPE_PART.finditer(rest):
+            if part.group(1):
+                chapter = _spaced(part.group(1))
+                after = rest[part.end() : part.end() + 16]
+                # "4 kap.," or "9 a kap." alone is the whole chapter; "5 kap. den nya 2 c §" not
+                if not re.match(r"\s*(?:(?:den|de) nya\s+)?\d", after):
+                    items.append(ScopeItem(op, chapter, None, None))
+            elif chapter is not None:
+                first = _spaced(part.group(2))
+                items.append(ScopeItem(op, chapter, first, _spaced(part.group(3) or part.group(2))))
+    return items
+
+
+def _spaced(number: str) -> str:
+    return re.sub(r"(\d)([a-z])", r"\1 \2", number)
+
+
+def section_order(number: str) -> tuple[int, str]:
+    found = re.match(r"(\d+) ?([a-z]?)", number)
+    assert found is not None
+    return int(found.group(1)), found.group(2)
+
+
+def scope_names(item: ScopeItem, chapter: str, number: str) -> bool:
+    """Whether this scope item covers that section (itself, a range, or its whole chapter)."""
+    if item.chapter != chapter:
+        return False
+    if item.first is None:
+        return True
+    assert item.last is not None
+    return section_order(item.first) <= section_order(number) <= section_order(item.last)
