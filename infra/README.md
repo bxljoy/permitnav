@@ -75,8 +75,9 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
   ingests what changed, dates
   undated wordings from the register, rebuilds older wordings from the acts, embeds what
   changed, then
-  checks retrieval on the live corpus (`deploy/refresh.sh`; `journalctl -u permitnav-refresh`;
-  results in the `permitnav-refresh` log, failures raise "PermitNav refresh failed"). What
+  checks retrieval on the live corpus and golden-set drift (`deploy/refresh.sh`; `journalctl -u
+  permitnav-refresh`; results in the `permitnav-refresh` log, failures raise "PermitNav refresh
+  failed", newly drifted golden items "PermitNav golden items need review"). What
   changed is in the `change_log` table:
   `sudo $C exec db psql -U permitnav -c "SELECT observed_at, kind, unit_id FROM change_log ORDER BY id DESC LIMIT 20"`.
   To run it now: `sudo systemctl start permitnav-refresh.service`.

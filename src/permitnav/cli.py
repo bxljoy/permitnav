@@ -681,6 +681,64 @@ def _ingest_lifos(conn) -> int:
     return status
 
 
+def cmd_golden_drift(args: argparse.Namespace) -> int:
+    """Golden items whose sources changed since their date (D17). Reports the items that need
+    review, and which of them are new since the last run (remembered in the raw volume), so
+    the nightly refresh alerts once per item, not every night."""
+    import json
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    from permitnav.corpus.drift import NEEDS_REVIEW, fresh_copies, golden_drift
+    from permitnav.evals.golden import load_golden
+
+    # the corpus dates pages in Swedish time; so does "today"
+    today = (
+        date.fromisoformat(args.today)
+        if args.today
+        else datetime.now(ZoneInfo("Europe/Stockholm")).date()
+    )
+    drift, items, raw_rows = [], [], {}
+    with db.connect() as conn:
+        for name in args.file:
+            path = Path(name)
+            file_items = load_golden(path)
+            items += file_items
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    row = json.loads(line)
+                    raw_rows[row["id"]] = row
+            drift += golden_drift(conn, file_items, today)
+    for d in drift:
+        print(f"  {d.item:<46} {d.kind:<14} {d.unit}  {d.detail}")
+    review = sorted({d.item for d in drift if d.kind in NEEDS_REVIEW})
+    upcoming = sorted({d.item for d in drift if d.kind == "upcoming"})
+    # Which items were already reported, per set of golden files: a run on another file must
+    # not make the nightly one report its items again.
+    state = _raw_dir() / "golden-drift.json"
+    key = ",".join(sorted(args.file))
+    saved = json.loads(state.read_text(encoding="utf-8")) if state.exists() else {}
+    saved = saved if isinstance(saved, dict) else {}
+    new = [i for i in review if i not in set(saved.get(key, []))]
+    if args.save and not args.today:
+        # only after the report went out (the refresh saves after logging it), so an alert
+        # that could not be sent is sent the next night
+        saved[key] = review
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps(saved, indent=2, sort_keys=True), encoding="utf-8")
+    print(
+        f"golden drift: {len(review)} items need review"
+        + (f" (new: {', '.join(new)})" if new else "")
+        + (f"; {len(upcoming)} with a dated change coming" if upcoming else "")
+    )
+    if args.draft:
+        rows = list(fresh_copies(items, raw_rows, drift, today))
+        with Path(args.draft).open("w", encoding="utf-8") as f:
+            f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+        print(f"  {len(rows)} fresh copies (review: draft) written to {args.draft}")
+    return 0
+
+
 def cmd_import_lifos_results(args: argparse.Namespace) -> int:
     """Read Lifos result pages a person saved from the browser (the search is closed to
     crawlers) into the position-paper review file. Nothing is fetched."""
@@ -1622,6 +1680,16 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("sfs", nargs="*", help="SFS numbers (default: all in scope)")
     ingest.add_argument("--source", default="all", choices=sources)
     ingest.set_defaults(run=cmd_ingest)
+    gd = sub.add_parser(
+        "golden-drift", help="golden items whose expected sources changed since their date"
+    )
+    gd.add_argument("--file", nargs="+", default=["evals/golden.dev.jsonl"])
+    gd.add_argument("--today", help="check as if today were this date (a what-if; not saved)")
+    gd.add_argument("--draft", help="write fresh copies dated today (D17) here, for review")
+    gd.add_argument(
+        "--save", action="store_true", help="remember these items as reported (after alerting)"
+    )
+    gd.set_defaults(run=cmd_golden_drift)
     il = sub.add_parser(
         "import-lifos-results",
         help="read saved Lifos result pages into the position-paper review file (no fetching)",

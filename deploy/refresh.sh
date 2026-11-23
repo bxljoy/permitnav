@@ -63,4 +63,26 @@ case "$eval_status" in
   3) report ERROR "refresh eval: retrieval fell below the gate on the live corpus: $result" ;;
   *) report ERROR "refresh eval failed to run (exit $eval_status)"; tail -20 "$log" ;;
 esac
+
+# Golden items whose sources changed since their date (D17): they need a person's review, which
+# is not a failure. Items newly drifted are a WARNING (its own alert, once per item).
+set +e
+"${C[@]}" run --rm -T api permitnav golden-drift > "$log" 2>&1
+drift_status=$?
+set -e
+drift=$({ grep -E '^golden drift:' "$log" || true; } | tail -1)
+if [ "$drift_status" -ne 0 ] || [ -z "$drift" ]; then
+  report ERROR "refresh drift check failed to run (exit $drift_status)"; tail -20 "$log"
+elif [[ "$drift" == *"(new:"* ]]; then
+  # remembered as reported only once the warning is logged, so a lost alert comes back
+  if gcloud logging write permitnav-refresh "refresh drift: $drift" --severity=WARNING --quiet; then
+    echo "refresh drift: $drift"
+    "${C[@]}" run --rm -T api permitnav golden-drift --save > /dev/null 2>&1 \
+      || report ERROR "refresh drift: could not remember the reported items"
+  else
+    echo "refresh drift: $drift (the warning could not be logged; it is sent again next run)"
+  fi
+else
+  report INFO "refresh drift: $drift"
+fi
 reported=1
