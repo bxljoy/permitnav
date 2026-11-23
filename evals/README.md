@@ -5,6 +5,7 @@ The questions PermitNav is measured against. The design behind the format is in 
 | File | What | Public? |
 |---|---|---|
 | `evals/golden.dev.jsonl` | Dev set, 60–80 items. Used for tuning. | Yes |
+| `evals/golden.interpretation.jsonl` | Agency-interpretation slice (phase 4): 4 scenarios × EN/SV whose answer is Migrationsverket's legal position (permanent residence: which incomes count, conduct; a late extension application; the employer in family maintenance), each expecting the paper section and the law it interprets. Needs the position papers, which the CI corpus snapshot does not have yet. | Yes |
 | `evals/golden.versions.jsonl` | Version-dependent slice (phase 4): 6 scenarios × EN/SV where the answer depends on which wording applies: transitional provisions (granted/registered dates) and historical `as_of` dates (2024). Needs the rebuilt history; in CI since `eval-corpus-2026-11-23`. | Yes |
 | `private/golden.holdout.jsonl` | Hold-out, 30–40 items. Run once per milestone, never tuned on. | **No**, never committed |
 | `private/questions-inbox.md` | Raw real questions, before sanitising. | **No**, never committed |
@@ -90,7 +91,7 @@ The citable units from D2. The validator checks these patterns.
 | Statute section with chapters | `sfs:<year>:<number>/<chapter>kap/<section>§` | `sfs:2005:716/5akap/1§` |
 | Statute section without chapters | `sfs:<year>:<number>/<section>§` | `sfs:2001:82/11§` |
 | Transitional provision | `sfs:<year>:<number>/övergång/<point>` | `sfs:2026:295/övergång/1` |
-| Position paper section | `rs:<RS number>/<section>` | `rs:RS/005/2022/3` |
+| Position paper section | `rs:<RS number>/<numbered section>` | `rs:RS/084/2021/3.1.1` |
 | MIG ruling | `mig:<year>:<number>` | `mig:2023:1` |
 | Migrationsverket page section | `web:<sv\|en>/<path>#<anchor>` | `web:sv/arbeta-i-sverige#krav` |
 
