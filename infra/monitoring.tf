@@ -113,6 +113,31 @@ resource "google_monitoring_alert_policy" "deploy_failed" {
   depends_on = [google_project_service.monitoring]
 }
 
+# --- Golden items whose sources changed (D17): a review, not a failure ------------------------
+
+resource "google_monitoring_alert_policy" "golden_drift" {
+  display_name = "PermitNav golden items need review"
+  combiner     = "OR"
+  conditions {
+    display_name = "permitnav-refresh reported newly drifted golden items"
+    condition_matched_log {
+      filter = "logName=\"projects/${var.project_id}/logs/permitnav-refresh\" AND severity=WARNING AND textPayload:\"refresh drift:\""
+    }
+  }
+  alert_strategy {
+    notification_rate_limit {
+      period = "3600s"
+    }
+    auto_close = "86400s"
+  }
+  notification_channels = [google_monitoring_notification_channel.email.id]
+  documentation {
+    content   = "Golden items' expected sources changed since the items were written (a new wording, a changed Migrationsverket page, or a corrected reading). The old items stay as historical tests; write fresh copies dated today: `permitnav golden-drift --draft drafts.jsonl` (locally, with the live data), review them, add them to the golden set. Each item alerts once."
+    mime_type = "text/markdown"
+  }
+  depends_on = [google_project_service.monitoring]
+}
+
 # --- Did the daily refresh fail? -------------------------------------------------------------
 
 resource "google_monitoring_alert_policy" "refresh_failed" {

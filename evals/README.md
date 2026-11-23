@@ -98,6 +98,23 @@ Chapter and section letters are written without spaces: "5 a kap. 3 b §" is `5a
 
 **Placeholder for pages not indexed yet:** `web:tbd/<slug>`, e.g. `web:tbd/work-permit-insurances`, marks a Migrationsverket page that answers the item but has no unit ID yet. Replace it with the real `web:` ID once the page is ingested (phase 1). Only `draft` items may contain placeholders.
 
+## Drift: when an item's sources change (D17)
+
+Items keep their `as_of`, so they never turn wrong by themselves; they can stop describing
+today's rules. `uv run permitnav golden-drift` lists items whose expected sources changed since
+their date (a newer wording in force, a changed Migrationsverket page, a corrected reading, a
+source gone; dated upcoming changes are listed for information). The nightly refresh runs it
+and alerts once per newly drifted item. To review:
+
+```
+uv run permitnav golden-drift --draft drafts.jsonl   # fresh copies dated today, review: draft
+```
+
+Check each copy's expected units and reference answer against today's sources, set
+`review: checked`, add it to the golden set (and re-record the queries file). Keep the old item:
+it tests its own date, and with its copy (`<id>-YYYYMMDD`) beside it, it is no longer followed
+for drift. `--today YYYY-MM-DD` shows what would drift on a later date.
+
 ## The retrieval eval in CI
 
 Every push and pull request runs the retrieval eval on the dev set **without any model or
