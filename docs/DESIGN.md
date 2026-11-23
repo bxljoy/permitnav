@@ -160,9 +160,9 @@ A claim that hasn't passed the verifier is never shown.
 | `family_members` | spouse, 1 child |
 | `as_of` | 2026-11-19 (D8) |
 
-- The agent fills it during intake. Intake asks only for fields the retrieved rules actually depend on, and at most 3 questions.
+- Intake fills it from what the user said. A missing field the rules depend on becomes a stated branch in the answer; the assistant asks at most one question, and only when the answer splits into more than two or three branches (revised 2026-11-23 from "at most 3 questions": see "Phase 5 plan").
 - The user sees it as a small editable panel.
-- It lives for the session only and is never persisted. Because the fields are fixed, the privacy page can say exactly what is held.
+- It lives on the client and is sent with each request: session only, never stored on the server. Because the fields are fixed, the privacy page can say exactly what is held.
 
 ### D15. Model choice
 
@@ -1065,4 +1065,20 @@ Build order (agreed 2026-11-23): 1. a daily re-crawl on the server with a "what 
 - **Why (b) changed nothing:** for the items that miss, the law search itself misses the law the paper interprets (the family-employer question retrieves 5 kap. 18 §, 9 kap. 17 §, 6 kap. 6 c § instead of 5 kap. 3 j §; the late-extension question 6 b kap. 7 §, 5 kap. 3 § instead of 5 kap. 18 §), the known phase 2 weakness for situational questions. The citations are right (RS/008/2026 2.3.3.1 cites 5 kap. 3 j §; RS/082/2021 2.3 cites 5 kap. 18 §). On these questions the papers are not the bottleneck; one-pass law retrieval is. That is phase 5's job: an agent that searches, judges the evidence and searches again (for instance a paper first, then the law it cites).
 - **Decision:** neither variant becomes the default (one more item, against dev R@10 0.67 → 0.63); both stay as options, like the reranker, for phase 5 to reuse.
 - **Found on the way:** recorded queries were refused whenever *any* retrieval option was added (the recording kept the whole config), which would have failed CI the next time an option appeared. Replay now compares only the settings that decide which texts are embedded or translated (the golden file, drafts, mode, translation settings, keyword weight); a text that was never recorded still fails the replay. The smoke command had its own copy of the check and failed on main after the merge (CI's PR checks don't run the smoke slice); it now uses the same comparison, checked with a real smoke run on the recorded queries.
+
+## Phase 5 plan (revised 2026-11-23)
+
+The roadmap's phase 5 was written before anything was measured. Five changes, each from a result:
+
+- **A fixed workflow with one flexible step, not a free agent loop.** The measured failure is specific: one search pass misses the right law section for situational questions (phase 2: recall about 0.43; the paper experiment: the family-employer question retrieves 5 kap. 18 § instead of 5 kap. 3 j §). So: search → sufficient? → at most two targeted extra searches → answer → verify. A free plan-and-act loop costs more and varies more, and judged runs already vary by about 3 answers in 48.
+- **Fewer tools, and the missing one.** `get_position_paper` and `get_ruling` become `get_unit`; `follow_citations` is new (a paper or page → the law it cites, and back: the hop the paper experiment showed is missing; the citations themselves are right); `what_changed` moves to phase 6.
+- **Intake extracts; at most one question.** Phase 2 (answer rule 5) and phase 4 slice 4 both measured that stating the branches beats asking. This narrows D14's "at most 3 questions" to one, asked only when the answer splits into more than two or three branches.
+- **Memory on the client.** The API is stateless; the client sends the "your situation" structure back with each request, so nothing is stored on the server (D14's "session only, never persisted", kept by construction).
+- **Verifier cheap-first.** Faithfulness is already 43–48 of 48, so the gain may be small: deterministic checks first (numbers, dates and sections in the answer appear in the cited source, in the wording valid on `as_of`), an LLM claim check only if they miss real errors.
+
+**What the eval lacks for an agent:** 4 follow-up items, no multi-turn items, 8 interpretation items. Before building: about 10 multi-turn items and more situational-law items, three runs per variant, a fresh holdout for the final number.
+
+**Budget:** at most about $0.01 and 20 s per question (plain RAG: $0.0012, 8 s). **Stop rule:** if the second search does not beat plain RAG on situational law retrieval, the rest is not built as an agent.
+
+**Build order:** 1. failure analysis by question type and the new eval items; 2. the second-search workflow with `follow_citations`; 3. intake and client-side memory; 4. the verifier; 5. the comparison table.
 
