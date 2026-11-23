@@ -218,9 +218,10 @@ Plan revised on 2026-11-23 from what phases 2–4 measured (reasons in `docs/DES
 2. **A fixed workflow with one flexible step,** not a free agent loop: search → is the evidence sufficient? → at most two targeted extra searches → answer → verify. The model chooses tools only in the extra-search step.
 3. **Tools,** all deterministic and all taking `as_of`: `search_rules(query, source_type, as_of)`, `get_section(law, chapter, section, as_of)`, `get_unit(id, as_of)` (a position paper section or a ruling), and `follow_citations(unit, as_of)` (from a paper or page to the law it cites, and back). `what_changed(topic, since)` moves to phase 6: it is a page, not something answers need.
 4. **Intake extracts, it does not interrogate:** the "your situation" structure (permit type, start date, application date, employer changes, family members, `as_of`) is filled from what the user said. The answer states the branches a missing fact creates; the assistant asks at most one question, and only when the answer splits into more than two or three branches (D14, D8).
-5. **Memory on the client:** the "your situation" structure, shown as an editable panel, is sent back with each request, so follow-ups work and the server stores nothing (D14).
+5. **Memory on the client:** the "your situation" structure, shown as an editable panel, and the last several turns of the conversation (not only the previous one, so "go back to my first question" and a third follow-up work) are sent back with each request; the server stores nothing (D14). Sources are searched fresh each turn, never carried over.
 6. **Verifier, cheap first:** deterministic checks that every number, date and section in the answer appears in the source it cites, in the wording that applies on `as_of`; flags when a web page and the law disagree (D6) and when a ruling interpreted an older wording (D7). An LLM claim check is added only if these miss real errors. A failed claim gets one retry, then is removed; if nothing is left, the answer says the sources don't settle it (D13). No router or separate researcher agent; add them only if the evals show a need.
 7. **Evaluate against plain RAG** (same prompt, D21) on the same sets, especially the multi-source, version-dependent, interpretation and multi-turn questions, with cost and latency, e.g. "the second search helped situational questions by X but cost 3× and added 4 s".
+8. **A coarse topic label in the traces** (e.g. extension, family, permanent residence, change of employer), logged with the answer kind and the sections retrieved and cited, never the text: it shows which topics fail most without storing what anyone asked.
 
 **Budget (an acceptance rule):** at most about $0.01 and 20 s per question (plain RAG: about $0.0012 and 8 s).
 
@@ -233,6 +234,9 @@ Plan revised on 2026-11-23 from what phases 2–4 measured (reasons in `docs/DES
 Effort: about 10–12 hours.
 
 1. **Front end: one small React chat UI** (no separate Streamlit prototype). Streaming answers, clickable citations that open the source text with its fetch date and in-force date, a "show retrieved chunks" debug panel, and the "what changed" log as its own page.
+   - **Visible progress** while an answer is prepared ("searching the law…", "checking the sources…"): answers take 8–20 s.
+   - **The conversation is saved in the browser only** (local storage), so it survives closing the tab on that device, with a clear "delete this conversation" button; the server still stores nothing.
+   - **Export:** copy or download an answer with its citations, the date it applies on and the date it was given.
 2. **Feedback → eval set, with consent.** The default is that nothing a user types is stored. Thumbs down opens a form that:
    - asks explicitly: "Save this question and answer to help improve the assistant?"
    - shows the exact text that will be saved and lets the user edit it first
