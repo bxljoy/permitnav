@@ -376,7 +376,8 @@ class Retriever:
         )
         if keyword is not None:
             keyword_ctes = sql.SQL(KEYWORD_CTES).format(  # pyright: ignore[reportArgumentType]
-                applies=sql.SQL(APPLIES_ON)  # pyright: ignore[reportArgumentType]
+                applies=sql.SQL(APPLIES_ON),  # pyright: ignore[reportArgumentType]
+                in_group=sql.SQL(IN_GROUP),  # pyright: ignore[reportArgumentType]
             )
             keyword_join = sql.SQL(
                 "JOIN queries kq ON kq.cfg = c.ts_config JOIN corpus co ON co.cfg = c.ts_config"
@@ -462,6 +463,8 @@ NO_LIVE_ENGLISH_TWIN = """NOT EXISTS (
 # indexed with. Document frequencies come from the GIN index;
 # length is the number of distinct lexemes. k1 = 1.2
 # (term-frequency saturation) and b = 0.75 (length normalisation), the usual defaults.
+IN_GROUP = """(%(types)s::text[] IS NULL
+  OR (u.source_type = ANY(%(types)s::text[])) <> %(exclude)s)"""
 KEYWORD_CTES = """
 terms AS (
   SELECT DISTINCT q.cfg, t.lexeme
@@ -469,17 +472,21 @@ terms AS (
          AS q(cfg, text),
        LATERAL unnest(to_tsvector(q.cfg, q.text)) AS t
 ),
+-- Collection statistics of the group being searched (its source types), not of every
+-- source: each group is ranked on its own, so adding one kind of source (e.g. position
+-- papers) must not shift how another is ranked.
 corpus AS MATERIALIZED (
   SELECT c.ts_config AS cfg, count(*) AS n, avg(length(c.tsv)) AS avglen
-  FROM chunk c JOIN unit_version v ON v.id = c.version_id
-  WHERE c.strategy = %(strategy)s AND {applies}
+  FROM chunk c JOIN unit_version v ON v.id = c.version_id JOIN unit u ON u.id = v.unit_id
+  WHERE c.strategy = %(strategy)s AND {applies} AND {in_group}
   GROUP BY c.ts_config
 ),
 df AS MATERIALIZED (
   SELECT t.cfg, t.lexeme,
          (SELECT count(*) FROM chunk c JOIN unit_version v ON v.id = c.version_id
+          JOIN unit u ON u.id = v.unit_id
           WHERE c.strategy = %(strategy)s AND c.ts_config = t.cfg
-            AND c.tsv @@ quote_literal(t.lexeme)::tsquery AND {applies}) AS df
+            AND c.tsv @@ quote_literal(t.lexeme)::tsquery AND {applies} AND {in_group}) AS df
   FROM terms t
 ),
 queries AS (
