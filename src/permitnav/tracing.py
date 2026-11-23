@@ -16,6 +16,8 @@ Exporters, from the environment: Langfuse when LANGFUSE_PUBLIC_KEY and LANGFUSE_
 are set (LANGFUSE_HOST defaults to the EU region), a JSON-lines file when PERMITNAV_TRACE_FILE
 is set, neither otherwise (spans are then never recorded, at almost no cost). The provider
 is installed once per process (OpenTelemetry allows one); `flush()` sends what is buffered.
+Only questions are traced: a sampler drops every other HTTP request (health checks, scanners),
+which FastAPI would otherwise trace (`keep_trace`).
 
 Plain OpenTelemetry, no vendor SDK: the backend is a configuration choice.
 """
@@ -25,7 +27,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -55,6 +57,47 @@ def set_content_mode(mode: str) -> None:
 _provider: Any = None
 
 
+def keep_trace(name: str, attributes: Mapping[str, Any] | None = None) -> bool:
+    """Whether a trace is worth recording, from its root span as it starts. FastAPI traces
+    every request once a tracer is installed: health checks (every minute, from the uptime
+    check, Docker and deploys) and internet scanners made ~97% of the traces and used half
+    the Langfuse plan's monthly units in a day. Kept: questions (`POST /ask`) and every trace
+    that does not start at an HTTP request (`answer`, `retrieve`, … from the CLI and evals).
+
+    FastAPI names the span only by its method ("POST") when it starts and adds the route
+    after routing, so the request is read from the start attributes, not the name."""
+    attributes = attributes or {}
+    method = attributes.get("http.request.method")
+    if method is None:
+        return True
+    return method == "POST" and attributes.get("url.path") == "/ask"
+
+
+def _questions_only():
+    from opentelemetry.sdk.trace.sampling import (
+        ALWAYS_OFF,
+        ALWAYS_ON,
+        Decision,
+        ParentBased,
+        Sampler,
+        SamplingResult,
+    )
+
+    class RootByName(Sampler):
+        def should_sample(self, parent_context, trace_id, name, kind=None, attributes=None,
+                          links=None, trace_state=None):  # fmt: skip
+            keep = keep_trace(name, attributes)
+            decision = Decision.RECORD_AND_SAMPLE if keep else Decision.DROP
+            return SamplingResult(decision, attributes if keep else None, trace_state)
+
+        def get_description(self) -> str:
+            return "RootByName(questions only)"
+
+    # a dropped root drops its children too (fastapi.endpoint, fastapi.serialization, …)
+    return ParentBased(root=RootByName(), remote_parent_sampled=ALWAYS_ON,
+                       remote_parent_not_sampled=ALWAYS_OFF)  # fmt: skip
+
+
 def configure(service: str, content: str = "metadata") -> bool:
     """Set the content mode and, the first time, install a tracer provider with the
     exporters the environment asks for. True when spans are being exported."""
@@ -70,7 +113,7 @@ def configure(service: str, content: str = "metadata") -> bool:
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
     resource = Resource.create({"service.name": service, "deployment.environment": _environment()})
-    provider = TracerProvider(resource=resource)
+    provider = TracerProvider(resource=resource, sampler=_questions_only())
     for exporter in exporters:
         provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)

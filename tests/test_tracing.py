@@ -159,3 +159,33 @@ def test_cli_commands_reset_to_metadata_after_an_eval(spans, monkeypatch) -> Non
     monkeypatch.setattr(cli, "cmd_eval_answers", lambda args: 0)
     cli.main(["eval-answers", "--file", "x.jsonl"])
     assert tracing.content_mode() == "metadata"
+
+
+def test_only_questions_and_non_http_work_are_traced() -> None:
+    from permitnav.tracing import keep_trace
+
+    def request(method: str, path: str) -> dict[str, str]:
+        return {"http.request.method": method, "url.path": path}
+
+    # FastAPI's span is named by the method alone when sampling happens
+    assert keep_trace("POST", request("POST", "/ask"))
+    assert keep_trace("answer") and keep_trace("retrieve", {})  # CLI, evals, refresh check
+    for method, path in [("GET", "/health"), ("HEAD", "/"), ("GET", "/wp-login.php"),
+                         ("POST", "/"), ("GET", "/ask"), ("POST", "/ask/x")]:  # fmt: skip
+        assert not keep_trace(method, request(method, path)), (method, path)
+
+
+def test_health_checks_leave_no_trace_and_questions_do(spans) -> None:
+    """FastAPI traces every request: health checks (every minute) and scanners used up the
+    Langfuse plan's monthly units in two days."""
+    from tests.test_api import TOKEN, client
+
+    api = client()
+    for _ in range(3):
+        assert api.get("/health").status_code == 200
+    assert api.get("/no-such-page").status_code == 404
+    assert spans.get_finished_spans() == ()
+    api.post("/ask", json={"question": "Vilken lön krävs?"},
+             headers={"Authorization": f"Bearer {TOKEN}"})  # fmt: skip
+    names = {s.name for s in spans.get_finished_spans()}
+    assert {"POST /ask", "ask", "fastapi.endpoint"} <= names, names  # the whole request trace
