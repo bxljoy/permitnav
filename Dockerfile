@@ -1,6 +1,6 @@
 # PermitNav API: the answering pipeline behind FastAPI, bge-m3 on the CPU (phase 3).
 # The model weights are not baked in: they download once into the /models volume.
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 COPY --from=ghcr.io/astral-sh/uv:0.13.9 /uv /uvx /bin/
 
