@@ -158,6 +158,7 @@ class Retriever:
         self._translator = translator
         self._reranker = reranker
         self._citations: dict[int, set[str]] = {}
+        self._vectors: dict[str, str] = {}  # query text -> vector, see _embed
         self.config = config or RetrievalConfig()
         if self.config.rerank and reranker is None:
             raise ValueError("rerank=True needs a reranker")
@@ -215,11 +216,64 @@ class Retriever:
             )
             return hits
 
+    # --- tools for a second search (phase 5) -------------------------------------------------
+
+    def search_types(
+        self, query: str, as_of: date, k: int, source_types: tuple[str, ...]
+    ) -> list[Hit]:
+        """A targeted search inside some source types (the `search_rules` tool): the same
+        hybrid ranking as one group of `search`, with the query a model wrote."""
+        with tracing.span(
+            "retrieve", "retriever", **{"permitnav.k": k, "permitnav.tool": "search_rules"}
+        ) as current:
+            tracing.text(current, input=query)
+            vector = self._embed(query)
+            swedish = query
+            if self._translator is not None and self._uses_translation() and not is_swedish(query):
+                swedish = self._translator.translate(query)
+            hits = self._ranking((swedish, query), vector, as_of, k, source_types, False, None)
+            hits = hits[:k]
+            tracing.set_attributes(
+                current,
+                **{"permitnav.hits": len(hits), "permitnav.units": [h.unit_id for h in hits]},
+            )
+            return hits
+
+    def rank_units(self, query: str, as_of: date, units: list[str], k: int) -> list[Hit]:
+        """The k of the given units whose wording on `as_of` is closest to the query in
+        meaning (`follow_citations` and `get_section`). Units with no wording then are left
+        out."""
+        if not units or k <= 0:
+            return []
+        return self._search(self._embed(query), as_of, k, None, units=list(units))[:k]
+
+    def section_headings(self, chapter_prefix: str, as_of: date) -> list[tuple[str, str]]:
+        """(unit id, heading) of the statute sections in force on `as_of` whose ids start
+        with `chapter_prefix` (e.g. "sfs:2005:716/5kap/"), for a table of contents."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT u.id, u.heading FROM unit u JOIN unit_version v ON v.unit_id = u.id"
+            " WHERE u.source_type = 'statute' AND u.id LIKE %s AND NOT v.withdrawn"
+            " AND (v.valid_from IS NULL OR v.valid_from <= %s)"
+            " AND (v.valid_to IS NULL OR v.valid_to > %s)",
+            (chapter_prefix + "%", as_of, as_of),
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def cited_sections(self, hit: Hit) -> set[str]:
+        """The statute sections a hit's wording cites."""
+        return self._cites(hit.version_id)
+
     def _embed(self, text: str) -> str:
+        if text in self._vectors:
+            return self._vectors[text]
         with tracing.span(
             "embed", "embedding", **{"gen_ai.request.model": self._embedder.model_id}
         ):
-            return to_pgvector(self._embedder.embed_query(text))
+            vector = to_pgvector(self._embedder.embed_query(text))
+        if len(self._vectors) >= 64:  # a few questions' worth: a second search reuses them
+            self._vectors.clear()
+        self._vectors[text] = vector
+        return vector
 
     def _search_all(self, query: str, as_of: date, k: int) -> list[Hit]:
         vector = self._embed(query)

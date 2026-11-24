@@ -20,6 +20,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from typing import TYPE_CHECKING
 
 import psycopg
 
@@ -30,6 +31,9 @@ from permitnav.parsing.references import named_units
 from permitnav.prompting import load_prompt
 from permitnav.retrieval.retriever import Hit, Retriever
 from permitnav.retrieval.translate import language_of
+
+if TYPE_CHECKING:
+    from permitnav.agent.second_search import SecondSearch, SecondSearcher
 
 KINDS = ("answered", "follow_up", "not_settled", "out_of_scope")
 MARKER = re.compile(r"\[(S\d+)\]")
@@ -86,6 +90,8 @@ class Answer:
     completion: Completion | None = None
     # Earlier calls for the same answer (a reply cut off or unreadable, then asked again).
     earlier: list[Completion] = field(default_factory=list)
+    # The second search's decision and additions (phase 5), when it ran.
+    search: SecondSearch | None = None
 
 
 @dataclass(frozen=True)
@@ -100,12 +106,18 @@ class AnswerConfig:
 
 class Answerer:
     def __init__(
-        self, conn: psycopg.Connection, retriever: Retriever, llm: LLM, config: AnswerConfig
+        self,
+        conn: psycopg.Connection,
+        retriever: Retriever,
+        llm: LLM,
+        config: AnswerConfig,
+        second_search: SecondSearcher | None = None,
     ) -> None:
         self._conn = conn
         self._retriever = retriever
         self._llm = llm
         self.config = config
+        self._second_search = second_search  # None: plain RAG, one search
         self._template = load_prompt()
 
     def answer(self, question: str, as_of: date | None = None) -> Answer:
@@ -139,6 +151,9 @@ class Answerer:
         hits = self._retriever.search(question, as_of=as_of, k=self.config.k)
         if not _relevant(question, hits, self.config.min_score):
             return Answer(kind="out_of_scope", text=NOTHING_RELEVANT)
+        search = None
+        if self._second_search is not None:
+            hits, search = self._second_search.expand(question, as_of, hits)
         context = build_context(self._conn, hits, as_of)
         # Told, not left to the model: with an English prompt and mixed sources it answered
         # more than half of the Swedish dev questions in English (phase 2). Only when the
@@ -193,6 +208,7 @@ class Answerer:
         if cut_off and answer.kind == "failed":
             answer.text = "The reply was too long and was cut off. Please ask a narrower question."
         answer.earlier = earlier
+        answer.search = search
         return answer
 
 
