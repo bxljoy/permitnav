@@ -45,6 +45,7 @@ class CalibrationItem:
     kind: str
     answer: str
     sources: list[dict]
+    turns: list[str] = field(default_factory=list)  # earlier questions in the conversation
 
 
 @dataclass(frozen=True)
@@ -159,9 +160,18 @@ def _sources(item: CalibrationItem) -> str:
     )
 
 
+def _conversation(item: CalibrationItem) -> str:
+    """The earlier questions of a multi-turn item: a follow-on question ("and for my
+    spouse?") cannot be judged without them."""
+    if not item.turns:
+        return ""
+    earlier = "\n".join(f"- {t}" for t in item.turns)
+    return f"# Earlier questions in the conversation (oldest first)\n{earlier}\n\n"
+
+
 def _correctness_material(item: CalibrationItem) -> str:
     return (
-        f"# Question\n{item.question}\n\n"
+        f"{_conversation(item)}# Question\n{item.question}\n\n"
         f"# Reference answer\n{item.reference_answer}\n\n"
         f"# The assistant's answer (kind: {item.kind})\n{item.answer}"
     )
@@ -169,7 +179,7 @@ def _correctness_material(item: CalibrationItem) -> str:
 
 def _faithfulness_material(item: CalibrationItem) -> str:
     return (
-        f"# Question\n{item.question}\n\n"
+        f"{_conversation(item)}# Question\n{item.question}\n\n"
         f"# The assistant's answer\n{item.answer}\n\n"
         f"# Sources the assistant was shown\n{_sources(item) or '(none)'}"
     )

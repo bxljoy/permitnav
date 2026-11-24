@@ -7,6 +7,8 @@ The questions PermitNav is measured against. The design behind the format is in 
 | `evals/golden.dev.jsonl` | Dev set, 60–80 items. Used for tuning. | Yes |
 | `evals/golden.interpretation.jsonl` | Agency-interpretation slice (phase 4): 4 scenarios × EN/SV whose answer is Migrationsverket's legal position (permanent residence: which incomes count, conduct; a late extension application; the employer in family maintenance), each expecting the paper section and the law it interprets. Needs the position papers, which the CI corpus snapshot does not have yet. | Yes |
 | `evals/golden.versions.jsonl` | Version-dependent slice (phase 4): 6 scenarios × EN/SV where the answer depends on which wording applies: transitional provisions (granted/registered dates) and historical `as_of` dates (2024). Needs the rebuilt history; in CI since `eval-corpus-2026-11-23`. | Yes |
+| `evals/golden.multiturn.jsonl` | Multi-turn slice (phase 5): 6 scenarios × EN/SV whose scored question only makes sense with an earlier turn ("and can my spouse work too?"). Plain RAG has no memory and asks the last question alone: the baseline for phase 5's memory. Drafts. | Yes |
+| `evals/golden.situational.jsonl` | Situational slice (phase 5): 4 scenarios × EN/SV that describe a situation without naming the rule, aimed at law sections no retrieved source cited in the failure analysis (ordinance rules for a worker's family, 5 kap. 7 §, 7 kap. 7 e §). Drafts. | Yes |
 | `private/golden.holdout.jsonl` | Hold-out, 30–40 items. Run once per milestone, never tuned on. | **No**, never committed |
 | `private/questions-inbox.md` | Raw real questions, before sanitising. | **No**, never committed |
 
@@ -64,6 +66,7 @@ One JSON object per line.
 | `expects_not_settled` | The sources don't settle it; the assistant must say so. |
 | `expects_out_of_scope` | Outside the service: asylum, protection or deportation, or any unrelated topic (driving licences, taxes, housing); the assistant must decline and point to Migrationsverket or the authority responsible (D18, prompt rule 7). At most one `expects_*` flag is true. |
 | `authority` | Optional. Which kind of source answers it (D22): `law` (a legal requirement), `agency` (Migrationsverket practice the law doesn't set) or `both`. Results are reported per kind. |
+| `turns` | Optional. Earlier user questions in the same conversation, oldest first; `question` is the turn that is scored. Without memory (plain RAG) only `question` is asked; the judge always sees the earlier turns. Checked for personal data like the question. Results get a `multi-turn` row. |
 | `review` | `draft` or `checked`. |
 | `notes` | Optional. Why the item exists, what makes it hard, what the source says. What people were told by Migrationsverket's phone service or emails goes here, never into `expected` (D23). |
 

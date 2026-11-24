@@ -1087,3 +1087,41 @@ The roadmap's phase 5 was written before anything was measured. Five changes, ea
 
 **Build order:** 1. failure analysis by question type and the new eval items; 2. the second-search workflow with `follow_citations`; 3. intake and client-side memory; 4. the verifier; 5. the comparison table, as Langfuse experiments with judge scores; then the reranker re-measured.
 
+### Step 1: where plain RAG fails (2026-11-24)
+
+One run each on the dev, version and interpretation sets (68 questions with sources; the 16 out-of-scope ones left out), at main `b4c9ea6`, local corpus equal to production (history, papers). Answers by Haiku 5.5, judged by Gemini 3.5 Flash-Lite (D19). Retrieval: R@5 dev 0.52, versions 0.67, interpretation 0.12. Answers: dev 40/48 correct, versions 12/12, interpretation 5/8.
+
+**Retrieval decides most of it.** When every expected source reached the answer's context, 35 of 42 answers were good (right kind and judged correct); when one was missing, 11 of 26.
+
+| Question type | n | good | all expected sources in context |
+|---|---|---|---|
+| identifier (names a section) | 8 | 7 | 8 |
+| lookup | 12 | 8 | 5 |
+| multi-source | 16 | 9 | 5 |
+| not-settled | 14 | 9 | 6 |
+| needs-follow-up | 4 | 2 | 4 |
+| version-dependent | 12 | 9 | 12 |
+| time-dependent | 2 | 2 | 2 |
+
+**Expected source groups in the top 8, by source kind:** law 0.58 (identifier 1.00, multi-source **0.21**), pages 0.35, papers 0.38.
+
+**The 22 answers that were not good fall in three groups:**
+- **Retrieval missed a source (10):** a law section, page or paper the answer needed never reached the context, and the answer was wrong, partly right or "not settled" (employer steps 101, union statement 102, new-or-extension 202, spouse income for PUT 401, late extension 803, family employer 804). This is what a second search can fix.
+- **Answered where the sources don't settle it (5):** right facts, wrong kind (205, 207, 301, 304 ×2); in 4 a page that shows the open point was missing. Partly retrieval, partly the answer kind.
+- **Cautious with every source present (6):** asked a follow-up or said "not settled" although the context held the answer: the 2024 version items 705 ×2 and 706 (the date is in the question; a known generic follow-up behaviour), working while pending 105 and 302-sv (follow-up kinds), plus one partly right (504-sv). Intake that fills in the dates, and the answer prompt, not search.
+
+**What a second search could reach.** Of 33 missed law groups, **14 are cited by a source already in the top 8** (a page, ruling, transitional provision or another section): one citation hop finds them. But following every citation adds a median of 9 new sections per question (p90 26, max 32), so the hop must be selective (the model picks, or code ranks the cited sections against the question). The other **19 are cited by nothing retrieved** (e.g. 5 kap. 7 § for permanent residence, 5 kap. 3 j § for the family employer, 7 kap. 3 § for job loss): they need a different query, the model's rewrite of the search.
+
+**Consequences for the build:** the second search targets the 10 retrieval failures (~15% of questions) and should be measured on them plus no loss elsewhere; `follow_citations` needs a selection step; the 6 over-cautious answers are for intake and the prompt, not the agent loop. One run only: differences of 1–2 answers are within run-to-run variation (phase 4 slice 5).
+
+**New eval items (drafts, for review):** `golden.multiturn.jsonl` (6 scenarios × EN/SV; new optional field `turns`, the earlier questions; plain RAG asks the last question alone, the judge sees all) and `golden.situational.jsonl` (4 × EN/SV, aimed at sections no retrieved source cited). Plain-RAG baseline, one run:
+
+| Slice | R@5 | R@10 | right kind | judged correct |
+|---|---|---|---|---|
+| multi-turn (12) | 0.04 | 0.15 | 5/12 (5 follow-up questions instead) | 7/12 |
+| situational (8) | 0.12 | 0.12 | 5/8 (3 "not settled") | 7/8 |
+
+Without memory the model mostly asks back, which is the right behaviour for a question it cannot place; memory should turn those into answers. Situational answers were often right from Migrationsverket's pages although the law section was missed: retrieval misses there cost citations more than correctness.
+
+**A golden-set error found while drafting.** A work-permit holder's family is granted permits under **4 kap. 4 a § utlänningsförordningen** (a maintenance requirement, its level in 4 c §, no housing-size requirement, the same validity as the worker's permit), not under 5 kap. 3 a § utlänningslagen, which is about families of people resident with permanent residence or a permit with well-founded prospects of long-term residence; 5 kap. 3 j § (housing of sufficient size and standard) applies to the latter. The draft housing item first expected 3 j §; the answer model, faithful to Migrationsverket's page, said a one-room flat is not in itself a problem, and was right. The checked dev item `family-spouse-004` expected 5 kap. 3 a § for a work-permit holder's spouse (its notes had asked to check the ordinance; never done): corrected to 4 kap. 4 a § utlänningsförordningen (dev R@5 unchanged, 0.52; neither section is retrieved for it, Migrationsverket's family pages are). `family-spouse-put-income-401` (5 kap. 3 m § fjärde stycket for such a spouse's permanent residence) was re-checked and holds: three years with any temporary permit, and the 3 a § conditions apply once the worker has permanent residence; its reference answer now gives Migrationsverket's order (the worker first) and the 3 j § requirement.
+

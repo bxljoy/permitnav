@@ -1577,6 +1577,7 @@ def cmd_judge_sample(args: argparse.Namespace) -> int:
                     language=item.original_language,
                     expected_kind=item.expected_kind,
                     reference_answer=item.reference_answer,
+                    turns=list(item.turns),
                     kind=answer.kind,
                     answer=answer.text,
                     sources=[
