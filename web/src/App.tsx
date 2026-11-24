@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, ask, checkToken, source, type AskResponse, type Citation, type Source } from "./api";
-import { asPlainText, blocks, KIND_LABEL, type Inline } from "./answer";
+import { asPlainText, blocks, KIND_LABEL, readableDate, type Inline } from "./answer";
 import { historyFor, loadToken, loadTurns, saveToken, saveTurns, type Turn } from "./conversation";
 
 const EXAMPLES = [
@@ -148,8 +148,9 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
         </div>
         <div className="bar-actions">
           {turns.length > 0 && !confirmDelete && (
-            <button type="button" className="quiet" onClick={() => setConfirmDelete(true)}>
-              Delete conversation
+            <button type="button" className="quiet" onClick={() => setConfirmDelete(true)} aria-label="Delete conversation">
+              <span className="wide-only">Delete conversation</span>
+              <span className="narrow-only">Delete</span>
             </button>
           )}
           {confirmDelete && (
@@ -194,7 +195,7 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
 
       <Composer disabled={!!pending} onSend={send} asOf={asOf} onAsOf={setAsOf} restore={draftBack} onRestored={() => setDraftBack(null)} />
 
-      {open && <SourcePanel token={token} citation={open.citation} asOf={open.asOf} onClose={() => setOpen(null)} onSignedOut={onSignedOut} />}
+      {open && <SourcePanel token={token} citation={open.citation} onClose={() => setOpen(null)} onSignedOut={onSignedOut} />}
     </div>
   );
 }
@@ -219,7 +220,7 @@ function Question({ text, asOf }: { text: string; asOf: string | null }) {
   return (
     <div className="question">
       <p>{text}</p>
-      {asOf && <span className="as-of">Rules as of {asOf}</span>}
+      {asOf && <span className="as-of">Rules as of {readableDate(asOf)}</span>}
     </div>
   );
 }
@@ -305,7 +306,7 @@ function Answer({ response, at, onOpen, active }: { response: AskResponse; at: s
         </details>
       )}
       <footer className="answer-foot">
-        <span>Rules as of {response.as_of}</span>
+        <span>Rules as of {readableDate(response.as_of)}</span>
         {response.credits.length > 0 && <span>{response.credits.join(" · ")}</span>}
         <button type="button" className="quiet small" onClick={copy}>
           {copied ? "Copied" : "Copy answer"}
@@ -333,12 +334,20 @@ function Pending({ started }: { started: number }) {
 
 function Composer({ disabled, onSend, asOf, onAsOf, restore, onRestored }: { disabled: boolean; onSend: (q: string) => void; asOf: string; onAsOf: (d: string) => void; restore: string | null; onRestored: () => void }) {
   const [text, setText] = useState("");
+  const box = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (restore !== null) {
       setText(restore);
       onRestored();
     }
   }, [restore, onRestored]);
+  useEffect(() => {
+    // grow with the text, up to a third of the screen; then scroll inside
+    const el = box.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, window.innerHeight * 0.33)}px`;
+  }, [text]);
   const tooLong = text.length > 2000;
 
   function submit(event?: React.FormEvent) {
@@ -351,37 +360,100 @@ function Composer({ disabled, onSend, asOf, onAsOf, restore, onRestored }: { dis
 
   return (
     <form className="composer" onSubmit={submit}>
-      <textarea
-        id="question"
-        aria-label="Your question"
-        rows={2}
-        placeholder="Ask a question, or a follow-on to the last answer…"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          // Not while an input method is composing (Chinese, Japanese, Korean…): that Enter commits text.
-          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-      />
-      <div className="composer-row">
-        <label className="as-of-field" htmlFor="as-of">
-          Rules as of
-          <input id="as-of" type="date" value={asOf} onChange={(e) => onAsOf(e.target.value)} />
-          {!asOf && <span className="muted">today</span>}
-        </label>
-        {tooLong && <span className="error">{text.length} / 2,000 characters</span>}
-        <button type="submit" className="primary" disabled={disabled || !text.trim() || tooLong}>
-          Ask
-        </button>
+      <div className="composer-box">
+        <textarea
+          ref={box}
+          id="question"
+          aria-label="Your question"
+          rows={1}
+          placeholder="Ask a question, or follow up…"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            // Not while an input method is composing (Chinese, Japanese, Korean…): that Enter commits text.
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+              e.preventDefault();
+              submit();
+            }
+          }}
+        />
+        <div className="composer-row">
+          <DateChip asOf={asOf} onAsOf={onAsOf} />
+          {tooLong && <span className="error small">{text.length.toLocaleString("en")} / 2,000</span>}
+          <button type="submit" className="send" disabled={disabled || !text.trim() || tooLong} aria-label="Ask" title="Ask (Enter)">
+            <svg viewBox="0 0 24 24" aria-hidden="true" width="18" height="18">
+              <path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
       </div>
+      <p className="composer-hint">Enter to ask · Shift+Enter for a new line</p>
     </form>
   );
 }
 
-function SourcePanel({ token, citation, asOf, onClose, onSignedOut }: { token: string; citation: Citation; asOf: string; onClose: () => void; onSignedOut: (m: string) => void }) {
+/** Today in the person's own time zone, as the date input writes it (YYYY-MM-DD). */
+function today(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** "Rules as of": today unless the person picks a date; a set date stays visible until cleared. */
+function DateChip({ asOf, onAsOf }: { asOf: string; onAsOf: (d: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (e: MouseEvent) => {
+      if (root.current && !root.current.contains(e.target as Node)) setOpen(false);
+    };
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+
+  return (
+    <div className="date-chip-wrap" ref={root}>
+      <button type="button" className={asOf ? "date-chip set" : "date-chip"} aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen((o) => !o)}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" width="15" height="15">
+          <rect x="3.5" y="5" width="17" height="15" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+          <path d="M3.5 10h17M8 3v4M16 3v4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+        Rules as of {asOf ? readableDate(asOf) : "today"}
+      </button>
+      {asOf && (
+        <button type="button" className="date-clear" aria-label="Back to today's rules" title="Back to today" onClick={() => onAsOf("")}>
+          ×
+        </button>
+      )}
+      {open && (
+        <div className="date-pop" role="dialog" aria-label="Rules as of">
+          <p>Answers use the law and Migrationsverket's pages as they applied on this date. Leave it on today unless your case depends on an earlier or a coming date, for example when your permit was granted.</p>
+          <label htmlFor="as-of">Date</label>
+          <input id="as-of" type="date" value={asOf || today()} min="2023-01-01" onChange={(e) => onAsOf(e.target.value === today() ? "" : e.target.value)} />
+          <div className="date-pop-actions">
+            {asOf && (
+              <button type="button" className="quiet" onClick={() => { onAsOf(""); setOpen(false); }}>
+                Back to today
+              </button>
+            )}
+            <button type="button" className="primary small" onClick={() => setOpen(false)}>
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SourcePanel({ token, citation, onClose, onSignedOut }: { token: string; citation: Citation; onClose: () => void; onSignedOut: (m: string) => void }) {
   const [full, setFull] = useState<Source | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -426,7 +498,7 @@ function SourcePanel({ token, citation, asOf, onClose, onSignedOut }: { token: s
           {citation.translation && <span className="translation">Unofficial translation: {citation.translation}</span>}
         </blockquote>
       )}
-      <h3>Full text of the cited wording (rules as of {asOf})</h3>
+      <h3>Full text of the cited wording</h3>
       {error && <p className="error">{error}</p>}
       {!full && !error && <p className="muted">Loading…</p>}
       {full && <div className="full-text" lang={full.unit_id.startsWith("web:en") ? "en" : "sv"}>{full.text}</div>}

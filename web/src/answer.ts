@@ -90,3 +90,11 @@ export function asPlainText(response: AskResponse, answeredAt: string): string {
   lines.push(response.notice);
   return lines.join("\n");
 }
+
+/** "2026-05-01" -> "1 May 2026": how people read a date; the ISO form stays in the API. */
+export function readableDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })
+    .format(new Date(Date.UTC(y, m - 1, d)));
+}
