@@ -862,3 +862,39 @@ def test_the_behaviour_eval_counts_answers_in_the_questions_language() -> None:
         ),
     ]
     assert language_matches(results) == (3, 5)
+
+
+@pytest.mark.db
+def test_a_second_search_adds_its_sources_for_the_answer_and_its_cost_is_counted(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    from permitnav.agent.second_search import SecondSearcher
+    from permitnav.evals.answers import AnswerResult
+    from permitnav.llm.port import Completion
+    from tests.test_retriever import item
+
+    class Costed:
+        """The evidence check asks for 6 kap. 4 §; the answer cites the first source."""
+
+        def __init__(self) -> None:
+            self.requests: list = []
+
+        def complete(self, request):
+            self.requests.append(request)
+            check = request.system.startswith("You check whether")
+            plan = {"enough": False, "missing": "x", "steps": [
+                {"tool": "get_section", "statute": "utlänningslagen", "chapter": "6",
+                 "section": "4"}]}  # fmt: skip
+            text = json.dumps(plan if check else {"kind": "answered", "answer": "Svar [S1]."})
+            return Completion(text=text, model=request.model, cost_usd=0.001)
+
+    llm = Costed()
+    second = SecondSearcher(stored, llm, model="check-m")
+    answerer = Answerer(conn, stored, llm, AnswerConfig(model="m", k=1), second)
+    answer = answerer.answer("lönen medianlönen procent lönekravet", as_of=date(2026, 11, 20))
+    check, generate = llm.requests
+    assert check.model == "check-m" and "# Table of contents" in check.system
+    assert answer.search is not None and answer.search.added == ["sfs:2005:716/6kap/4§"]
+    (added,) = [src for src in answer.sources if src.unit_id == "sfs:2005:716/6kap/4§"]
+    assert added.text in generate.system  # the added section reached the answer model
+    assert AnswerResult(item("a", "q", []), answer).cost_usd == pytest.approx(0.002)

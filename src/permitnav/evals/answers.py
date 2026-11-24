@@ -35,7 +35,9 @@ class AnswerResult:
     def cost_usd(self) -> float | None:
         """All model calls for the answer, retries included. None when the provider did not
         report a cost; 0 when no model was called."""
+        search = self.answer.search
         calls = [
+            *([search.completion] if search and search.completion else []),
             *self.answer.earlier,
             *([self.answer.completion] if self.answer.completion else []),
         ]

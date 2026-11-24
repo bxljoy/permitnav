@@ -1246,6 +1246,16 @@ KIND_LABELS = {
 }
 
 
+def _second_searcher(args: argparse.Namespace, retriever, llm, model: str):
+    """Phase 5's second search when asked for (`--second-search`): the evidence check runs
+    on `--check-model`, else the answer model."""
+    if not getattr(args, "second_search", False):
+        return None
+    from permitnav.agent.second_search import SecondSearcher
+
+    return SecondSearcher(retriever, llm, getattr(args, "check_model", None) or model)
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     from datetime import date
 
@@ -1272,7 +1282,9 @@ def cmd_ask(args: argparse.Namespace) -> int:
             translator = _translator(config.translate)
             retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
             answer_config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR, k=args.k)
-            answerer = Answerer(conn, retriever, llm, answer_config)
+            answerer = Answerer(
+                conn, retriever, llm, answer_config, _second_searcher(args, retriever, llm, model)
+            )
             answer = answerer.answer(args.question, as_of=as_of)
     except LLMError as error:
         print(f"model call failed: {error}")
@@ -1365,7 +1377,11 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
     with db.connect() as conn:
         retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
         answerer = Answerer(
-            conn, retriever, llm, AnswerConfig(model=model, min_score=floor, k=args.k)
+            conn,
+            retriever,
+            llm,
+            AnswerConfig(model=model, min_score=floor, k=args.k),
+            _second_searcher(args, retriever, llm, model),
         )
         results = run_answers(
             items,
@@ -1387,6 +1403,10 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
 
     label = "DEVELOPMENT RUN, includes drafts, not reportable" if args.include_drafts else "checked"
     print(f"\nBehaviour eval: {args.file}, model={model}, floor={floor}, k={args.k} ({label})")
+    second = "second search (evidence check, at most 2 steps)"
+    if args.second_search:
+        second += f", check model {args.check_model or model}"
+    print(f"workflow: {second if args.second_search else 'plain RAG (one search)'}")
     effort = f" (reasoning effort {judge_effort})" if judge_effort else ""
     _print_provenance(config, model, f"{judge_model}{effort}" if judge_model else None)
     print(f"{'expected kind':<14} {'n':>3} {'right':>5}  given instead")
@@ -1457,6 +1477,20 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
                         "text": r.answer.text,
                         "sources": [s.unit_id for s in r.answer.sources],
                         "cost_usd": r.cost_usd,
+                        **(
+                            {
+                                "second_search": {
+                                    "enough": r.answer.search.enough,
+                                    "missing": r.answer.search.missing,
+                                    "steps": [
+                                        {"tool": s.tool, **s.args} for s in r.answer.search.steps
+                                    ],
+                                    "added": r.answer.search.added,
+                                }
+                            }
+                            if r.answer.search
+                            else {}
+                        ),
                         **(
                             {
                                 "judge": {
@@ -1739,6 +1773,15 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument("question")
     _add_retrieval_options(ask)
     ask.add_argument("--k", type=int, default=AnswerConfig.k, help="sources given to the model")
+    ask.add_argument(
+        "--check-model",
+        help="model for the second search's evidence check (default: the answer model)",
+    )
+    ask.add_argument(
+        "--second-search",
+        action="store_true",
+        help="phase 5: check the evidence and search again (at most 2 steps) when it is not enough",
+    )
     ask.add_argument("--as-of", help="date the answer should apply on (YYYY-MM-DD); default today")
     ask.add_argument(
         "--show-sources", action="store_true", help="list everything shown to the model"
@@ -1782,6 +1825,15 @@ def main(argv: list[str] | None = None) -> int:
     ea.add_argument("--file", default="evals/golden.dev.jsonl")
     _add_retrieval_options(ea)
     ea.add_argument("--k", type=int, default=AnswerConfig.k, help="sources given to the model")
+    ea.add_argument(
+        "--check-model",
+        help="model for the second search's evidence check (default: the answer model)",
+    )
+    ea.add_argument(
+        "--second-search",
+        action="store_true",
+        help="phase 5: check the evidence and search again (at most 2 steps) when it is not enough",
+    )
     ea.add_argument("--include-drafts", action="store_true", help="development run; not reportable")
     ea.add_argument(
         "--kind", nargs="+", choices=["answered", "follow_up", "not_settled", "out_of_scope"]

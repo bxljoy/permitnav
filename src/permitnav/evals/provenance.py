@@ -14,7 +14,13 @@ from pathlib import Path
 from permitnav.prompting import load_prompt
 from permitnav.retrieval.retriever import RetrievalConfig
 
-PROMPTS = ("answer.md", "translate.md", "judge_correctness.md", "judge_faithfulness.md")
+PROMPTS = (
+    "answer.md",
+    "translate.md",
+    "judge_correctness.md",
+    "judge_faithfulness.md",
+    "evidence_check.md",
+)
 REPO = Path(__file__).resolve().parents[3]
 
 
