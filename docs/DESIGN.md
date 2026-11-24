@@ -1196,3 +1196,20 @@ A third memory run after the fixes: right kind 11/12, judged correct 8 (within t
 In the same pool the descriptions find the hidden sections (004-sv: 4 kap. 4 a § at rank 3) but make every section sound like an everyday answer — short plain text scores higher against any question than legal text — so general and procedural sections (utlänningsförordningen 3 a kap. 5 §, 5 kap. 1–3 a §; utlänningslagen 14 kap. 3 a §) pushed precise ones out of dev's top 5 (8 items lost, 3 gained), below the CI gate. As a separate fused ranking, dev is safe, but a section found only by its description never gets enough score to reach the top 5, so the situational gain disappears.
 
 **Decision:** off by default (`description_weight = 0`; `--description-weight` to re-measure). The diagnosis stands — law that names its subject only by section number is invisible to embeddings — but making it visible does not tell the system which visible rule to prefer: the same rule-choice problem as the second search, one step earlier. Descriptions are not generated in production. They may still serve the verifier (checking whether a cited rule concerns the person's situation).
+
+### Step 4: a verifier, probed (2026-11-24) — not built
+
+**Question:** can a model, shown the question, the answer and the cited sources exactly as the answer model saw them, tell when a cited rule does not apply to the person's situation or does not say what the answer attributes to it? Probed on 22 answers (memory on; answered, judged and verified in one process so all three see the same sources): 7 judged not good, 15 good. Prompt: check each cited source's own scope (whom and which case it covers) and that it states what is attributed to it; flag only what the sources themselves show.
+
+| Verifier model | Flags on bad answers (want 7) | Flags on good answers (want 0 of 15) | Cost for 22 |
+|---|---|---|---|
+| Haiku 5.5 | 2 | 6 | $0.016 |
+| Sonnet 5.5 | 2 | 9 | $0.23 |
+
+A first round that rebuilt the sources from the database flagged 11 and 13 of 16 good answers: the older wordings and the dates the answer model sees were missing, so a verifier must get exactly the answer's context.
+
+**Why not build it:** the bad answers in this run mostly did not cite a wrong rule; they declined ("not settled") or asked back where the sources answered (804, 953, 954, 906-en, 901-en) — a claim checker cannot fix an answer that makes too few claims. The family questions that cited a neighbouring rule earlier (004, 951, 901-sv) were correct this time (memory, and run-to-run variation). As a gate, a verifier that flags 40–60% of good answers would damage more answers than it fixes. Some of its flags are real mis-citations the judge tolerates (a statement cited to the wrong source in 701, a ruling summarised too loosely in 902), so it may serve later as an offline citation check in evals.
+
+### Phase 5 outcome (2026-11-24)
+
+Built and on: intake and memory for follow-on questions (API `history`, `understood_as`, `situation`). Built, measured and off by default, each re-measurable with one option: the second search (`--second-search`, `--check-model`), plain-language law descriptions (`describe`, `--description-weight`). Probed and not built: the verifier. Measured against plain RAG: memory raised follow-on questions from about half to about three quarters with the right kind of answer; nothing raised judged correctness on single questions. The remaining failures are (1) choosing the right rule among similar ones and (2) the answer kind — declining or asking back when the sources answer. (2) is an answer-prompt calibration problem best tuned on real questions (phase 6 feedback) rather than on this eval set. The agent framework (LangGraph) was not needed: the workflow that stayed on is fixed code (intake → search → answer).

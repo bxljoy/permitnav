@@ -37,7 +37,10 @@ This real answer also shows the main open problem: the governing law section (7 
 
 ```mermaid
 flowchart LR
-    Q[Question + as-of date] --> L{Language}
+    H[Earlier questions<br/>kept by the client] -.-> IN[Intake: rewrite a follow-on<br/>into a complete question]
+    Q0[Question + as-of date] --> IN
+    IN --> Q[Complete question]
+    Q --> L{Language}
     L -->|English| T[Translate to Swedish<br/>for keyword search]
     L --> V[Vector search<br/>bge-m3]
     T --> K[BM25 keyword search<br/>Postgres full text]
@@ -51,9 +54,10 @@ flowchart LR
     A --> R[Answered / follow-up /<br/>not settled / out of scope<br/>with checked citations]
 ```
 
-- **Sources:** utlänningslagen and utlänningsförordningen from the Riksdag's open API (one unit per section, with every wording dated by when it applies), about 230 Migrationsverket pages in Swedish and English (one unit per heading section, linked as translations), and 97 in-scope Migration Court of Appeal rulings from the courts' CC0 API.
+- **Sources:** utlänningslagen and utlänningsförordningen from the Riksdag's open API (one unit per section, with every wording dated by when it applies), about 230 Migrationsverket pages in Swedish and English (one unit per heading section, linked as translations), 97 in-scope Migration Court of Appeal rulings from the courts' CC0 API, and 15 of Migrationsverket's legal position papers.
 - **Time:** every question has an as-of date; only wordings that apply on that date are searched, and transitional provisions are added whenever a section they concern is retrieved.
 - **Hybrid retrieval:** vector search and BM25, fused with Reciprocal Rank Fusion, with English questions translated for keyword search (Swedish statute text does not match English words). Law and guidance are interleaved so plain-language pages cannot crowd out the law.
+- **Conversations:** a follow-on ("and can my spouse work too?") arrives with the earlier questions, which the client keeps; one cheap model call rewrites it into a complete question in the same language before searching, and the response shows how it was understood. The server stores nothing; a single question makes no extra call.
 - **Answering:** the model answers only from numbered sources, separates legal requirements from agency practice, asks one follow-up question when the answer depends on an unknown permit, says when the rules leave something to the case officer, and declines out-of-scope topics. Citations to sources it was not given are removed; quotes must be exact.
 
 ## Results
@@ -71,6 +75,20 @@ Measured on a reviewed golden set (64 development questions in English and Swedi
 - **The gap is reported, not hidden:** the development numbers were tuned on; the first hold-out showed 20 points less on situational questions, and the diagnosis (law sections missed when a question describes a situation in everyday words) is in [`docs/DESIGN.md`](docs/DESIGN.md), together with the fixes that did not work (a reranker, statute-style query rewriting, a looser "not settled" rule).
 - **The judge is evaluated too:** an LLM judge scores correctness against reference answers and faithfulness against the sources in separate calls, calibrated against 30 hand labels and 12 planted errors before use.
 - **Cost and latency:** about **$0.0012** and **8 seconds** per question with Claude Haiku 5.5, measured from traces.
+
+### The agentic layer (phase 5), measured before it was built
+
+Each step was measured against plain RAG on the same questions, answer model and judge (88 questions with sources across five golden sets; follow-on questions on 12 multi-turn items), with a stop rule: no step stays on unless answers get better.
+
+| Variant | What changed | Answers | Cost / latency per question | Decision |
+|---|---|---|---|---|
+| Plain RAG | one search, one answer | 71 of 88 judged correct | $0.0019 / 7.7 s | the default |
+| + memory (intake rewrite) | follow-ons made self-contained | multi-turn: right kind 5–6 → 8–11 of 12, needed sources found 2 → 10 of 30 | +$0.0004 / ~+3 s, follow-ons only | **on** |
+| + second search (agent loop) | a model checks the evidence and searches again (≤ 2 steps, 3 tools) | law found 60% → 76%, judged correct 71 → 70 (66 with Sonnet checking) | $0.0031 / 10.6 s | off (option) |
+| + law descriptions | plain-language descriptions make number-only law findable | situational recall 0.12 → 0.25, but dev 0.52 → 0.47 | $0.39 once | off (option) |
+| + verifier (probe) | a model checks cited rules before showing the answer | catches 2 of 7 bad answers, flags 6 of 15 good ones | — | not built |
+
+What the negative results share: the system can be made to find more law, but choosing the right rule among similar ones (the law's general family rules vs. the ordinance's rule for a work-permit holder's family) is the bottleneck, and neither more search nor a checking model fixed it. Details and numbers in [`docs/DESIGN.md`](docs/DESIGN.md) ("Phase 5 plan").
 
 ## Engineering
 

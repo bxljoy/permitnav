@@ -78,7 +78,7 @@ Details and sources for all of the above: `docs/research/source-facts.md` (check
 ## Stack
 
 - **Python + FastAPI**, **PostgreSQL with pgvector** for vectors and full-text search, **React** front end, **Docker Compose** for local and production.
-- **LangGraph** for the agent layer (phase 5). Phases 1–2 use no framework on purpose.
+- **LangGraph** for the agent layer (phase 5) — planned; not used, because what passed the measurements is a fixed sequence (intake → search → answer) that plain code expresses. Phases 1–2 use no framework on purpose.
 - **OpenTelemetry** for tracing, sent to **Langfuse Cloud (EU region)**. Nothing extra to host.
 - **MLflow** with a local file store for experiment tracking: every eval run and every trained model. It is a development tool and is not deployed.
 - **Prompts live in git**, versioned with the code. One source of truth; MLflow runs record the commit.
@@ -231,7 +231,9 @@ Plan revised on 2026-11-23 from what phases 2–4 measured (reasons in `docs/DES
 
 **Outcome of steps 1–2 (2026-11-24):** the second search was built and measured (`--second-search`, off by default). It raised the share of needed law sections reaching the answer from 60% to 76%, but answers stayed flat (70 vs 71 of 88 judged correct), also with Sonnet 5.5 as the check model (66, at $0.016 per question): it adds neighbouring rules that look right and are not. The agent loop is therefore not built further; phase 5 continues with intake and memory (step 4–5) and the verifier (step 6), which do not depend on searching better. Details in `docs/DESIGN.md`, "Step 2". Intake and memory (step 3) are live: follow-on questions go from about half to three quarters with the right kind of answer. Plain-language descriptions of law sections (an experiment) found the hidden rules but diluted the ranking; off by default ("Experiment: plain-language descriptions").
 
-✅ Done when: the results table has a "plain RAG vs second search" row (measured: no gain), rows for memory on the multi-turn slice and for the verifier, all within the budget, and the workflow is drawn in the README.
+**Phase 5 done (2026-11-24).** The verifier was probed rather than built: on the exact context it caught 2 of 7 bad answers and flagged 6–9 of 15 good ones, and the bad answers mostly declined rather than citing a wrong rule ("Step 4"). What stayed on is fixed code — intake → search → answer — so LangGraph was not needed. Open for phase 6: the answer kind (declining or asking back when the sources answer), tuned on real questions; rule choice among similar provisions. Summary in `docs/DESIGN.md`, "Phase 5 outcome"; table in the README.
+
+✅ Done when: the results table has a "plain RAG vs second search" row (measured: no gain), rows for memory on the multi-turn slice and for the verifier, all within the budget, and the workflow is drawn in the README. **Met:** README "The agentic layer (phase 5)"; every variant within $0.01 and 20 s except the Sonnet-checked second search ($0.016), which is off.
 
 ## Phase 6: Front end, feedback loop, privacy and safety
 
