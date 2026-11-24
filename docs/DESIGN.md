@@ -1253,3 +1253,19 @@ The first use on production showed the "Rules as of" control as a bare browser d
 - **Reading:** a slightly narrower column (720 px) and more space between paragraphs.
 
 The edges that looked cut off in the first screenshots were the screenshot's crop: the page fits the window exactly at that width.
+
+### Slice 2: progress as the answer is prepared (2026-11-24)
+
+**What:** `POST /ask/stream` returns the same answer as `/ask` as server-sent events: a `stage` event as each step starts — `understanding` (only with earlier questions), `searching`, `checking` (only with the second search), `writing` — then one `answer` event (the AskResponse) or one `error` event with the status and message `/ask` would have returned (no provider text). The answerer reports stages through an optional `progress` callback; `/ask` is unchanged for the CLI, evals and the smoke slice. The UI shows the steps with a check mark per finished step, a spinner on the current one and the seconds elapsed; deleting the conversation cancels the request.
+
+**Stages, not partial text:** the answer model replies in JSON (kind, answer, quotes), and citations and quotes are checked only once the reply is complete; streaming text would show unchecked citations. Searching takes a few seconds and writing most of the rest, so the steps show real progress.
+
+**Production details:**
+- The answer runs in anyio's bounded worker threads (as `/ask`'s do) and sends its stages through a memory stream; the request's OpenTelemetry context is attached in the worker, so the streamed question is one trace (`POST` root → `ask` → `answer` …), and the sampler keeps `/ask/stream` as it keeps `/ask`.
+- **A client that leaves stops the answer:** the stream is cancelled, which closes the memory stream, so the worker's next stage report fails and it stops before the next model call (a watcher also asks the connection a few times a second, for servers that notice a disconnect only when a write fails). Tested against a real uvicorn server: the test client never reports disconnects.
+- The stream is sent with `Cache-Control: no-cache, no-transform` (and `X-Accel-Buffering: no`): proxies must pass events on as they come rather than compress or buffer them; checked on production with a timed request.
+- The browser reads the stream with `fetch` and parses the events itself: `EventSource` can neither POST nor send the access token.
+
+**Code review (high), all fixed:** each stream had started its own unbounded thread (now anyio's bounded pool, and no second thread blocked on a queue); a client that left kept the answer running and paying for model calls (now stopped at the next stage); `progress` was stored on the answerer instance, so overlapping calls could cross (now passed through the call); the page jumped to the bottom on every stage; the stream client mapped 404 and error events coarsely and did not release the connection after the answer; the event parser did not accept CRLF or `data:` without a space; `Content-Encoding: identity` is reserved by RFC 9110 (replaced by `no-transform`); the unused non-streaming client call was removed; screen readers heard the seconds counter every second (now only the current step is announced).
+
+Tests: stage order in the answerer (with and without history), the event stream (stages, then the answer; an error as an event without provider text; 401 and 422 before streaming; one trace), and the browser-side parser on a stream split mid-event. Checked in a browser on a live follow-on.

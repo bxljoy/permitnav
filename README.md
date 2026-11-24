@@ -141,7 +141,7 @@ curl -X POST localhost:8000/ask \
   -d '{"question": "What salary do I need for a Swedish work permit?"}'
 ```
 
-`POST /ask` takes `{"question": …, "as_of": "YYYY-MM-DD", "history": [earlier questions]}` (the date defaults to today; `history` is optional) and returns the answer kind, text, citations with dates and links, source credits, the AI notice and, for a follow-on, `understood_as` and `situation`; a failed model call or an unreadable reply is a 502. `POST /source` with `{"version_id": …}` (each citation carries its `version_id`) returns the exact wording an answer cited, older wordings included; it is a POST so which sources someone opens never appears in a URL or an access log. `GET /health` checks the database. Everything except `/health` needs the `API_TOKEN` from `.env`.
+`POST /ask` takes `{"question": …, "as_of": "YYYY-MM-DD", "history": [earlier questions]}` (the date defaults to today; `history` is optional) and returns the answer kind, text, citations with dates and links, source credits, the AI notice and, for a follow-on, `understood_as` and `situation`; a failed model call or an unreadable reply is a 502. `POST /ask/stream` takes the same body and sends server-sent events: a `stage` event as each step starts (`understanding`, `searching`, `checking`, `writing`), then one `answer` (the same JSON as `/ask`) or one `error`. `POST /source` with `{"version_id": …}` (each citation carries its `version_id`) returns the exact wording an answer cited, older wordings included; it is a POST so which sources someone opens never appears in a URL or an access log. `GET /health` checks the database. Everything except `/health` needs the `API_TOKEN` from `.env`.
 
 ### Run the chat UI
 

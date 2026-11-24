@@ -110,11 +110,16 @@ button:disabled { cursor: default; opacity: 0.55; }
 .answer-foot { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; align-items: center; font-size: 0.8rem; color: var(--muted); }
 .answer-foot button { margin-left: auto; }
 
-.pending { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.5rem; color: var(--muted); font-size: 0.95rem; }
-.elapsed { font-variant-numeric: tabular-nums; color: var(--fg); }
-.dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
-@keyframes pulse { 50% { opacity: 0.25; } }
-@media (prefers-reduced-motion: reduce) { .dot { animation: none; } }
+.pending { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 0.9rem 1.1rem; }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.45rem; font-size: 0.93rem; }
+.step { display: flex; align-items: center; gap: 0.6rem; color: var(--muted); }
+.step.now { color: var(--fg); font-weight: 600; }
+.step-mark { width: 1.15rem; height: 1.15rem; border-radius: 50%; border: 1.5px solid var(--line); display: grid; place-items: center; font-size: 0.7rem; flex: none; }
+.step.done .step-mark { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.step.now .step-mark { border-color: var(--accent); border-top-color: transparent; animation: spin 0.9s linear infinite; }
+.elapsed { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .step.now .step-mark { animation: none; border-top-color: var(--accent); } }
 
 .composer { background: linear-gradient(to bottom, transparent, var(--bg) 1.2rem); padding: 0.4rem max(16px, env(safe-area-inset-left)) calc(0.5rem + env(safe-area-inset-bottom)); display: grid; gap: 0.3rem; }
 .composer > * { width: min(720px, 100%); margin-inline: auto; }
@@ -167,3 +172,4 @@ button:disabled { cursor: default; opacity: 0.55; }
 }
 /* Touch keyboards have no Shift+Enter worth explaining */
 @media (hover: none) { .composer-hint { display: none; } }
+.sr-only { position: absolute !important; width: 1px !important; height: 1px !important; margin: -1px !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; white-space: nowrap !important; }

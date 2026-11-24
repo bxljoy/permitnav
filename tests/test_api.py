@@ -22,9 +22,12 @@ class FakeService:
         self.asked: list[tuple[str, date]] = []
         self.histories: list[list[str]] = []
 
-    def answer(self, question: str, as_of: date, history: list[str]) -> Answer:
+    def answer(self, question: str, as_of: date, history: list[str], progress=None) -> Answer:
         self.asked.append((question, as_of))
         self.histories.append(history)
+        for stage in ("understanding",) * bool(history) + ("searching", "writing"):
+            if progress:
+                progress(stage)
         if isinstance(self._answer, Exception):
             raise self._answer
         return self._answer or Answer(kind="answered", text="Svar [S1].", citations=CITATIONS)
@@ -295,3 +298,108 @@ def test_the_built_ui_is_served_and_the_api_still_wins(tmp_path) -> None:
         assert moved.status_code == 307  # the API's trailing-slash redirect still works
     with TestClient(create_app(FakeService(), token=TOKEN, web_dir=str(tmp_path / "none"))) as c:
         assert c.get("/").status_code == 404  # no build: API only
+
+
+# --- phase 6 slice 2: progress as server-sent events -------------------------------------
+
+
+def events(body: str) -> list[tuple[str, dict]]:
+    import json
+
+    out = []
+    for block in body.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.splitlines())
+        out.append((lines["event"], json.loads(lines["data"])))
+    return out
+
+
+def test_the_stream_sends_each_stage_then_the_answer() -> None:
+    with client() as c:
+        body = {"question": "Och lönen?", "history": ["Jag har arbetstillstånd."]}
+        r = c.post("/ask/stream", json=body, headers=AUTH)
+    assert r.headers["content-type"].startswith("text/event-stream")
+    assert "no-transform" in r.headers["cache-control"]  # proxies must not buffer or compress it
+    got = events(r.text)
+    assert [d["stage"] for e, d in got if e == "stage"] == ["understanding", "searching", "writing"]
+    kind, answer = got[-1]
+    assert kind == "answer" and answer["text"] == "Svar [S1]." and answer["citations"]
+
+
+def test_a_failure_arrives_as_an_error_event_and_auth_comes_first() -> None:
+    with client(FakeService(LLMError("OpenRouter HTTP 402: billing details"))) as c:
+        assert c.post("/ask/stream", json={"question": "q?"}).status_code == 401
+        assert c.post("/ask/stream", json={"question": ""}, headers=AUTH).status_code == 422
+        got = events(c.post("/ask/stream", json={"question": "q?"}, headers=AUTH).text)
+    assert got[-1] == ("error", {"status": 502, "message": "model call failed"})  # no billing text
+
+
+def test_a_streamed_question_is_one_trace(spans) -> None:
+    with client() as c:
+        c.post("/ask/stream", json={"question": "Lönekrav?"}, headers=AUTH)
+    finished = spans.get_finished_spans()
+    (root,) = [s for s in finished if s.parent is None]
+    (ask,) = [s for s in finished if s.name == "ask"]
+    assert root.name.startswith("POST") and ask.context.trace_id == root.context.trace_id
+    assert ask.attributes["permitnav.streamed"] is True
+
+
+class SlowService(FakeService):
+    """Stages a little apart, recording how far it got."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reached: list[str] = []
+        self.stopped = False
+
+    def answer(self, question, as_of, history, progress=None):
+        import time
+
+        import anyio
+
+        from permitnav.api import ClientGone
+
+        try:
+            for stage in ("searching", "writing"):
+                if progress:
+                    progress(stage)
+                self.reached.append(stage)
+                time.sleep(0.8)  # a model call's worth of time
+        except (ClientGone, anyio.BrokenResourceError, anyio.ClosedResourceError):
+            self.stopped = True  # told the client left, or nobody listens to its stages
+            raise
+        return super().answer(question, as_of, history)
+
+
+def test_a_client_that_goes_away_stops_the_answer_at_the_next_stage() -> None:
+    """Deleting a conversation aborts the request; the server must not keep paying for
+    model calls nobody will read. A real server (uvicorn) and a real connection: the test
+    client never reports a disconnect."""
+    import socket
+    import threading
+    import time
+
+    import httpx
+    import uvicorn
+
+    service = SlowService()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(create_app(service, token=TOKEN), port=port, log_level="warning")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        while not server.started:
+            time.sleep(0.05)
+        url = f"http://127.0.0.1:{port}/ask/stream"
+        with httpx.stream("POST", url, json={"question": "q?"}, headers=AUTH, timeout=5) as r:
+            assert next(r.iter_lines()) == "event: stage"
+        deadline = time.time() + 3
+        while not service.stopped and time.time() < deadline:
+            time.sleep(0.05)
+        assert service.stopped and service.reached == ["searching"]  # never started writing
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from typing import TYPE_CHECKING
@@ -41,6 +42,10 @@ MARKER = re.compile(r"\[(S\d+)\]")
 # "[S1, S2]", "[S1–S3]", "[S1; S4]": groups the model sometimes writes instead of [S1][S2]
 GROUP = re.compile(r"\[(S\d+(?:\s*[,;–-]\s*S\d+)+)\]")
 MAX_TOKENS_CAP = 16000
+# The stages an answer goes through, in order, as `progress` reports them: "understanding" only
+# with earlier questions (intake), "checking" only with the second search.
+STAGES = ("understanding", "searching", "checking", "writing")
+
 ANSWER_LANGUAGE = {
     "sv": "Swedish, the language of the question",
     "en": "English, the language of the question",
@@ -128,12 +133,17 @@ class Answerer:
         self._template = load_prompt()
 
     def answer(
-        self, question: str, as_of: date | None = None, history: tuple[str, ...] | list[str] = ()
+        self,
+        question: str,
+        as_of: date | None = None,
+        history: tuple[str, ...] | list[str] = (),
+        progress: Callable[[str], None] | None = None,
     ) -> Answer:
         """`history`: the user's earlier questions in the conversation, oldest first, sent by
         the client (memory lives there). Used only with intake; plain RAG asks `question`
-        alone."""
+        alone. `progress` hears each stage as it starts (STAGES), for a client to show."""
         as_of = as_of or date.today()
+        report = progress or (lambda stage: None)
         with tracing.span(
             "answer",
             "chain",
@@ -148,12 +158,13 @@ class Answerer:
             asked = question
             prepared = None
             if self._intake is not None and history:
+                report("understanding")
                 prepared = self._intake.prepare(question, history)
                 question = prepared.question
             try:
                 # The answer's language comes from the question as asked: a rewrite can carry
                 # the earlier turns' language into a follow-on asked in another one.
-                answer = self._answer(question, as_of, language_of(asked))
+                answer = self._answer(question, as_of, language_of(asked), report)
             except LLMError as error:
                 error.intake = prepared  # type: ignore[attr-defined]  # paid for: evals count it
                 raise
@@ -177,14 +188,19 @@ class Answerer:
             tracing.text(current, output=answer.text)
             return answer
 
-    def _answer(self, question: str, as_of: date, language: str | None) -> Answer:
+    def _answer(
+        self, question: str, as_of: date, language: str | None, report: Callable[[str], None]
+    ) -> Answer:
+        report("searching")
         hits = self._retriever.search(question, as_of=as_of, k=self.config.k)
         if not _relevant(question, hits, self.config.min_score):
             return Answer(kind="out_of_scope", text=NOTHING_RELEVANT)
         search = None
         if self._second_search is not None:
+            report("checking")
             hits, search = self._second_search.expand(question, as_of, hits)
         context = build_context(self._conn, hits, as_of)
+        report("writing")
         # Told, not left to the model: with an English prompt and mixed sources it answered
         # more than half of the Swedish dev questions in English (phase 2). Only when the
         # question is clearly Swedish or English; otherwise (a tie, another language) the

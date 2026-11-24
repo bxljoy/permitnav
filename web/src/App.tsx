@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, ask, checkToken, source, type AskResponse, type Citation, type Source } from "./api";
+import { ApiError, askStream, checkToken, source, type AskResponse, type Citation, type Source, type Stage } from "./api";
 import { asPlainText, blocks, KIND_LABEL, readableDate, type Inline } from "./answer";
 import { historyFor, loadToken, loadTurns, saveToken, saveTurns, type Turn } from "./conversation";
 
@@ -85,7 +85,8 @@ function TokenScreen({ message, onToken }: { message: string | null; onToken: (t
 
 function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: string, forget?: boolean) => void }) {
   const [turns, setTurns] = useState<Turn[]>(() => loadTurns());
-  const [pending, setPending] = useState<{ question: string; started: number } | null>(null);
+  const [pending, setPending] = useState<{ question: string; started: number; stages: Stage[]; followOn: boolean } | null>(null);
+  const inFlight = useRef<AbortController | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<{ citation: Citation; asOf: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -101,7 +102,7 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
   }, [turns]);
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [turns.length, pending]);
+  }, [turns.length, pending?.started]); // once per question, not on every stage
 
   async function send(question: string) {
     const date = asOf || null;
@@ -110,9 +111,14 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
     const mine = generation.current;
     setTurns((t) => [...t, asked]);
     setError(null);
-    setPending({ question, started: Date.now() });
+    setPending({ question, started: Date.now(), stages: [], followOn: history.length > 0 });
+    const controller = new AbortController();
+    inFlight.current = controller;
     try {
-      const response = await ask(token, question, date, history);
+      const onStage = (stage: Stage) => {
+        if (generation.current === mine) setPending((p) => (p ? { ...p, stages: [...p.stages, stage] } : p));
+      };
+      const response = await askStream(token, question, date, history, onStage, controller.signal);
       if (generation.current !== mine) return; // the conversation was deleted meanwhile
       setTurns((t) => [...t, { role: "assistant", response, at: new Date().toISOString() }]);
     } catch (e) {
@@ -133,6 +139,7 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
 
   function deleteConversation() {
     generation.current += 1;
+    inFlight.current?.abort(); // stop waiting for an answer nobody will see
     setTurns([]);
     setOpen(null);
     setPending(null);
@@ -188,7 +195,7 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
             <Answer key={i} response={turn.response} at={turn.at} onOpen={(c) => setOpen({ citation: c, asOf: turn.response.as_of })} active={open?.citation} />
           ),
         )}
-        {pending && <Pending started={pending.started} />}
+        {pending && <Pending started={pending.started} stages={pending.stages} followOn={pending.followOn} />}
         {error && <p className="error" role="alert">{error}</p>}
         <div ref={end} />
       </main>
@@ -316,18 +323,43 @@ function Answer({ response, at, onOpen, active }: { response: AskResponse; at: s
   );
 }
 
-function Pending({ started }: { started: number }) {
+const STAGE_LABEL: Record<Stage, string> = {
+  understanding: "Reading your earlier questions",
+  searching: "Searching the law and Migrationsverket's pages",
+  checking: "Checking that the sources are enough",
+  writing: "Writing the answer with its sources",
+};
+
+function Pending({ started, stages, followOn }: { started: number; stages: Stage[]; followOn: boolean }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+  // The steps this answer will take: the ones heard so far, then the ones still to come.
+  const planned: Stage[] = [...(followOn ? (["understanding"] as Stage[]) : []), "searching", "writing"];
+  const steps = [...stages, ...planned.filter((s) => !stages.includes(s))];
+  const current = stages[stages.length - 1];
   const seconds = Math.floor((now - started) / 1000);
   return (
-    <div className="pending" role="status">
-      <span className="dot" aria-hidden="true" />
-      Searching the law and Migrationsverket's pages, then writing the answer… <span className="elapsed">{seconds} s</span>
-      <span className="muted"> (usually 8–15 s)</span>
+    <div className="pending">
+      {/* Only the current step is announced; the list and the seconds are for the eye. */}
+      <span className="sr-only" role="status" aria-live="polite">
+        {current ? STAGE_LABEL[current] : "Preparing the answer"}
+      </span>
+      <ol className="steps" aria-hidden="true">
+        {steps.map((step) => {
+          const state = step === current ? "now" : stages.includes(step) ? "done" : "next";
+          return (
+            <li key={step} className={`step ${state}`}>
+              <span className="step-mark" aria-hidden="true">{state === "done" ? "✓" : ""}</span>
+              {STAGE_LABEL[step]}
+              {state === "now" && "…"}
+            </li>
+          );
+        })}
+      </ol>
+      <span className="elapsed" aria-hidden="true">{seconds} s</span>
     </div>
   );
 }
