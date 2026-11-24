@@ -287,3 +287,15 @@ def test_the_configured_reasoning_effort_belongs_to_the_configured_judge(monkeyp
     monkeypatch.setenv("JUDGE_REASONING_EFFORT", "lots")
     with pytest.raises(SystemExit, match="low, medium or high"):
         _judge()
+
+
+def test_a_follow_on_question_is_judged_with_the_earlier_questions() -> None:
+    llm = by_task({"correctness": "correct"}, {"faithful": True})
+    earlier = "My work permit was granted in February 2026. What salary do I need?"
+    Judge(llm, model="m").judge(item(question="And for my spouse?", turns=[earlier]))
+    for request in llm.requests:
+        content = request.messages[0]["content"]
+        assert content.index(earlier) < content.index("And for my spouse?")
+    plain = by_task({"correctness": "correct"}, {"faithful": True})
+    Judge(plain, model="m").judge(item())
+    assert all("Earlier questions" not in r.messages[0]["content"] for r in plain.requests)

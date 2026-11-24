@@ -38,7 +38,7 @@ REQUIRED = {
     "expects_out_of_scope": bool,
     "review": str,
 }
-OPTIONAL = {"translation_of", "notes", "authority"}
+OPTIONAL = {"translation_of", "notes", "authority", "turns"}
 AUTHORITY = {"law", "agency", "both"}  # D22
 
 HISTORY_START = date(2023, 1, 1)  # D10
@@ -138,11 +138,18 @@ def check_item(item, line):
     ]
     if placeholders and item["review"] == "checked":
         err("checked items cannot have placeholder sources: %s" % ", ".join(placeholders))
+    turns = item.get("turns", [])
+    if "turns" in item and not (
+        isinstance(turns, list) and turns and all(isinstance(t, str) and t.strip() for t in turns)
+    ):
+        err("turns must be a non-empty list of earlier questions (oldest first)")
+        turns = []
     if item["type"] == "multi-source" and len(groups) < 2:
         err("type 'multi-source' needs at least 2 required groups")
 
-    for field in ("question", "reference_answer", "notes"):
-        text = item.get(field) or ""
+    for field, text in [
+        (f, item.get(f) or "") for f in ("question", "reference_answer", "notes")
+    ] + [("turns", t) for t in turns if isinstance(t, str)]:
         for name, pattern in PII_PATTERNS.items():
             if pattern.search(text):
                 err("possible %s in '%s'; sanitise before committing" % (name, field))

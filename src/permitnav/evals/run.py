@@ -144,13 +144,17 @@ def summarise(results: Sequence[ItemResult], name: str) -> SliceSummary:
 
 
 def slices(run: RetrievalRun) -> list[SliceSummary]:
-    """All items; by question language and original vs translated (D20); by type; by authority."""
+    """All items; by question language and original vs translated (D20); by type;
+    multi-turn items; by authority."""
     groups: dict[str, list[ItemResult]] = {"all": list(run.results)}
     for r in run.results:
         origin = "translated" if r.item.is_translation else "original"
         groups.setdefault(f"{r.item.original_language} ({origin})", []).append(r)
     for r in run.results:
         groups.setdefault(f"type: {r.item.type}", []).append(r)
+    for r in run.results:  # follow-on questions, asked alone (no memory yet)
+        if r.item.turns:
+            groups.setdefault("multi-turn", []).append(r)
     for r in run.results:  # legal requirement vs agency practice (D22)
         if r.item.authority:
             groups.setdefault(f"authority: {r.item.authority}", []).append(r)

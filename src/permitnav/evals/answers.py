@@ -95,6 +95,7 @@ def judgeable(result: AnswerResult) -> CalibrationItem | None:
         language=result.item.original_language,
         expected_kind=result.item.expected_kind,
         reference_answer=result.item.reference_answer,
+        turns=list(result.item.turns),
         kind=result.kind,
         answer=result.answer.text,
         sources=[
