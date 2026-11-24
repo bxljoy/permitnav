@@ -57,6 +57,9 @@ class Hit:
     fetched_at: datetime  # when the crawler first saw this wording
     text_hash: str  # identical wordings (repeated page sections) share it
     rerank_score: float | None = None  # the reranker's, when reranking; orders the hits
+    # Found through the wording's plain-language description (phase 5 experiment); `text` is
+    # still the wording's own text, never the description.
+    via_description: bool = False
 
 
 # Which wordings apply on a date (D8, D5). Web pages are dated by when the crawler saw them,
@@ -95,6 +98,12 @@ MAX_NAMED = 3
 class RetrievalConfig:
     mode: str = "hybrid"  # vector | keyword | hybrid
     strategy: str = "structure"  # which chunks to search
+    # Phase 5 experiment: a further ranking of law sections by their plain-language
+    # descriptions (chunks of kind 'description', made by `permitnav describe`), fused in
+    # with this weight (hybrid only). 0: descriptions are ignored everywhere. Mixed into the
+    # same pool as the legal text they dominated it (short plain text scores higher against
+    # any question), so they get a ranking of their own.
+    description_weight: float = 0.0
     # "interleave": search law and guidance separately and alternate the results, so pages in
     # the question's language cannot push the (Swedish) law out of the top k. "none": one
     # ranking over everything.
@@ -434,6 +443,9 @@ class Retriever:
         if self.config.keyword_weight > 0:
             rankings.append(self._search(vector, as_of, depth, types, exclude, keyword=keyword))
             weights.append(self.config.keyword_weight)
+        if self.config.description_weight > 0:
+            rankings.append(self._search(vector, as_of, depth, types, exclude, kind="description"))
+            weights.append(self.config.description_weight)
         if extra_order is not None:  # scores stay against the question's own vector
             rankings.append(
                 self._search(
@@ -460,6 +472,7 @@ class Retriever:
         units: list[str] | None = None,
         order_vector: str | None = None,
         untranslated_only: bool = False,
+        kind: str = "text",
     ) -> list[Hit]:
         """One ranking: by cosine distance, or by BM25 when `keyword` (the question's text for
         Swedish and for English chunks) is given. `units` restricts it to those units.
@@ -486,7 +499,12 @@ class Retriever:
                 """
                 WITH {keyword_ctes}
                 scored AS MATERIALIZED (
-                  SELECT u.id AS unit_id, v.id AS version_id, c.id AS chunk_id, c.text,
+                  SELECT u.id AS unit_id, v.id AS version_id, c.id AS chunk_id,
+                         CASE WHEN c.kind = 'text' THEN c.text ELSE (
+                           SELECT t.text FROM chunk t WHERE t.version_id = c.version_id
+                             AND t.strategy = c.strategy AND t.kind = 'text'
+                           ORDER BY t.ordinal LIMIT 1) END AS text,
+                         c.kind = 'description' AS via_description,
                          v.text_hash,
                          e.embedding <=> %(q)s::vector AS distance,
                          {order} AS rank_key,
@@ -497,6 +515,7 @@ class Retriever:
                   JOIN unit u ON u.id = v.unit_id
                   {keyword_join}
                   WHERE c.strategy = %(strategy)s AND {applies} {keyword_where}
+                    AND c.kind = %(kind)s
                     AND (%(types)s::text[] IS NULL
                          OR (u.source_type = ANY(%(types)s::text[])) <> %(exclude)s)
                     AND (%(units)s::text[] IS NULL OR u.id = ANY(%(units)s::text[]))
@@ -511,7 +530,7 @@ class Retriever:
                   ORDER BY text_hash, rank_key, unit_id
                 )
                 SELECT unit_id, version_id, chunk_id, text, 1 - distance, authority, heading,
-                       url, valid_from, valid_to, observed_from, text_hash
+                       url, valid_from, valid_to, observed_from, text_hash, NULL, via_description
                 FROM best ORDER BY rank_key, unit_id LIMIT %(k)s
                 """
             ).format(
@@ -528,6 +547,7 @@ class Retriever:
                 "oq": order_vector,
                 "untranslated": untranslated_only,
                 "strategy": self.config.strategy,
+                "kind": kind,
                 "d": as_of,
                 "k": k,
                 "types": list(source_types) if source_types else None,
@@ -575,7 +595,7 @@ terms AS (
 corpus AS MATERIALIZED (
   SELECT c.ts_config AS cfg, count(*) AS n, avg(length(c.tsv)) AS avglen
   FROM chunk c JOIN unit_version v ON v.id = c.version_id JOIN unit u ON u.id = v.unit_id
-  WHERE c.strategy = %(strategy)s AND {applies} AND {in_group}
+  WHERE c.strategy = %(strategy)s AND {applies} AND {in_group} AND c.kind = 'text'
   GROUP BY c.ts_config
 ),
 df AS MATERIALIZED (
@@ -583,7 +603,8 @@ df AS MATERIALIZED (
          (SELECT count(*) FROM chunk c JOIN unit_version v ON v.id = c.version_id
           JOIN unit u ON u.id = v.unit_id
           WHERE c.strategy = %(strategy)s AND c.ts_config = t.cfg
-            AND c.tsv @@ quote_literal(t.lexeme)::tsquery AND {applies} AND {in_group}) AS df
+            AND c.tsv @@ quote_literal(t.lexeme)::tsquery AND {applies} AND {in_group}
+            AND c.kind = 'text') AS df
   FROM terms t
 ),
 queries AS (

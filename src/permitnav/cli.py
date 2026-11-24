@@ -155,11 +155,19 @@ def _retrieval_config(args: argparse.Namespace) -> RetrievalConfig:
         paper_slots=getattr(args, "paper_slots", RetrievalConfig.paper_slots),
         paper_follow_law=getattr(args, "paper_follow_law", RetrievalConfig.paper_follow_law),
         mix=args.mix,
+        description_weight=getattr(args, "description_weight", 0.0),
     )
 
 
 def _add_retrieval_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mode", default=RetrievalConfig.mode, choices=list(MODES))
+    parser.add_argument(
+        "--description-weight",
+        type=float,
+        default=RetrievalConfig.description_weight,
+        help="phase 5 experiment: fuse a ranking of law sections by their plain-language "
+        "descriptions (made by `permitnav describe`) with this weight; 0 = off",
+    )
     parser.add_argument(
         "--keyword-weight",
         type=float,
@@ -807,6 +815,36 @@ def cmd_import_lifos_results(args: argparse.Namespace) -> int:
         + ", ".join(f"{n} {d}" for d, n in decided.most_common())
     )
     return 0
+
+
+def cmd_describe(args: argparse.Namespace) -> int:
+    """Plain-language descriptions of law wordings, used only to find them (phase 5
+    experiment). Run `permitnav index` afterwards to embed them."""
+    from permitnav.corpus.descriptions import describe, undescribed
+    from permitnav.llm.openrouter import OpenRouterLLM
+    from permitnav.llm.port import LLMError
+
+    model = os.environ.get("ANSWER_MODEL", "").strip()
+    if not model:
+        print("ANSWER_MODEL is not set; see .env.example")
+        return 1
+    try:
+        llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))
+    except LLMError as error:
+        print(f"model call failed: {error}")
+        return 1
+    with db.connect() as conn:
+        wordings = undescribed(conn, args.limit)
+        print(f"{len(wordings):,} law wordings without a description; describing with {model}")
+        stored, unusable, cost = describe(
+            conn, llm, model, wordings, args.workers,
+            lambda done, total: print(f"  described {done}/{total}", end="\r", flush=True),
+        )  # fmt: skip
+    print(f"\nstored {stored:,}; unusable replies {len(unusable)}; cost ${cost:.4f}")
+    for unit in unusable[:20]:
+        print(f"  unusable: {unit}")
+    print("next: permitnav index (embeds the new description chunks)")
+    return 0 if not unusable else 3
 
 
 def cmd_index(args: argparse.Namespace) -> int:
@@ -1812,6 +1850,12 @@ def main(argv: list[str] | None = None) -> int:
     il.add_argument("folder", help="folder with the result pages saved from the browser")
     il.add_argument("--out", default="curation/position_papers.csv")
     il.set_defaults(run=cmd_import_lifos_results)
+    ds = sub.add_parser(
+        "describe", help="phase 5 experiment: plain-language descriptions of law sections"
+    )
+    ds.add_argument("--limit", type=int, help="describe at most this many wordings")
+    ds.add_argument("--workers", type=int, default=8, help="model calls in parallel")
+    ds.set_defaults(run=cmd_describe)
     index = sub.add_parser("index", help="build chunks and embeddings for stored versions")
     index.add_argument("--strategy", nargs="+", default=list(STRATEGIES), choices=list(STRATEGIES))
     index.add_argument("--no-embed", action="store_true", help="only build chunks")

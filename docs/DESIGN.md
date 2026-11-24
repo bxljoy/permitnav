@@ -1178,3 +1178,21 @@ Fixed: 902 (en and sv; plain RAG asked back, or declined the Swedish one as out 
 A third memory run after the fixes: right kind 11/12, judged correct 8 (within the earlier runs' spread or slightly better).
 
 **Second review (`/ship`, high), fixed:** a client may send a whole conversation (up to 50 earlier questions; only the last 6 are used) instead of getting a 422 from the 8th question; a question echoed back unchanged except for its whitespace no longer counts as rewritten (it was shown back as "understood as"); when memory is skipped, the result and the intake span say why (`model error`, or the reply's finish reason such as `length`), and the rewrite gets 2,500 tokens instead of 1,500; `eval-answers` now uses memory by default, as production does, with `--no-memory` for the plain-RAG baseline (single questions are unaffected: no history, no call); the service builds its rewriter once. Not changed: during a provider outage a follow-on waits for two failing calls (intake, then the answer) before the error, which only matters while everything else fails too.
+
+### Experiment: plain-language descriptions of law sections (2026-11-24) — off by default
+
+**Why the family rule is not found.** For the work-permit spouse questions (004, 901, 951, the production follow-on), utlänningsförordningen 4 kap. 4 a § ranked among law sections: by vector **outside the top 200** (86 once), by keyword 10–12, hybrid 119–141. Its text says whom it is for only through section numbers — "a person granted a permit under 5 kap. 10 § utlänningslagen in cases under 6 kap. 2 § första stycket … a family member under 5 kap. 3 a §" — never "work permit" or "spouse"; its heading ("Uppehållstillstånd för familjemedlemmar i vissa fall") is indexed but does not say *work*. Meaning-based search cannot follow numbers.
+
+**What was tried.** Adding the cited sections' headings ("reference glosses") moved its similarity to the questions only 0.40 → 0.41 (the top law hit scored 0.55–0.62). A model-written plain-language description ("applies when someone who has a temporary residence permit, for example for work, wants to bring close family…") scored **0.56–0.61**, level with the top hit. So: `permitnav describe` (`corpus/descriptions.py`, `prompts/describe.md`, migration 006) describes every statute and transitional wording in Swedish and English with the answer model (1,404 of 1,405, $0.39 once; a reply with notes or a second version is rejected and retried), stores it in `unit_description` (model, prompt hash) and indexes it as chunks of kind `description`. A section found through one is always given to the answer model with its own text (the SQL returns the wording's first text chunk), never the description.
+
+**Result (retrieval, no model cost):**
+
+| | dev R@5 | versions R@5 | situational R@5 | multi-turn (alone) R@5 |
+|---|---|---|---|---|
+| without descriptions | 0.52 | 0.67 | 0.12 | 0.04 |
+| descriptions in the same pool as the text | **0.47** | 0.62 | **0.25** | 0.15 |
+| a separate description ranking, fused at weight 0.25–2.0 | 0.49–0.53 | 0.62–0.67 | 0.12 | 0.04–0.10 |
+
+In the same pool the descriptions find the hidden sections (004-sv: 4 kap. 4 a § at rank 3) but make every section sound like an everyday answer — short plain text scores higher against any question than legal text — so general and procedural sections (utlänningsförordningen 3 a kap. 5 §, 5 kap. 1–3 a §; utlänningslagen 14 kap. 3 a §) pushed precise ones out of dev's top 5 (8 items lost, 3 gained), below the CI gate. As a separate fused ranking, dev is safe, but a section found only by its description never gets enough score to reach the top 5, so the situational gain disappears.
+
+**Decision:** off by default (`description_weight = 0`; `--description-weight` to re-measure). The diagnosis stands — law that names its subject only by section number is invisible to embeddings — but making it visible does not tell the system which visible rule to prefer: the same rule-choice problem as the second search, one step earlier. Descriptions are not generated in production. They may still serve the verifier (checking whether a cited rule concerns the person's situation).
