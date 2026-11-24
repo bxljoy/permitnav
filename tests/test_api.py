@@ -20,9 +20,11 @@ class FakeService:
         self._answer = answer
         self._healthy = healthy
         self.asked: list[tuple[str, date]] = []
+        self.histories: list[list[str]] = []
 
-    def answer(self, question: str, as_of: date) -> Answer:
+    def answer(self, question: str, as_of: date, history: list[str]) -> Answer:
         self.asked.append((question, as_of))
+        self.histories.append(history)
         if isinstance(self._answer, Exception):
             raise self._answer
         return self._answer or Answer(kind="answered", text="Svar [S1].", citations=CITATIONS)
@@ -167,3 +169,66 @@ def test_an_unreadable_reply_is_a_502_not_a_success() -> None:
     with client(FakeService(Answer(kind="failed", text=""))) as c:
         response = c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH)
     assert response.status_code == 502
+
+
+# --- phase 5: conversation memory (history) ---------------------------------------------
+
+
+def test_earlier_questions_reach_the_service_and_none_means_none() -> None:
+    service = FakeService()
+    with client(service) as c:
+        c.post("/ask", json={"question": "Och min make?"}, headers=AUTH)
+        c.post(
+            "/ask",
+            json={"question": "Och min make?", "history": [" Jag har arbetstillstånd. "]},
+            headers=AUTH,
+        )
+    assert service.histories == [[], ["Jag har arbetstillstånd."]]  # stripped like the question
+
+
+def test_a_whole_conversation_is_accepted_up_to_a_bound() -> None:
+    """A client may send the whole conversation; intake uses only the last few."""
+    from permitnav.agent.intake import MAX_HISTORY, MAX_HISTORY_ACCEPTED
+
+    service = FakeService()
+    with client(service) as c:
+
+        def status(history) -> int:
+            body = {"question": "q?", "history": history}
+            return c.post("/ask", json=body, headers=AUTH).status_code
+
+        assert status(["q"] * (MAX_HISTORY + 1)) == 200  # more than intake reads: still fine
+        assert status(["q"] * MAX_HISTORY_ACCEPTED) == 200
+        assert status(["q"] * (MAX_HISTORY_ACCEPTED + 1)) == 422
+        assert status(["x" * (MAX_QUESTION_CHARS + 1)]) == 422
+        assert status([""]) == 422
+        assert status("one string") == 422
+
+
+def test_how_a_follow_on_was_understood_is_returned_to_the_asker() -> None:
+    from permitnav.agent.intake import Intake
+
+    rewritten = Answer(kind="answered", text="Svar [S1].", citations=CITATIONS)
+    rewritten.intake = Intake(
+        asked="Och min make?", question="Jag har arbetstillstånd. Kan min make komma hit?",
+        rewritten=True, situation={"permit": "arbetstillstånd", "family": "make"},
+    )  # fmt: skip
+    with client(FakeService(rewritten)) as c:
+        body = c.post(
+            "/ask", json={"question": "Och min make?", "history": ["x"]}, headers=AUTH
+        ).json()
+    assert body["understood_as"] == "Jag har arbetstillstånd. Kan min make komma hit?"
+    assert body["situation"] == {"permit": "arbetstillstånd", "family": "make"}
+    with client() as c:  # a single question: nothing to show
+        body = c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH).json()
+    assert body["understood_as"] is None and body["situation"] == {}
+
+
+def test_traces_record_how_many_earlier_questions_never_their_text(spans) -> None:
+    secret = "Mitt namn är Anna och jag jobbar på Volvo."
+    with client() as c:
+        c.post("/ask", json={"question": "Och lönen?", "history": [secret]}, headers=AUTH)
+    (ask,) = [s for s in spans.get_finished_spans() if s.name == "ask"]
+    assert ask.attributes["permitnav.history_turns"] == 1
+    for span in spans.get_finished_spans():
+        assert all(secret not in str(v) for v in span.attributes.values())

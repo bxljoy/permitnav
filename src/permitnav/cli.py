@@ -1256,6 +1256,21 @@ def _second_searcher(args: argparse.Namespace, retriever, llm, model: str):
     return SecondSearcher(retriever, llm, getattr(args, "check_model", None) or model)
 
 
+def _intake(args: argparse.Namespace, llm, model: str):
+    """Phase 5's intake, as production uses it: on in `eval-answers` unless `--no-memory`,
+    on in `ask` when `--earlier` questions are given. It calls the model only for questions
+    that have earlier turns."""
+    if args.run is cmd_eval_answers:
+        on = not args.no_memory
+    else:
+        on = bool(getattr(args, "earlier", None))
+    if not on:
+        return None
+    from permitnav.agent.intake import IntakeRewriter
+
+    return IntakeRewriter(llm, model)
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     from datetime import date
 
@@ -1283,14 +1298,21 @@ def cmd_ask(args: argparse.Namespace) -> int:
             retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
             answer_config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR, k=args.k)
             answerer = Answerer(
-                conn, retriever, llm, answer_config, _second_searcher(args, retriever, llm, model)
+                conn,
+                retriever,
+                llm,
+                answer_config,
+                _second_searcher(args, retriever, llm, model),
+                _intake(args, llm, model),
             )
-            answer = answerer.answer(args.question, as_of=as_of)
+            answer = answerer.answer(args.question, as_of=as_of, history=args.earlier or [])
     except LLMError as error:
         print(f"model call failed: {error}")
         return 1
 
     print()
+    if answer.intake and answer.intake.rewritten:  # a follow-on: what was searched and answered
+        print(f"Understood as: {answer.intake.question}\n")
     if KIND_LABELS.get(answer.kind):
         print(KIND_LABELS[answer.kind])
     print(answer.text)
@@ -1325,6 +1347,10 @@ def cmd_ask(args: argparse.Namespace) -> int:
     if c is not None:
         cost = f", ${c.cost_usd:.4f}" if c.cost_usd is not None else ""
         print(f"[{c.model}: {c.input_tokens:,} in / {c.output_tokens:,} out tokens{cost}]")
+    for name, extra in (("intake rewrite", answer.intake), ("second search", answer.search)):
+        if extra is not None and (e := extra.completion) is not None:
+            cost = f", ${e.cost_usd:.4f}" if e.cost_usd is not None else ""
+            print(f"[{name}, {e.model}: {e.input_tokens:,} in / {e.output_tokens:,} out{cost}]")
     if answer.earlier:  # a reply cut off or unreadable, then asked again
         known = [e.cost_usd for e in answer.earlier if e.cost_usd is not None]
         cost = f": ${sum(known):.4f}" if len(known) == len(answer.earlier) else " (cost unknown)"
@@ -1382,6 +1408,7 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
             llm,
             AnswerConfig(model=model, min_score=floor, k=args.k),
             _second_searcher(args, retriever, llm, model),
+            _intake(args, llm, model),
         )
         results = run_answers(
             items,
@@ -1406,7 +1433,8 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
     second = "second search (evidence check, at most 2 steps)"
     if args.second_search:
         second += f", check model {args.check_model or model}"
-    print(f"workflow: {second if args.second_search else 'plain RAG (one search)'}")
+    memory = "no memory (--no-memory)" if args.no_memory else "memory (earlier turns rewritten in)"
+    print(f"workflow: {second if args.second_search else 'plain RAG (one search)'}; {memory}")
     effort = f" (reasoning effort {judge_effort})" if judge_effort else ""
     _print_provenance(config, model, f"{judge_model}{effort}" if judge_model else None)
     print(f"{'expected kind':<14} {'n':>3} {'right':>5}  given instead")
@@ -1477,6 +1505,18 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
                         "text": r.answer.text,
                         "sources": [s.unit_id for s in r.answer.sources],
                         "cost_usd": r.cost_usd,
+                        **(
+                            {
+                                "intake": {
+                                    "question": r.answer.intake.question,
+                                    "rewritten": r.answer.intake.rewritten,
+                                    "situation": r.answer.intake.situation,
+                                    "fallback": r.answer.intake.fallback,
+                                }
+                            }
+                            if r.answer.intake
+                            else {}
+                        ),
                         **(
                             {
                                 "second_search": {
@@ -1781,6 +1821,11 @@ def main(argv: list[str] | None = None) -> int:
     _add_retrieval_options(ask)
     ask.add_argument("--k", type=int, default=AnswerConfig.k, help="sources given to the model")
     ask.add_argument(
+        "--earlier",
+        action="append",
+        help="an earlier question in the conversation (repeat, oldest first); turns on intake",
+    )
+    ask.add_argument(
         "--check-model",
         help="model for the second search's evidence check (default: the answer model)",
     )
@@ -1832,6 +1877,12 @@ def main(argv: list[str] | None = None) -> int:
     ea.add_argument("--file", default="evals/golden.dev.jsonl")
     _add_retrieval_options(ea)
     ea.add_argument("--k", type=int, default=AnswerConfig.k, help="sources given to the model")
+    ea.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="ask follow-on questions alone, as plain RAG did (the baseline); by default the "
+        "item's earlier turns are rewritten in, as production does",
+    )
     ea.add_argument(
         "--check-model",
         help="model for the second search's evidence check (default: the answer model)",

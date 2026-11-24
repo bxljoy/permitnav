@@ -33,6 +33,7 @@ from permitnav.retrieval.retriever import Hit, Retriever
 from permitnav.retrieval.translate import language_of
 
 if TYPE_CHECKING:
+    from permitnav.agent.intake import Intake, IntakeRewriter
     from permitnav.agent.second_search import SecondSearch, SecondSearcher
 
 KINDS = ("answered", "follow_up", "not_settled", "out_of_scope")
@@ -92,6 +93,8 @@ class Answer:
     earlier: list[Completion] = field(default_factory=list)
     # The second search's decision and additions (phase 5), when it ran.
     search: SecondSearch | None = None
+    # How a follow-on question was made self-contained (phase 5), when there was history.
+    intake: Intake | None = None
 
 
 @dataclass(frozen=True)
@@ -112,15 +115,22 @@ class Answerer:
         llm: LLM,
         config: AnswerConfig,
         second_search: SecondSearcher | None = None,
+        intake: IntakeRewriter | None = None,
     ) -> None:
         self._conn = conn
         self._retriever = retriever
         self._llm = llm
         self.config = config
         self._second_search = second_search  # None: plain RAG, one search
+        self._intake = intake  # None: earlier questions are ignored (plain RAG)
         self._template = load_prompt()
 
-    def answer(self, question: str, as_of: date | None = None) -> Answer:
+    def answer(
+        self, question: str, as_of: date | None = None, history: tuple[str, ...] | list[str] = ()
+    ) -> Answer:
+        """`history`: the user's earlier questions in the conversation, oldest first, sent by
+        the client (memory lives there). Used only with intake; plain RAG asks `question`
+        alone."""
         as_of = as_of or date.today()
         with tracing.span(
             "answer",
@@ -133,21 +143,39 @@ class Answerer:
             },
         ) as current:
             tracing.text(current, input=question)
-            answer = self._answer(question, as_of)
+            asked = question
+            prepared = None
+            if self._intake is not None and history:
+                prepared = self._intake.prepare(question, history)
+                question = prepared.question
+            try:
+                # The answer's language comes from the question as asked: a rewrite can carry
+                # the earlier turns' language into a follow-on asked in another one.
+                answer = self._answer(question, as_of, language_of(asked))
+            except LLMError as error:
+                error.intake = prepared  # type: ignore[attr-defined]  # paid for: evals count it
+                raise
+            answer.intake = prepared
+            calls = [
+                prepared.completion if prepared else None,
+                answer.search.completion if answer.search else None,
+                *answer.earlier,
+                answer.completion,
+            ]
             tracing.set_attributes(
                 current,
                 **{
                     "permitnav.kind": answer.kind,
                     "permitnav.citations": len(answer.citations),
                     "permitnav.sources": len(answer.sources),
-                    "permitnav.model_calls": len(answer.earlier) + (answer.completion is not None),
+                    "permitnav.model_calls": sum(c is not None for c in calls),
                     "permitnav.cited_units": [c.unit_id for c in answer.citations],
                 },
             )
             tracing.text(current, output=answer.text)
             return answer
 
-    def _answer(self, question: str, as_of: date) -> Answer:
+    def _answer(self, question: str, as_of: date, language: str | None) -> Answer:
         hits = self._retriever.search(question, as_of=as_of, k=self.config.k)
         if not _relevant(question, hits, self.config.min_score):
             return Answer(kind="out_of_scope", text=NOTHING_RELEVANT)
@@ -159,7 +187,7 @@ class Answerer:
         # more than half of the Swedish dev questions in English (phase 2). Only when the
         # question is clearly Swedish or English; otherwise (a tie, another language) the
         # model follows the question.
-        language = ANSWER_LANGUAGE.get(language_of(question), ANSWER_LANGUAGE[None])
+        language = ANSWER_LANGUAGE.get(language, ANSWER_LANGUAGE[None])
         system = self._template.format(
             as_of=as_of.isoformat(), sources=context.render(), language=language
         )
