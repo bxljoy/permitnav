@@ -27,7 +27,8 @@ def build_chunks(conn: psycopg.Connection, strategy: str) -> int:
             SELECT v.id, u.heading, v.text, u.language
             FROM unit_version v JOIN unit u ON u.id = v.unit_id
             WHERE NOT EXISTS (
-              SELECT 1 FROM chunk c WHERE c.version_id = v.id AND c.strategy = %s)
+              SELECT 1 FROM chunk c WHERE c.version_id = v.id AND c.strategy = %s
+                AND c.kind = 'text')
             ORDER BY v.id
             """,
             (strategy,),
