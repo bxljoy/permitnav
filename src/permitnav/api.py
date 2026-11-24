@@ -9,13 +9,19 @@ Without API_TOKEN the app refuses to start, unless PERMITNAV_ALLOW_NO_AUTH=1 (lo
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
+import threading
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Annotated, Any, Protocol
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+import anyio
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from opentelemetry import context as otel_context
 from pydantic import BaseModel, Field, StringConstraints
 
 from permitnav import tracing
@@ -34,7 +40,13 @@ log = logging.getLogger("permitnav.api")
 
 
 class Service(Protocol):
-    def answer(self, question: str, as_of: date, history: list[str]) -> Answer: ...
+    def answer(
+        self,
+        question: str,
+        as_of: date,
+        history: list[str],
+        progress: Callable[[str], None] | None = None,
+    ) -> Answer: ...
     def source(self, version_id: int) -> dict[str, str] | None: ...
     def healthy(self) -> bool: ...
 
@@ -63,6 +75,10 @@ class CitationOut(BaseModel):
     quote: str
     translation: str
     version_id: int | None = None  # the exact wording: what GET /source opens
+
+
+class ClientGone(Exception):
+    """A streamed answer's client disconnected: stop before the next stage."""
 
 
 class SourceRequest(BaseModel):
@@ -185,6 +201,79 @@ def create_app(
 
     @app.post("/ask", dependencies=[Depends(authorised)])
     def ask(request: AskRequest) -> AskResponse:
+        return _traced_ask(request)
+
+    @app.post("/ask/stream", dependencies=[Depends(authorised)])
+    async def ask_stream(request: AskRequest, http: Request) -> StreamingResponse:
+        """The same answer as /ask, as server-sent events: `stage` events while it is being
+        prepared ("understanding", "searching", "checking", "writing"), then one `answer`
+        event with the AskResponse, or one `error` event with a message and the status /ask
+        would have returned. Stages, not partial text: citations are checked only once the
+        whole reply is in.
+
+        The answer runs in anyio's worker threads (bounded, as /ask's are) and sends its
+        stages through a memory stream; if the client goes away, it stops at the next stage
+        instead of paying for model calls nobody will read."""
+        context = otel_context.get_current()  # the request's trace, carried into the worker
+        gone = threading.Event()
+
+        async def stream() -> AsyncIterator[str]:
+            send, receive = anyio.create_memory_object_stream[tuple[str, dict[str, Any]]](16)
+
+            def progress(stage: str) -> None:
+                if gone.is_set():
+                    raise ClientGone
+                anyio.from_thread.run(send.send, ("stage", {"stage": stage}))
+
+            def work() -> tuple[str, dict[str, Any]] | None:
+                token = otel_context.attach(context)
+                try:
+                    response = _traced_ask(request, progress)
+                    return ("answer", response.model_dump(mode="json"))
+                except HTTPException as error:
+                    return ("error", {"status": error.status_code, "message": error.detail})
+                except (ClientGone, anyio.BrokenResourceError, anyio.ClosedResourceError):
+                    return None  # nobody is listening any more
+                except Exception:  # never leave the client waiting; the detail stays in the log
+                    log.exception("streamed answer failed")
+                    return ("error", {"status": 500, "message": "the answer failed"})
+                finally:
+                    otel_context.detach(token)
+
+            async def run() -> None:
+                async with send:
+                    outcome = await anyio.to_thread.run_sync(work)
+                    if outcome is not None:
+                        await send.send(outcome)
+
+            async def watch(tasks: anyio.abc.TaskGroup) -> None:
+                # Usually the server cancels this stream when the client leaves, which closes
+                # `receive` and makes the worker's next stage fail. Depending on the ASGI
+                # version, Starlette may notice only when a write fails, after the next stage
+                # has started: so also ask the connection a few times a second.
+                while not await http.is_disconnected():
+                    await anyio.sleep(0.2)
+                gone.set()
+                tasks.cancel_scope.cancel()
+
+            try:
+                async with anyio.create_task_group() as tasks:
+                    tasks.start_soon(run)
+                    tasks.start_soon(watch, tasks)
+                    async with receive:
+                        async for kind, data in receive:
+                            yield f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                    tasks.cancel_scope.cancel()  # the answer is out: stop watching
+            finally:
+                gone.set()  # whatever ended the stream, the worker stops at its next stage
+
+        # no-transform: proxies (Caddy's compression) must pass the events on as they come
+        headers = {"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"}
+        return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
+
+    def _traced_ask(
+        request: AskRequest, progress: Callable[[str], None] | None = None
+    ) -> AskResponse:
         as_of = request.as_of or date.today()
         with tracing.span(
             "ask",
@@ -194,17 +283,23 @@ def create_app(
                 "langfuse.environment": os.environ.get("PERMITNAV_ENV", "development"),
                 "permitnav.question_chars": len(request.question),
                 "permitnav.history_turns": len(request.history),  # how many, never what
+                "permitnav.streamed": progress is not None,
             },
         ) as current:
-            response = _ask(request.question, as_of, request.history)
+            response = _ask(request.question, as_of, request.history, progress)
             current.set_attribute("permitnav.kind", response.kind)
             return response
 
-    def _ask(question: str, as_of: date, history: list[str]) -> AskResponse:
+    def _ask(
+        question: str,
+        as_of: date,
+        history: list[str],
+        progress: Callable[[str], None] | None = None,
+    ) -> AskResponse:
         from permitnav.llm.port import LLMError
 
         try:
-            answer = state["service"].answer(question, as_of, history)
+            answer = state["service"].answer(question, as_of, history, progress)
         except LLMError as error:
             # The provider's message can carry account or billing details: logged, not returned.
             log.error("model call failed: %s", _first_part(error))

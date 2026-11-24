@@ -243,3 +243,27 @@ def test_the_service_builds_its_rewriter_once() -> None:
 
     service = AnswerService(model="m", embedder=SlowEmbedder(), llm=None, config=RetrievalConfig())
     assert isinstance(service._intake, IntakeRewriter) and service._intake.model == "m"
+
+
+@pytest.mark.db
+def test_progress_reports_each_stage_in_order(conn, stored) -> None:  # noqa: F811
+    from datetime import date
+
+    from permitnav.answering.answerer import STAGES, AnswerConfig, Answerer
+
+    llm = Scripted("lönen medianlönen procent lönekravet")
+    answerer = Answerer(
+        conn, stored, llm, AnswerConfig(model="m", k=1), intake=IntakeRewriter(llm, "m")
+    )
+    heard: list[str] = []
+    answerer.answer(
+        "Och lönen?",
+        date(2026, 11, 20),
+        history=["Jag har arbetstillstånd."],
+        progress=heard.append,
+    )
+    assert heard == ["understanding", "searching", "writing"]
+    assert all(stage in STAGES for stage in heard)
+    heard.clear()
+    answerer.answer("lönen medianlönen", date(2026, 11, 20), progress=heard.append)
+    assert heard == ["searching", "writing"]  # no history: no intake stage

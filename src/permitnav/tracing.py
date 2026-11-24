@@ -58,6 +58,9 @@ def set_content_mode(mode: str) -> None:
 _provider: Any = None
 
 
+QUESTION_PATHS = ("/ask", "/ask/stream")
+
+
 def keep_trace(name: str, attributes: Mapping[str, Any] | None = None) -> bool:
     """Whether a trace is worth recording, from its root span as it starts. FastAPI traces
     every request once a tracer is installed: health checks (every minute, from the uptime
@@ -71,7 +74,7 @@ def keep_trace(name: str, attributes: Mapping[str, Any] | None = None) -> bool:
     method = attributes.get("http.request.method")
     if method is None:
         return True
-    return method == "POST" and attributes.get("url.path") == "/ask"
+    return method == "POST" and attributes.get("url.path") in QUESTION_PATHS
 
 
 def _questions_only():

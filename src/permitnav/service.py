@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import os
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -89,7 +90,13 @@ class AnswerService:
         # Built once (it reads its prompt); it calls the model only for follow-on questions.
         self._intake = IntakeRewriter(self.llm, self.model)
 
-    def answer(self, question: str, as_of: date, history: list[str] | None = None) -> Answer:
+    def answer(
+        self,
+        question: str,
+        as_of: date,
+        history: list[str] | None = None,
+        progress: Callable[[str], None] | None = None,
+    ) -> Answer:
         """`history`: the user's earlier questions (phase 5 memory, kept by the client). With
         it, intake makes the question self-contained first (one more model call); without
         it, nothing changes."""
@@ -98,7 +105,7 @@ class AnswerService:
             retriever = Retriever(conn, self.embedder, self.config, translator, self.reranker)
             answer_config = AnswerConfig(model=self.model, min_score=BGE_M3_FLOOR)
             return Answerer(conn, retriever, self.llm, answer_config, intake=self._intake).answer(
-                question, as_of, history=history or []
+                question, as_of, history=history or [], progress=progress
             )
 
     def source(self, version_id: int) -> dict[str, str] | None:
