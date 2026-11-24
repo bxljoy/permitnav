@@ -17,7 +17,8 @@ are set (LANGFUSE_HOST defaults to the EU region), a JSON-lines file when PERMIT
 is set, neither otherwise (spans are then never recorded, at almost no cost). The provider
 is installed once per process (OpenTelemetry allows one); `flush()` sends what is buffered.
 Only questions are traced: a sampler drops every other HTTP request (health checks, scanners),
-which FastAPI would otherwise trace (`keep_trace`).
+which FastAPI would otherwise trace (`keep_trace`). The CLI traces `ask`, and eval commands
+only with `--trace` (`cli.traces`).
 
 Plain OpenTelemetry, no vendor SDK: the backend is a configuration choice.
 """
