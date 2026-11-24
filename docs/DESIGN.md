@@ -1147,3 +1147,34 @@ Haiku as the check model needs reasoning effort `low` and 2,000 tokens: at 800 i
 **Why answers did not follow the search.** With the table of contents, the second search fixed 7 answers and broke 8 (Haiku). The fixes added the deciding section (5 kap. 7 § for permanent residence, 5 kap. 18 § for working while an application is pending, Migrationsverket's page on updating an application). Most breaks are one trap: for a work-permit holder's family the check added the law's general family rules, 5 kap. 3 a §, 3 j §, 3 l § or 3 m § — their headings fit the question exactly — where the ordinance's 4 kap. 4 a § ("Uppehållstillstånd för familjemedlemmar i vissa fall") applies; the answer model then trusted them (housing-size requirements that do not apply, 951; 004; 901; 952). Sonnet as the check model fell into the same trap, at 8.5 times the cost of plain RAG and over the $0.01 budget. The limit is not the model's strength: the law's structure points to a neighbouring rule, and no search step can tell which of several similar rules applies.
 
 **Decision: the agent loop is not built further.** The stop rule's letter (situational law retrieval) was met — +18 law groups — but its purpose was better answers, and those stayed flat. The second search stays as an option, off by default, like the reranker and the paper slots, so it can be re-measured with one flag when something changes (intake, a verifier, a stronger answer model). Phase 5 continues with what does not depend on searching better: intake and memory for follow-on questions (asked alone, 5 of 12 got the right kind of answer), then a verifier that checks that each cited rule fits the situation described — the new bottleneck.
+
+### Step 3: intake and memory for follow-on questions (2026-11-24)
+
+**What was built** (`agent/intake.py`, `prompts/intake.md`): when a question comes with the user's earlier questions (memory, kept by the client: the server stores nothing), one model call (the answer model, reasoning effort low) rewrites it into a self-contained question in the same language, carrying over only facts the user stated and never adding assumptions, and records the user's situation (permit, dates, employer change, family, other; only fields the user mentioned). Search and answer then use the rewrite, exactly as plain RAG does. Without history there is no call, so single questions cost what they did; any failure (model error, unreadable reply, empty rewrite) falls back to the question as asked. At most the last 6 earlier questions are used.
+
+**API:** `POST /ask` takes an optional `history` (at most 6 earlier questions, each validated like `question`: stripped, 1–2,000 characters; more is a 422). The response adds `understood_as` (the rewrite, when there was one) and `situation`, returned only to the asker so they can see and correct what was understood (the editable panel in phase 6). Traces record the number of earlier turns and which situation fields were stated, never the text. Eval: `eval-answers` passes each item's `turns` as history (`--no-memory` asks them alone, the plain-RAG baseline); `ask --earlier "<question>"` (repeatable) does the same from the command line.
+
+**Result** (the 12 multi-turn items, two judged runs each, same corpus and answer model):
+
+| | Plain RAG (asked alone) | With memory |
+|---|---|---|
+| Expected source groups in the context | 2/30 | **10/30** |
+| Right kind of answer | 5, 6 | **9, 8** |
+| Judged correct | 4, 6 | **6, 7** |
+| Asked back what the user meant | 6, 4 | 0, 1 |
+| Cost per question | $0.0016 | $0.0020 |
+
+Fixed: 902 (en and sv; plain RAG asked back, or declined the Swedish one as out of scope), 903-sv, 905 (from asking back to a partly right answer). Unchanged: 903-en and 904, whose wording already carried enough. Worse: 901 (both) and 906-en — without memory the model asked back (judged acceptable); with the full question it tried to answer for a work-permit holder's spouse, was pulled between the law's general family rules and the ordinance's, and said "not settled". The same rule-choice trap as in step 2, now made reachable: the case for the verifier (step 4).
+
+**Decision:** memory on (it costs a call only when there is history). The client sends the history from phase 6.
+
+**Code review (high), all fixed with regression tests:**
+- **The answer's language was taken from the rewrite**, which can carry the earlier turns' language into a follow-on asked in another one (a Swedish "och min make?" after English questions could get an English answer). It is now taken from the question as asked.
+- **History was formatted into the system prompt**, so a newline in a client-written question could pose as an instruction. The conversation now goes in the user message as JSON (each question on one line), and the prompt says it is data.
+- **A rewrite had no length limit.** One longer than any question the API accepts (2,000 characters) is not used; the question as asked is.
+- **Model calls were under-counted:** the answer span's `permitnav.model_calls` now counts the intake and second-search calls; `ask` prints how a follow-on was understood and the rewrite's cost; a failed answer in an eval keeps the rewrite it paid for.
+- **Placeholder situation values** ("None", "unknown", "N/A", "okänt"…) were shown as if the user had said them; they are dropped, and the prompt asks to leave unmentioned fields out.
+
+A third memory run after the fixes: right kind 11/12, judged correct 8 (within the earlier runs' spread or slightly better).
+
+**Second review (`/ship`, high), fixed:** a client may send a whole conversation (up to 50 earlier questions; only the last 6 are used) instead of getting a 422 from the 8th question; a question echoed back unchanged except for its whitespace no longer counts as rewritten (it was shown back as "understood as"); when memory is skipped, the result and the intake span say why (`model error`, or the reply's finish reason such as `length`), and the rewrite gets 2,500 tokens instead of 1,500; `eval-answers` now uses memory by default, as production does, with `--no-memory` for the plain-RAG baseline (single questions are unaffected: no history, no call); the service builds its rewriter once. Not changed: during a provider outage a follow-on waits for two failing calls (intake, then the answer) before the error, which only matters while everything else fails too.

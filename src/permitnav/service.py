@@ -84,13 +84,22 @@ class AnswerService:
         self.embedder = LockedEmbedder(self.embedder, self._model_lock)
         if self.reranker is not None:
             self.reranker = LockedReranker(self.reranker, self._model_lock)
+        from permitnav.agent.intake import IntakeRewriter
 
-    def answer(self, question: str, as_of: date) -> Answer:
+        # Built once (it reads its prompt); it calls the model only for follow-on questions.
+        self._intake = IntakeRewriter(self.llm, self.model)
+
+    def answer(self, question: str, as_of: date, history: list[str] | None = None) -> Answer:
+        """`history`: the user's earlier questions (phase 5 memory, kept by the client). With
+        it, intake makes the question self-contained first (one more model call); without
+        it, nothing changes."""
         translator = self._translator()
         with db.connect(self.database_url) as conn:
             retriever = Retriever(conn, self.embedder, self.config, translator, self.reranker)
             answer_config = AnswerConfig(model=self.model, min_score=BGE_M3_FLOOR)
-            return Answerer(conn, retriever, self.llm, answer_config).answer(question, as_of)
+            return Answerer(conn, retriever, self.llm, answer_config, intake=self._intake).answer(
+                question, as_of, history=history or []
+            )
 
     def healthy(self) -> bool:
         try:

@@ -16,9 +16,10 @@ from datetime import date
 from typing import Annotated, Any, Protocol
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints
 
 from permitnav import tracing
+from permitnav.agent.intake import MAX_HISTORY_ACCEPTED, MAX_QUESTION_CHARS
 from permitnav.answering.answerer import Answer
 
 NOTICE = "Not legal advice; check with Migrationsverket. You are talking to an AI."
@@ -29,20 +30,26 @@ CREDITS = {
     "ruling": "Källa: Sveriges Domstolar",
     "position_paper": "Källa: Migrationsverket",
 }
-MAX_QUESTION_CHARS = 2000
 log = logging.getLogger("permitnav.api")
 
 
 class Service(Protocol):
-    def answer(self, question: str, as_of: date) -> Answer: ...
+    def answer(self, question: str, as_of: date, history: list[str]) -> Answer: ...
     def healthy(self) -> bool: ...
 
 
+Question = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_QUESTION_CHARS)
+]
+
+
 class AskRequest(BaseModel):
-    question: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_QUESTION_CHARS)
-    ]
+    question: Question
     as_of: date | None = None  # the date the question is asked about (D8); default today
+    # The user's earlier questions in this conversation, oldest first (phase 5 memory). The
+    # client keeps them; the server uses the last few for this answer only, never stores or
+    # traces their text. A whole conversation may be sent; the list is only bounded.
+    history: Annotated[list[Question], Field(max_length=MAX_HISTORY_ACCEPTED)] = []
 
 
 class CitationOut(BaseModel):
@@ -63,6 +70,10 @@ class AskResponse(BaseModel):
     credits: list[str]
     as_of: date
     notice: str
+    # When the question was made self-contained with the history: how it was understood,
+    # and what the user has said about their situation, so they can see and correct it.
+    understood_as: str | None = None
+    situation: dict[str, str] = {}
 
 
 def to_response(answer: Answer, as_of: date) -> AskResponse:
@@ -88,6 +99,8 @@ def to_response(answer: Answer, as_of: date) -> AskResponse:
         credits=credits,
         as_of=as_of,
         notice=NOTICE,
+        understood_as=answer.intake.question if answer.intake and answer.intake.rewritten else None,
+        situation=dict(answer.intake.situation) if answer.intake else {},
     )
 
 
@@ -144,17 +157,18 @@ def create_app(service: Service | None = None, token: str | None = None) -> Fast
                 "langfuse.trace.name": "ask",
                 "langfuse.environment": os.environ.get("PERMITNAV_ENV", "development"),
                 "permitnav.question_chars": len(request.question),
+                "permitnav.history_turns": len(request.history),  # how many, never what
             },
         ) as current:
-            response = _ask(request.question, as_of)
+            response = _ask(request.question, as_of, request.history)
             current.set_attribute("permitnav.kind", response.kind)
             return response
 
-    def _ask(question: str, as_of: date) -> AskResponse:
+    def _ask(question: str, as_of: date, history: list[str]) -> AskResponse:
         from permitnav.llm.port import LLMError
 
         try:
-            answer = state["service"].answer(question, as_of)
+            answer = state["service"].answer(question, as_of, history)
         except LLMError as error:
             # The provider's message can carry account or billing details: logged, not returned.
             log.error("model call failed: %s", _first_part(error))

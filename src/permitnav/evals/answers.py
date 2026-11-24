@@ -36,7 +36,9 @@ class AnswerResult:
         """All model calls for the answer, retries included. None when the provider did not
         report a cost; 0 when no model was called."""
         search = self.answer.search
+        intake = self.answer.intake
         calls = [
+            *([intake.completion] if intake and intake.completion else []),
             *([search.completion] if search and search.completion else []),
             *self.answer.earlier,
             *([self.answer.completion] if self.answer.completion else []),
@@ -64,9 +66,10 @@ def run_answers(
     results = []
     for done, item in enumerate(items, start=1):
         try:
-            answer = answerer.answer(item.question, as_of=item.as_of)
+            answer = answerer.answer(item.question, as_of=item.as_of, history=item.turns)
         except LLMError as error:
             answer = Answer(kind="failed", text=f"model call failed: {error}")
+            answer.intake = getattr(error, "intake", None)  # paid for before the failure
         results.append(AnswerResult(item, answer))
         if progress:
             progress(done, len(items))

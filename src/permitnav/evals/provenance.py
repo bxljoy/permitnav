@@ -20,6 +20,7 @@ PROMPTS = (
     "judge_correctness.md",
     "judge_faithfulness.md",
     "evidence_check.md",
+    "intake.md",
 )
 REPO = Path(__file__).resolve().parents[3]
 
