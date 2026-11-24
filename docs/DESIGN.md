@@ -1242,3 +1242,14 @@ Built and on: intake and memory for follow-on questions (API `history`, `underst
 - Smaller: examples use the chosen "rules as of" date; the source panel has its own error messages; Enter while an input method is composing (Chinese, Japanese, Korean) no longer sends; the UI is served by explicit GET routes (`/`, `/favicon.svg`, `/assets`) instead of a catch-all mount, so unknown API paths still 404 and trailing-slash redirects still work.
 
 **CI:** the web app's type-check and unit tests run inside "Lint, types and tests", its build inside "Build image" (both already required checks, so `deploy/update.sh` and the ruleset need no change); `npm audit` of the runtime dependencies joins the dependency audit.
+
+### Slice 1b: a UX pass after the first real use (2026-11-24)
+
+The first use on production showed the "Rules as of" control as a bare browser date field ("yyyy-mm-dd" next to the word "today") right where questions are typed. Changed, and checked in a browser at 1,288 px (the author's screen), at iPhone 14 width (390 px) and in dark mode:
+
+- **The date is a chip inside the composer:** "Rules as of today", or, once set, a highlighted "Rules as of 15 February 2026 ×"; clicking it opens a small popover that explains what the date does, with the date field opening on today rather than empty. Dates read as people read them ("1 May 2026") in the chip, on questions and in answer footers; the API keeps ISO dates.
+- **One composer field:** the text box grows with the text (up to a third of the screen), with the chip and a round send button inside it; "Enter to ask · Shift+Enter for a new line" below it, hidden on touch devices.
+- **Phone:** the header keeps one line ("Delete" instead of "Delete conversation"); a shorter placeholder that fits.
+- **Reading:** a slightly narrower column (720 px) and more space between paragraphs.
+
+The edges that looked cut off in the first screenshots were the screenshot's crop: the page fits the window exactly at that width.

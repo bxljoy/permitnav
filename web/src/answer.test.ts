@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
 import type { AskResponse, Citation } from "./api";
-import { asPlainText, blocks, inline } from "./answer";
+import { asPlainText, blocks, inline, readableDate } from "./answer";
 
 const cite = (marker: string): Citation => ({
   marker, unit_id: `sfs:2005:716/6kap/${marker}`, heading: `6 kap. ${marker}`, url: "https://x",
   authority: "law", dates: "applies from 2026-06-01", quote: "lönen", translation: "the salary",
+});
+
+describe("dates", () => {
+  it("shows a date the way people read it, whatever the time zone", () => {
+    expect(readableDate("2026-05-01")).toBe("1 May 2026");
+    expect(readableDate("2026-11-24")).toBe("24 November 2026");
+    expect(readableDate("not a date")).toBe("not a date");
+  });
 });
 
 describe("answer text", () => {
