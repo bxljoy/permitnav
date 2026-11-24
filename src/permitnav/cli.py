@@ -1735,6 +1735,13 @@ def cmd_judge_calibrate(args: argparse.Namespace) -> int:
     return 0 if result.passes() else 2
 
 
+def traces(args: argparse.Namespace) -> bool:
+    """Whether a CLI run sends traces: `ask` always (one question, like the API), eval
+    commands only with `--trace`, nothing else. Eval runs and the nightly retrieval check
+    used most of the Langfuse plan's monthly units, for details the eval output already has."""
+    return args.run is cmd_ask or bool(getattr(args, "trace", False))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="permitnav")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1867,13 +1874,21 @@ def main(argv: list[str] | None = None) -> int:
     jc.add_argument("--verbose", "-v", action="store_true", help="show each disagreement")
     jc.add_argument("--out", help="write the judge's verdicts as JSON lines")
     jc.set_defaults(run=cmd_judge_calibrate)
+    for eval_parser in (ev, sm, ea, js, jc):
+        eval_parser.add_argument(
+            "--trace",
+            action="store_true",
+            help="send this run's traces to the configured backend (off by default: each "
+            "judged question is ~10 observations; the per-item --out file has the details)",
+        )
     args = parser.parse_args(argv)
     from permitnav import tracing
 
-    # Eval runs ask only golden-set questions, so their traces may hold the full text;
-    # anything else (e.g. `ask`) records metadata only. No exporter configured: no tracing.
-    full = args.run in (cmd_eval_answers, cmd_judge_sample, cmd_judge_calibrate)
-    tracing.configure("permitnav-cli", content="full" if full else "metadata")
+    if traces(args):
+        # Eval runs ask only golden-set questions, so their traces may hold the full text;
+        # anything else (e.g. `ask`) records metadata only. No exporter configured: no tracing.
+        full = args.run in (cmd_eval_answers, cmd_judge_sample, cmd_judge_calibrate)
+        tracing.configure("permitnav-cli", content="full" if full else "metadata")
     try:
         return args.run(args)
     finally:

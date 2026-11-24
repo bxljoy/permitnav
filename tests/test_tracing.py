@@ -161,6 +161,34 @@ def test_cli_commands_reset_to_metadata_after_an_eval(spans, monkeypatch) -> Non
     assert tracing.content_mode() == "metadata"
 
 
+def test_eval_commands_send_traces_only_when_asked_and_ask_always(spans, monkeypatch) -> None:
+    """Eval runs (~10 observations per judged question) and the nightly retrieval check used
+    most of the Langfuse plan's monthly units; their --out files already hold the details."""
+    from permitnav import cli
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        tracing,
+        "configure",
+        lambda service, content="metadata": calls.append((service, content)) or True,
+    )
+    for name in ("cmd_eval", "cmd_eval_answers", "cmd_smoke", "cmd_refresh", "cmd_ask"):
+        monkeypatch.setattr(cli, name, lambda args: 0)
+    cli.main(["eval", "--file", "x.jsonl"])
+    cli.main(["eval-answers", "--file", "x.jsonl"])
+    cli.main(["smoke"])
+    cli.main(["refresh"])
+    assert calls == []  # nothing configured: spans are no-ops, nothing is sent
+    cli.main(["eval-answers", "--file", "x.jsonl", "--trace"])
+    cli.main(["eval", "--file", "x.jsonl", "--trace"])
+    cli.main(["ask", "Vilken lön krävs?"])
+    assert calls == [
+        ("permitnav-cli", "full"),  # golden-set questions: text allowed
+        ("permitnav-cli", "metadata"),
+        ("permitnav-cli", "metadata"),  # a real question: never its text
+    ]
+
+
 def test_only_questions_and_non_http_work_are_traced() -> None:
     from permitnav.tracing import keep_trace
 
