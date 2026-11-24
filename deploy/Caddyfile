@@ -15,12 +15,17 @@
 	encode zstd gzip
 	reverse_proxy api:8000
 	request_body {
-		max_size 16KB  # a question is at most 2,000 characters
+		# A question is at most 2,000 characters; with earlier questions (the UI sends the last
+		# 6) and JSON-escaped Swedish letters, a request stays well under this.
+		max_size 64KB
 	}
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
+		# The chat UI loads nothing from other sites: no fonts, scripts or trackers, so no page
+		# view of an immigration question reaches anyone else; and it cannot be framed.
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		-Server
 	}
 }

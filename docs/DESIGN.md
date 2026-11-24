@@ -1213,3 +1213,32 @@ A first round that rebuilt the sources from the database flagged 11 and 13 of 16
 ### Phase 5 outcome (2026-11-24)
 
 Built and on: intake and memory for follow-on questions (API `history`, `understood_as`, `situation`). Built, measured and off by default, each re-measurable with one option: the second search (`--second-search`, `--check-model`), plain-language law descriptions (`describe`, `--description-weight`). Probed and not built: the verifier. Measured against plain RAG: memory raised follow-on questions from about half to about three quarters with the right kind of answer; nothing raised judged correctness on single questions. The remaining failures are (1) choosing the right rule among similar ones and (2) the answer kind — declining or asking back when the sources answer. (2) is an answer-prompt calibration problem best tuned on real questions (phase 6 feedback) rather than on this eval set. The agent framework (LangGraph) was not needed: the workflow that stayed on is fixed code (intake → search → answer).
+
+
+## Phase 6
+
+### Slice 1: the chat UI (2026-11-24)
+
+**What it is.** A small React + TypeScript app (`web/`, Vite) built in the Dockerfile's first stage and served by the API itself at `/` (FastAPI `StaticFiles`, mounted after every API route, only when a build exists). Same origin as `/ask`, so no CORS and no change to Caddy's routing.
+
+- **Access until the beta:** a one-time "access token" screen, checked with `GET /auth-check` (no question, no model call); the token is kept in the browser's local storage and sent with each request. A refused token returns to the screen; "Sign out" also deletes the conversation.
+- **Conversation:** kept in local storage only (survives closing the tab on that device; "Delete conversation" removes it); the last 6 earlier questions go to `/ask` as `history`, so follow-ons use phase 5's intake. A failed request puts the question back in the box.
+- **Answers:** the answer kind as a label (a question back, not settled, out of scope), paragraphs and lists with clickable `[S1]` markers, the sources listed with their dates, "understood as" for a follow-on and "your situation, as understood" (collapsed), the rules' date and credits, and "Copy answer" (text, sources with dates and links, the rules' date, the answer date and the notice).
+- **Sources:** a side panel (over the page on phones) with the quote, its unofficial translation, the full text of the exact wording cited (`POST /source` by `version_id`, which every citation carries: an older wording shares its unit with the current one) and a link to the original.
+- **Progress:** a pending line with seconds elapsed ("usually 8–15 s"); real stages come with streaming (slice 2).
+- **Notices:** "You are talking to an AI … not legal advice" above the conversation from the first view, and the API's notice in every copied answer.
+
+**Privacy and safety choices.** The page loads nothing from other sites (system fonts, no CDN, no analytics), so no third party learns that someone opened an immigration question; Caddy sends a Content-Security-Policy of `'self'` only, no framing. Caddy's request limit rose from 16 to 64 KB for the history (6 questions of up to 2,000 characters, JSON-escaped). The UI renders model text as text (React escapes it); markers become buttons only when the answer has a citation for them.
+
+**Checked in a real browser before review** (three bugs no unit test caught): a visually-hidden label stretched by the composer's layout rule made the page scroll sideways; an effect written as `useEffect(() => el.scrollIntoView(…))` returned the Promise that `scrollIntoView` now returns, which React later called as a cleanup — the page went blank when an answer arrived (effects now use block bodies); the model's `**bold**` showed as literal asterisks (now rendered, stray ones dropped).
+
+**Code review (high), all fixed:**
+- **An older-wording citation opened today's wording** in the panel: `/source` looked a source up by unit and date, but an older wording (kept alive by a transitional provision) shares its unit with the current one. Citations now carry `version_id` and the panel fetches exactly that wording (checked in the browser: 6 kap. 2 § "god försörjning", 2023-11-01 to 2026-06-01, next to its own quote).
+- **`/source` is a POST:** with the unit and date in the URL, Caddy's access log would have recorded which provisions each person opened.
+- **A conversation deleted while an answer was loading came back** when the answer arrived; a late answer to a deleted conversation is now dropped.
+- **An unanswered question stayed in the saved conversation** (token refused, or the tab reloaded while waiting) and was sent as history afterwards; it is taken out on every failure and dropped on load.
+- **An intro line straight before its bullets** rendered as one paragraph with literal dashes; lines are now split into paragraph and list runs.
+- **Sign out keeps nothing:** signing out on purpose deletes the conversation from the browser (a shared computer); a refused token keeps it.
+- Smaller: examples use the chosen "rules as of" date; the source panel has its own error messages; Enter while an input method is composing (Chinese, Japanese, Korean) no longer sends; the UI is served by explicit GET routes (`/`, `/favicon.svg`, `/assets`) instead of a catch-all mount, so unknown API paths still 404 and trailing-slash redirects still work.
+
+**CI:** the web app's type-check and unit tests run inside "Lint, types and tests", its build inside "Build image" (both already required checks, so `deploy/update.sh` and the ruleset need no change); `npm audit` of the runtime dependencies joins the dependency audit.

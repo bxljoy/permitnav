@@ -1,5 +1,14 @@
 # PermitNav API: the answering pipeline behind FastAPI, bge-m3 on the CPU (phase 3).
 # The model weights are not baked in: they download once into the /models volume.
+
+# The chat UI (phase 6), built once and served by the API itself (same origin as /ask).
+FROM node:22.12.0-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 COPY --from=ghcr.io/astral-sh/uv:0.13.9 /uv /uvx /bin/
@@ -23,6 +32,8 @@ COPY migrations ./migrations
 COPY evals/golden.dev.jsonl evals/queries.dev.json ./evals/
 # Which Lifos position papers are in scope: a person's decision (phase 4, slice 5)
 COPY curation/position_papers.csv ./curation/
+# The built chat UI; api.py serves it at / (PERMITNAV_WEB_DIR defaults to /app/web)
+COPY --from=web /web/dist ./web
 RUN uv sync --locked --no-dev --extra embed --extra api
 
 RUN useradd --create-home --uid 10001 app \

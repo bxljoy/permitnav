@@ -35,6 +35,7 @@ log = logging.getLogger("permitnav.api")
 
 class Service(Protocol):
     def answer(self, question: str, as_of: date, history: list[str]) -> Answer: ...
+    def source(self, version_id: int) -> dict[str, str] | None: ...
     def healthy(self) -> bool: ...
 
 
@@ -61,6 +62,20 @@ class CitationOut(BaseModel):
     dates: str
     quote: str
     translation: str
+    version_id: int | None = None  # the exact wording: what GET /source opens
+
+
+class SourceRequest(BaseModel):
+    version_id: Annotated[int, Field(ge=1)]
+
+
+class SourceOut(BaseModel):
+    unit_id: str
+    heading: str
+    authority: str
+    url: str
+    dates: str
+    text: str
 
 
 class AskResponse(BaseModel):
@@ -93,6 +108,7 @@ def to_response(answer: Answer, as_of: date) -> AskResponse:
                 dates=c.dates,
                 quote=c.quote,
                 translation=c.translation,
+                version_id=c.version_id,
             )
             for c in answer.citations
         ],
@@ -110,7 +126,12 @@ def _first_part(error: Exception) -> str:
     return str(error).split(":", 1)[0][:80]
 
 
-def create_app(service: Service | None = None, token: str | None = None) -> FastAPI:
+WEB_DIR = os.environ.get("PERMITNAV_WEB_DIR", "/app/web")  # the built chat UI (phase 6)
+
+
+def create_app(
+    service: Service | None = None, token: str | None = None, web_dir: str | None = WEB_DIR
+) -> FastAPI:
     """The app. Tests pass a fake service and a token; production builds both from the
     environment at startup (loading bge-m3 takes a few seconds)."""
     state: dict[str, Any] = {"service": service, "token": token}
@@ -147,6 +168,21 @@ def create_app(service: Service | None = None, token: str | None = None) -> Fast
             raise HTTPException(status_code=503, detail="database unavailable")
         return {"status": "ok"}
 
+    @app.get("/auth-check", dependencies=[Depends(authorised)])
+    def auth_check() -> dict[str, bool]:
+        """Lets a client check a token without asking (and paying for) a question."""
+        return {"ok": True}
+
+    @app.post("/source", dependencies=[Depends(authorised)])
+    def source(request: SourceRequest) -> SourceOut:
+        """The full text of the exact wording an answer cited (the citation panel). By
+        version id, since an older wording shares its unit with the current one; a POST
+        body, so which sources a person opens never appears in a URL or an access log."""
+        found = state["service"].source(request.version_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail="no such source")
+        return SourceOut(**found)
+
     @app.post("/ask", dependencies=[Depends(authorised)])
     def ask(request: AskRequest) -> AskResponse:
         as_of = request.as_of or date.today()
@@ -178,6 +214,29 @@ def create_app(service: Service | None = None, token: str | None = None) -> Fast
             raise HTTPException(status_code=502, detail="the model's reply could not be read")
         return to_response(answer, as_of)
 
+    # The chat UI (phase 6), when built: the page, its icon and /assets only, by GET, so
+    # every other path still gets the API's 404 or trailing-slash redirect. The page holds no
+    # secret; it asks for the access token and sends it with each request.
+    if web_dir and os.path.isfile(os.path.join(web_dir, "index.html")):
+        from fastapi.responses import FileResponse
+        from fastapi.staticfiles import StaticFiles
+
+        index = os.path.join(web_dir, "index.html")
+
+        @app.get("/", include_in_schema=False)
+        def page() -> FileResponse:
+            return FileResponse(index, headers={"Cache-Control": "no-cache"})
+
+        icon = os.path.join(web_dir, "favicon.svg")
+        if os.path.isfile(icon):
+
+            @app.get("/favicon.svg", include_in_schema=False)
+            def favicon() -> FileResponse:
+                return FileResponse(icon)
+
+        assets = os.path.join(web_dir, "assets")
+        if os.path.isdir(assets):
+            app.mount("/assets", StaticFiles(directory=assets), name="assets")
     return app
 
 

@@ -79,6 +79,8 @@ class Citation:
     dates: str
     quote: str = ""  # Swedish, copied from the source
     translation: str = ""  # unofficial (D12)
+    # The exact wording cited: an older wording shares its unit_id with the current one.
+    version_id: int | None = None
 
 
 @dataclass
@@ -298,6 +300,7 @@ def parse_answer(completion: Completion, context: Context) -> Answer:
                 dates=source.dates,
                 quote=swedish,
                 translation=translation if isinstance(translation, str) else "",
+                version_id=source.version_id,
             )
         )
     return Answer(

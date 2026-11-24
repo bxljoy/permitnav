@@ -101,6 +101,30 @@ class AnswerService:
                 question, as_of, history=history or []
             )
 
+    def source(self, version_id: int) -> dict[str, str] | None:
+        """One wording by id (the exact one an answer cited), with the dates line the
+        answer model saw."""
+        from permitnav.answering.context import _dates, _stockholm_date
+
+        with db.connect(self.database_url) as conn:
+            row = conn.execute(
+                "SELECT u.id, u.heading, u.authority, u.url, v.text, v.valid_from, v.valid_to,"
+                " v.observed_from FROM unit_version v JOIN unit u ON u.id = v.unit_id"
+                " WHERE v.id = %s",
+                (version_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        unit, heading, authority, url, text, valid_from, valid_to, seen = row
+        return {
+            "unit_id": unit,
+            "heading": heading,
+            "authority": authority,
+            "url": url,
+            "dates": _dates(authority, valid_from, valid_to, _stockholm_date(seen)),
+            "text": text,
+        }
+
     def healthy(self) -> bool:
         try:
             url = self.database_url or db.database_url()

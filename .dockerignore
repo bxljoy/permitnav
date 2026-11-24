@@ -19,3 +19,7 @@ docs/
 mlruns/
 *.tfvars
 .terraform/
+
+# The web app is built inside the image from its sources and lock file
+web/node_modules/
+web/dist/
