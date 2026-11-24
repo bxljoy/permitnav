@@ -141,7 +141,19 @@ curl -X POST localhost:8000/ask \
   -d '{"question": "What salary do I need for a Swedish work permit?"}'
 ```
 
-`POST /ask` takes `{"question": …, "as_of": "YYYY-MM-DD"}` (the date defaults to today) and returns the answer kind, text, citations with dates and links, source credits and the AI notice; a failed model call or an unreadable reply is a 502. `GET /health` checks the database. Every `/ask` needs the `API_TOKEN` from `.env`.
+`POST /ask` takes `{"question": …, "as_of": "YYYY-MM-DD", "history": [earlier questions]}` (the date defaults to today; `history` is optional) and returns the answer kind, text, citations with dates and links, source credits, the AI notice and, for a follow-on, `understood_as` and `situation`; a failed model call or an unreadable reply is a 502. `POST /source` with `{"version_id": …}` (each citation carries its `version_id`) returns the exact wording an answer cited, older wordings included; it is a POST so which sources someone opens never appears in a URL or an access log. `GET /health` checks the database. Everything except `/health` needs the `API_TOKEN` from `.env`.
+
+### Run the chat UI
+
+The image serves the built UI at `/` (open the API's address and enter the access token). To work on it:
+
+```
+cd web && npm ci
+npm run dev        # Vite on localhost:5173, proxying /ask, /source and /auth-check to :8000
+npm test           # unit tests;  npm run typecheck;  npm run build -> web/dist
+```
+
+The conversation and the token stay in the browser's local storage; the page loads nothing from other sites.
 
 ## How it was built
 

@@ -52,6 +52,14 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run pyright
       - run: uv run pytest -q
+      # The chat UI (phase 6), with the Node the runner image ships: types and unit tests.
+      # Its build runs in the Dockerfile, so "Build image" fails on a broken UI build.
+      - name: Web app types and tests
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm test
 
   retrieval-eval:
     name: Retrieval eval (no models)
@@ -110,6 +118,9 @@ jobs:
         run: |
           uv export --frozen --all-extras --no-emit-project --format requirements-txt > requirements.txt
           uvx pip-audit@2.10.1 --requirement requirements.txt --disable-pip --progress-spinner off
+      - name: npm audit of the web app's runtime dependencies
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high
 
   image:
     # Build the API image once; on main, push it to GHCR tagged with the commit, so the server

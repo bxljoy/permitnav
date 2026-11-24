@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from permitnav.retrieval.retriever import RetrievalConfig
 from permitnav.retrieval.translate import LLMTranslator
 from permitnav.service import AnswerService
@@ -55,3 +57,36 @@ def test_no_translator_when_translation_is_off() -> None:
         model="m", embedder=SlowEmbedder(), llm=object(), config=RetrievalConfig(translate=False)
     )
     assert service._translator() is None
+
+
+@pytest.mark.db
+def test_a_source_is_read_in_the_exact_wording_that_was_cited(fresh_database_url) -> None:
+    """The citation panel (phase 6) shows the wording the answer was given from."""
+
+    import psycopg
+
+    from tests.test_ingest import FIXTURE, ingest
+
+    with psycopg.connect(fresh_database_url) as conn:
+        ingest(conn, FIXTURE, 20)
+        conn.commit()
+    service = AnswerService(
+        model="m", embedder=SlowEmbedder(), llm=None, config=RetrievalConfig(),
+        database_url=fresh_database_url,
+    )  # fmt: skip
+    with psycopg.connect(fresh_database_url) as conn:
+        row = conn.execute(  # a section with an older and a newer wording
+            "SELECT unit_id FROM unit_version GROUP BY unit_id HAVING count(*) > 1 LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        unit = row[0]
+        versions = conn.execute(
+            "SELECT id, text, valid_from FROM unit_version WHERE unit_id = %s ORDER BY id",
+            (unit,),
+        ).fetchall()
+    assert len(versions) >= 2
+    for version_id, text, valid_from in versions:  # each exactly as cited, older ones too
+        got = service.source(version_id)
+        assert got is not None and got["text"] == text and got["unit_id"] == unit
+        assert str(valid_from) in got["dates"] if valid_from else True
+    assert service.source(10**9) is None

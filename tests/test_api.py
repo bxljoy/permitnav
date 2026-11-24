@@ -32,6 +32,18 @@ class FakeService:
     def healthy(self) -> bool:
         return self._healthy
 
+    def source(self, version_id: int) -> dict[str, str] | None:
+        if version_id != 7:
+            return None
+        return {
+            "unit_id": "sfs:2005:716/6kap/2§",
+            "heading": "6 kap. 2 §",
+            "authority": "law",
+            "url": "https://x",
+            "dates": "applies from 2026-06-01",
+            "text": "Arbetstillstånd får ges (older wording)",
+        }
+
 
 CITATIONS = [
     Citation(
@@ -79,6 +91,7 @@ def test_ask_returns_the_answer_with_citations_credits_and_notice() -> None:
         "dates": "applies from 2026-06-01",
         "quote": "lönen",
         "translation": "the salary",
+        "version_id": None,
     }
     assert body["credits"] == ["Källa: Sveriges riksdag", "Källa: Sveriges Domstolar"]  # once each
 
@@ -232,3 +245,53 @@ def test_traces_record_how_many_earlier_questions_never_their_text(spans) -> Non
     assert ask.attributes["permitnav.history_turns"] == 1
     for span in spans.get_finished_spans():
         assert all(secret not in str(v) for v in span.attributes.values())
+
+
+# --- phase 6: the chat UI's endpoints ----------------------------------------------------
+
+
+def test_a_token_can_be_checked_without_asking_a_question() -> None:
+    service = FakeService()
+    with client(service) as c:
+        assert c.get("/auth-check").status_code == 401
+        assert c.get("/auth-check", headers={"Authorization": "Bearer nope"}).status_code == 401
+        assert c.get("/auth-check", headers=AUTH).json() == {"ok": True}
+    assert service.asked == []  # no question, no model call
+
+
+def test_a_cited_source_is_returned_by_its_exact_version() -> None:
+    """An older wording shares its unit with the current one: the citation carries the
+    version, and the panel asks for it in a POST body (never a URL an access log keeps)."""
+    with client() as c:
+        assert c.post("/source", json={"version_id": 7}).status_code == 401
+        body = c.post("/source", json={"version_id": 7}, headers=AUTH).json()
+        assert body["text"] == "Arbetstillstånd får ges (older wording)"
+        assert c.post("/source", json={"version_id": 8}, headers=AUTH).status_code == 404
+        for bad in ({"version_id": 0}, {"version_id": "x"}, {}):
+            assert c.post("/source", json=bad, headers=AUTH).status_code == 422
+        assert c.get("/source", headers=AUTH).status_code in (404, 405)
+
+
+def test_citations_carry_the_version_they_quote() -> None:
+    cited = Answer(kind="answered", text="Svar [S1].", citations=[
+        Citation("S1", "sfs:2005:716/6kap/2§", "6 kap. 2 §", "https://x", "law", "d", version_id=42)
+    ])  # fmt: skip
+    with client(FakeService(cited)) as c:
+        body = c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH).json()
+    assert body["citations"][0]["version_id"] == 42
+
+
+def test_the_built_ui_is_served_and_the_api_still_wins(tmp_path) -> None:
+    (tmp_path / "index.html").write_text("<title>PermitNav</title>", encoding="utf-8")
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
+    with TestClient(create_app(FakeService(), token=TOKEN, web_dir=str(tmp_path))) as c:
+        assert "PermitNav" in c.get("/").text
+        assert c.get("/assets/app.js").status_code == 200
+        assert c.get("/health").json() == {"status": "ok"}
+        assert c.post("/ask", json={"question": "q?"}).status_code == 401  # still protected
+        assert c.get("/no-such-page").status_code == 404  # no catch-all
+        moved = c.post("/ask/", json={"question": "q?"}, follow_redirects=False)
+        assert moved.status_code == 307  # the API's trailing-slash redirect still works
+    with TestClient(create_app(FakeService(), token=TOKEN, web_dir=str(tmp_path / "none"))) as c:
+        assert c.get("/").status_code == 404  # no build: API only
