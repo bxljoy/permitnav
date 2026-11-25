@@ -70,14 +70,25 @@ export function blocks(text: string, citations: Citation[]): Block[] {
 export const KIND_LABEL: Record<Kind, string | null> = {
   answered: null,
   follow_up: "A question back",
-  not_settled: "The sources don't settle this",
+  // About what PermitNav found, not about the law: the rules may leave it to the individual
+  // case, or the search may have missed the rule that decides it.
+  not_settled: "Answer not confirmed",
   out_of_scope: "Outside what PermitNav covers",
   failed: "No answer",
 };
 
+/** A sentence under the label, for a kind whose label needs explaining. */
+export const KIND_NOTE: Partial<Record<Kind, string>> = {
+  not_settled:
+    "PermitNav couldn't confirm a definite answer from the sources it found. The information below may still help, but please verify it with Migrationsverket before relying on it.",
+};
+
 /** The answer with its sources and dates, for copying or saving. */
 export function asPlainText(response: AskResponse, answeredAt: string): string {
-  const lines = [response.text.trim().replace(/\*\*/g, ""), ""]; // bold labels: plain text has none
+  const lines: string[] = [];
+  const note = KIND_NOTE[response.kind];
+  if (note) lines.push(`${KIND_LABEL[response.kind]}: ${note}`, ""); // the caveat travels with a copy
+  lines.push(response.text.trim().replace(/\*\*/g, ""), ""); // bold labels: plain text has none
   if (response.citations.length) {
     lines.push("Sources:");
     for (const c of response.citations) {

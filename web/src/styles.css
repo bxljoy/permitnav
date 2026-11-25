@@ -80,7 +80,11 @@ button:disabled { cursor: default; opacity: 0.55; }
 .as-of { font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; }
 
 .answer { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.2rem; display: grid; gap: 0.75rem; }
-.answer.kind-not_settled, .answer.kind-follow_up { box-shadow: inset 4px 0 0 var(--warn); }
+.answer.kind-follow_up { box-shadow: inset 4px 0 0 var(--warn); }
+/* "Answer not confirmed" is information about the answer, not an error or a warning. */
+.answer.kind-not_settled { box-shadow: inset 4px 0 0 var(--accent); }
+.answer.kind-not_settled .kind { color: var(--accent); background: var(--accent-soft); }
+.kind-note { margin: 0; font-size: 0.9rem; line-height: 1.5; color: var(--muted); }
 .answer.kind-out_of_scope, .answer.kind-failed { box-shadow: inset 4px 0 0 var(--muted); }
 .kind { justify-self: start; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--warn); background: var(--warn-soft); border-radius: 4px; padding: 0.1rem 0.5rem; }
 .understood { margin: 0; font-size: 0.9rem; color: var(--muted); }
