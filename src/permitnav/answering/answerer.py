@@ -29,6 +29,7 @@ import psycopg
 from permitnav import tracing
 from permitnav.answering.context import Context, Source, build_context
 from permitnav.llm.port import LLM, Completion, CompletionRequest, LLMError
+from permitnav.negation import rules_out
 from permitnav.parsing.references import named_units
 from permitnav.prompting import load_prompt
 from permitnav.retrieval.retriever import Hit, Retriever
@@ -306,25 +307,6 @@ class Answerer:
         answer.earlier = earlier
         answer.search = search
         return answer
-
-
-# Words that rule something out, in English and Swedish. Broad on purpose: a match only
-# means the search question is asked for (single questions) or used (all questions).
-_RULES_OUT = re.compile(
-    r"\b(?:not|no(?!\.)|never|without|cannot|except|excluding|rather\s+than|instead\s+of"
-    r"|other\s+than|apart\s+from|neither|nor|non"
-    r"|inte|ej|icke|utan|ingen|inget|inga|ingenting|förutom|i\s+stället\s+för|istället\s+för"
-    r"|aldrig|varken)\b"
-    # don't, dont, don´t, isn’t, can't, cant …: the apostrophe is often missing or an accent
-    r"|\b(?:do|does|did|is|are|was|were|have|has|had|ca|wo|would|should|could)n[’'´`]?t\b"
-    r"|n[’'´`]t\b",
-    re.IGNORECASE,
-)
-
-
-def rules_out(question: str) -> bool:
-    """Whether the question says what something is not, which search would misread."""
-    return _RULES_OUT.search(question) is not None
 
 
 def _relevant(question: str, hits: list[Hit], min_score: float) -> bool:

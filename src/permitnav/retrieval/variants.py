@@ -127,6 +127,81 @@ def named_variants(question: str) -> set[str]:
     }
 
 
+# A looked-up sibling is shown only when it matches the question about as well as the section
+# that was found (cosine similarity, at most this much lower). Most variants of a section
+# differ by a few words, but some are different content under the same heading (the athletes'
+# "requirements to get an extended work permit" is thirty times the employees' text): there
+# the found section stays.
+SIBLING_MARGIN = 0.05
+
+
+def preferred_siblings(
+    hits: list[Hit], question: str, use_named: bool = True
+) -> dict[tuple[str, str, str], list[str]]:
+    """For each variant group among `hits` that lacks the page collapse_variants would show:
+    the unit ids that page's section would have, for the caller to look up. The variant the
+    question names is asked for when no member is of it, and the general page when the group
+    has neither (the named variant's page may not have the section). `use_named=False` for a
+    question that rules something out: a variant named only to set it aside is not fetched.
+
+    The variants of a section score within a few hundredths of each other, so which of them
+    made the candidate list is chance; without this, a question about an ordinary work permit
+    was shown the researchers' or the self-employed page's section because the employees' one
+    ranked a few places lower."""
+    named = named_variants(question) if use_named else set()
+    named_slugs = sorted(s for s, family in SLUG_FAMILY.items() if family in named)
+    groups: dict[tuple[str, str, str], set[str]] = {}
+    for hit in hits:
+        key = variant_key(hit.unit_id)
+        if key is not None:
+            groups.setdefault(key, set()).add(_slug(hit.unit_id))
+    wanted: dict[tuple[str, str, str], list[str]] = {}
+    for key, slugs in groups.items():
+        if slugs & set(named_slugs):
+            continue  # the named variant was found: it is shown
+        ask = list(named_slugs)
+        if not slugs & GENERAL:
+            ask += sorted(GENERAL)
+        if ask:
+            language, parent, anchor = key
+            wanted[key] = [f"web:{language}/{parent}/{slug}#{anchor}" for slug in ask]
+    return wanted
+
+
+def with_siblings(hits: list[Hit], siblings: list[Hit]) -> list[Hit]:
+    """`hits` with each looked-up sibling placed right after the first member of its group
+    (the group keeps its position; collapse_variants then shows the sibling). A sibling is
+    left out when it matches the question clearly worse than what was found (SIBLING_MARGIN),
+    or when its text is already among the hits under another unit. It takes at most the
+    found members' best score: the group's score says what the search found."""
+    found: dict[tuple[str, str, str], float] = {}
+    texts: dict[str, tuple[str, str, str] | None] = {}
+    for hit in hits:
+        key = variant_key(hit.unit_id)
+        texts.setdefault(hit.text_hash, key)
+        if key is not None:
+            found[key] = max(found.get(key, hit.score), hit.score)
+    by_key: dict[tuple[str, str, str], list[Hit]] = {}
+    for sibling in siblings:
+        key = variant_key(sibling.unit_id)
+        if key is None or key not in found:
+            continue
+        if sibling.score < found[key] - SIBLING_MARGIN:
+            continue
+        if sibling.text_hash in texts and texts[sibling.text_hash] != key:
+            continue
+        by_key.setdefault(key, []).append(
+            dataclasses.replace(sibling, score=min(sibling.score, found[key]))
+        )
+    out: list[Hit] = []
+    for hit in hits:
+        out.append(hit)
+        key = variant_key(hit.unit_id)
+        if key is not None and key in by_key:
+            out.extend(by_key.pop(key))
+    return out
+
+
 def collapse_variants(hits: list[Hit], question: str) -> list[Hit]:
     """One slot per variant group, at its best-ranked member's position; the member shown is
     the named variant, else the general page, else the best-ranked."""

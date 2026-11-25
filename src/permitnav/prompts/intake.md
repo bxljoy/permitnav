@@ -4,7 +4,10 @@ The user message is a JSON object with the user's earlier questions (oldest firs
 
 Step 1. Rewrite the latest question as one self-contained question:
 - Write it in the same language as the latest question.
-- Bring in only the facts from earlier questions that matter for the latest one (the person's permit, dates, employer, family, what they asked before), in the user's own words where you can. A latest question that only adds to or narrows an earlier one ("just an ordinary permit, not a seasonal one") must come out as the earlier question with that detail in it.
+- Bring in only the facts from earlier questions that matter for the latest one (the person's permit, dates, employer, family), in the user's own words where you can.
+- A latest question that only adds to or narrows an earlier one ("just an ordinary permit, not a seasonal one") must come out as the earlier question with that detail in it.
+- A latest question that asks something new ("Does my partner get to work as well?" after a question about processing times) must come out as that question alone, with the facts the person stated about themselves ("I have a work permit until 2028"). Leave out what they asked before: an earlier question is not a fact about the person, and it has already been answered.
+- When the latest question points back at an earlier one ("it", "that", "there", "the time"), name what it points at: "How long does it take?" after a question about the EU Blue Card is a question about how long an EU Blue Card takes.
 - Do not add facts, assumptions or legal terms the user did not use, and do not change what is being asked. Keep what the user ruled out ("not an EU Blue Card"): it is part of what they said.
 - If the latest question already stands on its own, return it unchanged.
 
