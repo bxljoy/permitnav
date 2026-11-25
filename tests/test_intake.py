@@ -232,7 +232,8 @@ def test_evals_use_memory_like_production_unless_told_not_to() -> None:
     llm = ScriptedLLM("unused")
     assert cli._intake(args(run=cli.cmd_eval_answers, no_memory=False), llm, "m") is not None
     assert cli._intake(args(run=cli.cmd_eval_answers, no_memory=True), llm, "m") is None
-    assert cli._intake(args(run=cli.cmd_ask, earlier=None), llm, "m") is None
+    # `ask` as production: a single question that rules something out needs intake too
+    assert cli._intake(args(run=cli.cmd_ask, earlier=None), llm, "m") is not None
     assert cli._intake(args(run=cli.cmd_ask, earlier=["x"]), llm, "m") is not None
 
 
@@ -267,3 +268,249 @@ def test_progress_reports_each_stage_in_order(conn, stored) -> None:  # noqa: F8
     heard.clear()
     answerer.answer("lönen medianlönen", date(2026, 11, 20), progress=heard.append)
     assert heard == ["searching", "writing"]  # no history: no intake stage
+
+
+# --- what the person ruled out is kept out of the search (phase 6, from saved feedback) ----
+
+RULED_OUT = "Just an ordinary work permit, not seasonal or EU Blue Card."
+FULL = "What salary do I need for an ordinary work permit (not seasonal or EU Blue Card)?"
+SEARCH = "What salary do I need for an ordinary work permit?"
+
+
+def test_words_that_rule_something_out_are_recognised_in_both_languages() -> None:
+    from permitnav.answering.answerer import rules_out
+
+    ruling_out = (
+        RULED_OUT,
+        "I don't mean the Blue Card",
+        "I don’t have a job",
+        "Without a job?",
+        "Jag är inte student",
+        "Ej säsongsarbete",
+        "utan EU-blåkort",
+        "Neither of us",
+    )
+    plain = (
+        "What salary do I need?",
+        "Hur hög lön krävs?",
+        "A note on notice periods",
+        "Vad gäller för notarier?",
+        "Can I work in Norway?",
+    )
+    assert all(rules_out(text) for text in ruling_out)
+    assert not any(rules_out(text) for text in plain)
+
+
+def test_a_follow_on_that_rules_something_out_gets_a_search_question() -> None:
+    reply = {"question": FULL, "search_question": SEARCH, "situation": {}}
+    result = IntakeRewriter(ScriptedLLM(json.dumps(reply)), "m").prepare(RULED_OUT, EARLIER)
+    assert (result.question, result.search) == (FULL, SEARCH)  # answered in full, searched without
+
+
+def test_a_search_question_is_used_only_when_something_was_ruled_out() -> None:
+    # Nothing ruled out anywhere: whatever the model wrote, the search is as it always was.
+    reply = {**REWRITE, "search_question": "something else entirely"}
+    assert (
+        IntakeRewriter(ScriptedLLM(json.dumps(reply)), "m").prepare(ASKED, EARLIER).search is None
+    )
+    # Ruled out in an earlier question, and the rewrite did not repeat it: still used.
+    rewrite = "I have a work permit as an employee. What salary do I need?"
+    shorter = "I have a work permit. What salary do I need?"
+    reply = {"question": rewrite, "search_question": shorter, "situation": {}}
+    earlier = ["I have a work permit as an employee, not an EU Blue Card."]
+    result = IntakeRewriter(ScriptedLLM(json.dumps(reply)), "m").prepare("And the salary?", earlier)
+    assert result.search == shorter
+    # Missing, empty, the same as the question, or too long: not used.
+    for search in (None, "", "  ", FULL, 7, "x" * 2001):
+        reply = {"question": FULL, "search_question": search, "situation": {}}
+        assert parse_intake(json.dumps(reply), RULED_OUT, True).search is None, search
+
+
+def test_a_single_question_calls_the_model_only_when_it_rules_something_out() -> None:
+    reply = {
+        "question": "changed by the model",
+        "search_question": SEARCH,
+        "situation": {"permit": "x"},
+    }
+    llm = ScriptedLLM(json.dumps(reply))
+    result = IntakeRewriter(llm, "m").prepare(FULL, [])
+    assert len(llm.requests) == 1
+    sent = json.loads(llm.requests[0].messages[0]["content"])
+    assert sent == {"earlier_questions": [], "latest_question": FULL}
+    # A single question is answered as asked: no rewrite to show back, nothing remembered.
+    assert (result.question, result.rewritten, result.situation) == (FULL, False, {})
+    assert result.search == SEARCH
+
+    # A failure, or an unreadable reply: searched as asked.
+    def fail(request: CompletionRequest) -> str:
+        raise LLMError("down")
+
+    assert IntakeRewriter(ScriptedLLM(fail), "m").prepare(FULL, []).search is None
+    assert IntakeRewriter(ScriptedLLM("not json"), "m").prepare(FULL, []).search is None
+
+
+def test_the_search_uses_the_search_question_and_the_model_gets_the_full_one(conn, stored) -> None:  # noqa: F811
+    from datetime import date
+
+    from permitnav.answering.answerer import AnswerConfig, Answerer
+    from permitnav.llm.port import Completion
+
+    asked = "Inte pendling, bara lönen medianlönen procent lönekravet?"
+    searched: list[str] = []
+    real = stored.search
+
+    class Costed:
+        def __init__(self) -> None:
+            self.requests: list[CompletionRequest] = []
+
+        def complete(self, request: CompletionRequest) -> Completion:
+            self.requests.append(request)
+            if "self-contained" in request.system:
+                reply = {
+                    "question": asked,
+                    "search_question": "lönen medianlönen procent lönekravet",
+                }
+                return Completion(text=json.dumps(reply), model=request.model)
+            answer = {"kind": "answered", "answer": "Svar [S1]."}
+            return Completion(text=json.dumps(answer), model=request.model)
+
+    def search(query, **kwargs):
+        searched.append(query)
+        return real(query, **kwargs)
+
+    stored.search = search
+    llm = Costed()
+    answerer = Answerer(
+        conn, stored, llm, AnswerConfig(model="m", k=1), intake=IntakeRewriter(llm, "m")
+    )
+    answer = answerer.answer(asked, date(2026, 11, 20))  # a single question: no history
+    assert searched == ["lönen medianlönen procent lönekravet"]
+    assert llm.requests[-1].messages == [{"role": "user", "content": asked}]  # in full
+    assert answer.intake is not None and not answer.intake.rewritten  # nothing to show back
+    assert answer.sources[0].unit_id == "sfs:2005:716/6kap/2§"
+
+
+# --- review fixes: the search question is not trusted further than "words taken out" -------
+
+
+def test_a_search_question_may_only_take_words_out() -> None:
+    # A question with a negation that sets nothing aside, paraphrased by the model in both
+    # fields: searched as asked, not with the paraphrase.
+    asked = "can i get PR w/o a job, im not employed"
+    para = "Can I get permanent residence without a job? I am not employed."
+    llm = ScriptedLLM(json.dumps({"question": para, "search_question": para}))
+    assert IntakeRewriter(llm, "m").prepare(asked, []).search is None
+    # Something put in place of what was removed: not used either.
+    reply = {
+        "question": FULL,
+        "search_question": "Salary threshold for a regular Swedish labour permit",
+    }
+    assert parse_intake(json.dumps(reply), RULED_OUT, True).search is None
+    # A word or two of grammar around the cut is fine.
+    reply = {
+        "question": FULL,
+        "search_question": "What salary do I need for a ordinary work permit, then?",
+    }
+    assert parse_intake(json.dumps(reply), RULED_OUT, True).search is not None
+
+
+def test_a_single_reply_without_a_question_is_a_fallback_and_nothing_from_it_is_used() -> None:
+    llm = ScriptedLLM(json.dumps({"search_question": SEARCH, "situation": {}}))
+    result = IntakeRewriter(llm, "m").prepare(FULL, [])
+    assert (result.search, result.fallback) == (None, "unreadable")
+
+
+def test_common_typed_forms_of_ruling_out_are_recognised() -> None:
+    from permitnav.answering.answerer import rules_out
+
+    typed = (
+        "I dont mean the Blue Card",
+        "I don´t have a job",
+        "it isnt seasonal",
+        "I cannot work",
+        "a non-EU citizen",
+        "apart from the Blue Card",
+        "rather  than seasonal",
+        "ingenting annat",
+    )
+    assert all(rules_out(text) for text in typed)
+    assert not rules_out("No. 5 on the list") and not rules_out("I want to work")
+
+
+def test_the_reply_has_room_for_the_question_twice() -> None:
+    llm = ScriptedLLM(json.dumps(REWRITE))
+    IntakeRewriter(llm, "m").prepare(ASKED, EARLIER)
+    assert llm.requests[0].max_tokens >= 4000
+
+
+def _answerer_with(conn, stored, search_question: str, asked: str, floor: float = 0.0):  # noqa: F811
+    from permitnav.answering.answerer import AnswerConfig, Answerer
+    from permitnav.llm.port import Completion
+
+    searched: list[str] = []
+    real = stored.search
+
+    def search(query, **kwargs):
+        searched.append(query)
+        return real(query, **kwargs)
+
+    stored.search = search
+
+    class Model:
+        def complete(self, request: CompletionRequest) -> Completion:
+            if "self-contained" in request.system:
+                reply = {"question": asked, "search_question": search_question}
+                return Completion(text=json.dumps(reply), model=request.model)
+            answer = {"kind": "answered", "answer": "Svar [S1]."}
+            return Completion(text=json.dumps(answer), model=request.model)
+
+    llm = Model()
+    config = AnswerConfig(model="m", k=1, min_score=floor)
+    intake = IntakeRewriter(llm, "m")
+    return Answerer(conn, stored, llm, config, intake=intake), searched, intake
+
+
+def test_a_search_question_that_finds_nothing_never_declines_the_question(conn, stored) -> None:  # noqa: F811
+    from datetime import date
+
+    asked = "Inte pendling, bara lönen medianlönen procent lönekravet?"
+    day = date(2026, 11, 20)
+    weak = stored.search("bara", as_of=day, k=1)[0].score  # lost what was searchable
+    strong = stored.search(asked, as_of=day, k=1)[0].score
+    assert weak < strong
+    answerer, searched, _ = _answerer_with(conn, stored, "bara", asked, floor=(weak + strong) / 2)
+    answer = answerer.answer(asked, day)
+    assert searched == ["bara", asked]  # searched again with the full question
+    assert answer.kind == "answered"  # not "nothing relevant found"
+
+
+def test_a_question_that_names_a_section_is_searched_in_full(conn, stored) -> None:  # noqa: F811
+    from datetime import date
+
+    asked = "Inte pendling: vad säger 6 kap. 2 § utlänningslagen om lönen?"
+    answerer, searched, _ = _answerer_with(
+        conn, stored, "vad säger utlänningslagen om lönen?", asked
+    )
+    answerer.answer(asked, date(2026, 11, 20))
+    assert searched == [asked]
+
+
+def test_a_single_question_reports_a_stage_before_its_intake_call(conn, stored) -> None:  # noqa: F811
+    from datetime import date
+
+    asked = "Inte pendling, bara lönen medianlönen procent lönekravet?"
+    answerer, _, intake = _answerer_with(
+        conn, stored, "lönen medianlönen procent lönekravet", asked
+    )
+    stages: list[str] = []
+    real = intake.prepare
+    seen_at_call: list[list[str]] = []
+
+    def prepare(question, history):
+        seen_at_call.append(list(stages))
+        return real(question, history)
+
+    intake.prepare = prepare
+    answerer.answer(asked, date(2026, 11, 20), progress=stages.append)
+    assert seen_at_call == [["searching"]]  # a step is showing, and a gone client is noticed
+    assert stages == ["searching", "writing"]  # each stage once

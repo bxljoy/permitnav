@@ -88,15 +88,19 @@ class SecondSearcher:
         self._template = load_prompt("evidence_check.md")
         self._contents: dict[date, str] = {}  # as_of -> table of contents
 
-    def expand(self, question: str, as_of: date, hits: list[Hit]) -> tuple[list[Hit], SecondSearch]:
-        """The first search's hits, plus what the steps found."""
+    def expand(
+        self, question: str, as_of: date, hits: list[Hit], search_with: str | None = None
+    ) -> tuple[list[Hit], SecondSearch]:
+        """The first search's hits, plus what the steps found. `search_with`: the question
+        without what the person ruled out (intake); candidates are ranked by it, while the
+        evidence check reads the full question."""
         with tracing.span("second_search", "chain") as current:
             result = self._check(question, as_of, hits)
             new: list[Hit] = []
             if result.enough is False:
                 seen = {h.unit_id for h in hits}
                 for step in result.steps:
-                    for hit in self._run(step, question, as_of, hits, seen):
+                    for hit in self._run(step, search_with or question, as_of, hits, seen):
                         seen.add(hit.unit_id)
                         new.append(hit)
                         result.added.append(hit.unit_id)
