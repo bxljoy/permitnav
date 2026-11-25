@@ -187,7 +187,7 @@ def lead_first(kind: str, text: str) -> bool | None:
     A mechanical check of shape; whether the conclusion is right is the judge's question."""
     if kind not in LEAD_KINDS:
         return None
-    lead = text.strip().split("\n\n", 1)[0].strip()
+    lead = re.split(r"\n\s*\n", text.strip(), maxsplit=1)[0].strip()  # as the UI splits
     if not lead or len(lead) > LEAD_MAX_CHARS:
         return False
     return kind == "not_settled" or bool(_MARKER.search(lead))
