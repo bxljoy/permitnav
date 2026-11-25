@@ -1,7 +1,26 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, askStream, checkToken, source, type AskResponse, type Citation, type Source, type Stage } from "./api";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { ApiError, askStream, SAVE_UNSURE, checkToken, saveFeedback, source, withdrawFeedback, type AskResponse, type FeedbackCase, type Citation, type Source, type Stage } from "./api";
 import { asPlainText, blocks, hasLead, KIND_LABEL, locateQuote, readableDate, type Inline } from "./answer";
-import { historyFor, loadToken, loadTurns, saveToken, saveTurns, type Turn } from "./conversation";
+import { historyFor, loadToken, loadTurns, saveToken, saveTurns, type Turn, type UserTurn } from "./conversation";
+import {
+  abandoned,
+  addPending,
+  addReport,
+  clip,
+  removePending,
+  answerForReview,
+  citedUnits,
+  clearReports,
+  identifiersIn,
+  isReportsKey,
+  loadReports,
+  MAX_ANSWER_CHARS,
+  MAX_COMMENT_CHARS,
+  MAX_QUESTION_CHARS,
+  newWithdrawCode,
+  removeReport,
+  type Reports,
+} from "./feedback";
 
 const EXAMPLES = [
   "What salary do I need to get a work permit?",
@@ -38,7 +57,10 @@ export default function App() {
       token={token}
       onSignedOut={(message, forget) => {
         saveToken(null);
-        if (forget) saveTurns([]); // signing out on purpose: the next person sees nothing
+        if (forget) {
+          saveTurns([]); // signing out on purpose: the next person sees nothing,
+          clearReports(); // and cannot withdraw (or learn of) what was saved for review
+        }
         setNotice(message);
         setToken(null);
       }}
@@ -94,6 +116,53 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
   const [asOf, setAsOf] = useState(""); // "Rules as of": used by the box and the examples alike
   const generation = useRef(0); // bumped by Delete: a late answer to a deleted conversation is dropped
   const end = useRef<HTMLDivElement>(null);
+  const [reports, setReports] = useState<Reports>(() => loadReports()); // answers saved for review
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    const onStorage = (e: StorageEvent) => {
+      if (isReportsKey(e.key)) setReports(loadReports()); // another tab saved or withdrew
+    };
+    // Saves from an earlier visit that were never confirmed (the tab closed, the network
+    // was down when Cancel was pressed): nothing shows them, so they are withdrawn.
+    const giveUp = () => abandoned().forEach((code) => void discard(code));
+    giveUp();
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("online", giveUp);
+    return () => {
+      alive.current = false;
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("online", giveUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per sign-in
+  }, []);
+
+  /** Withdraw a save that was sent and will not be kept. Its code stays in the browser
+   * until the server confirms (also when it never stored it), so a failure is retried. */
+  async function discard(code: string) {
+    try {
+      await withdrawFeedback(token, code);
+      removePending(code);
+    } catch {
+      // unreachable or signed out: tried again on the next visit or when back online
+    }
+  }
+
+  /** Save an answer for review. If the conversation is gone by the time the server has
+   * replied (deleted, or signed out), nobody could withdraw the row any more: remove it. */
+  async function report(answerAt: string, feedback: FeedbackCase, code: string) {
+    const mine = generation.current;
+    addPending(code); // before it leaves: the code must outlive a reload or a lost reply
+    await saveFeedback(token, feedback, code);
+    if (generation.current !== mine || !alive.current) return discard(code);
+    setReports((r) => addReport(r, answerAt, code));
+    removePending(code); // kept with the answer now
+  }
+
+  async function withdraw(answerAt: string, code: string) {
+    await withdrawFeedback(token, code);
+    setReports((r) => removeReport(r, answerAt));
+  }
 
   // Block bodies: an effect must return nothing or a cleanup function. scrollIntoView returns a
   // Promise in current browsers, which React would later call as a cleanup and crash.
@@ -141,6 +210,7 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
     generation.current += 1;
     inFlight.current?.abort(); // stop waiting for an answer nobody will see
     setTurns([]);
+    setReports(clearReports());
     setOpen(null);
     setPending(null);
     setConfirmDelete(false);
@@ -163,6 +233,7 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
           {confirmDelete && (
             <span className="confirm" role="group" aria-label="Confirm delete">
               Delete it from this browser?
+              {Object.keys(reports).length > 0 && " What you saved for review can then no longer be withdrawn from here."}
               <button type="button" className="danger" onClick={deleteConversation}>
                 Delete
               </button>
@@ -174,7 +245,11 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
           <button
             type="button"
             className="quiet"
-            title="Also deletes this conversation from this browser"
+            title={
+              Object.keys(reports).length > 0
+                ? "Also deletes this conversation from this browser. What you saved for review can then no longer be withdrawn from here."
+                : "Also deletes this conversation from this browser"
+            }
             onClick={() => onSignedOut("Signed out, and this conversation was deleted from this browser.", true)}
           >
             Sign out
@@ -192,7 +267,17 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
           turn.role === "user" ? (
             <Question key={i} text={turn.text} asOf={turn.asOf} />
           ) : (
-            <Answer key={i} response={turn.response} at={turn.at} onOpen={(c) => setOpen({ citation: c, asOf: turn.response.as_of })} active={open?.citation} />
+            <Answer
+              key={i}
+              response={turn.response}
+              at={turn.at}
+              question={turns[i - 1]?.role === "user" ? (turns[i - 1] as UserTurn).text : ""}
+              reported={reports[turn.at]}
+              onReport={(feedback, code) => report(turn.at, feedback, code)}
+              onWithdraw={(code) => withdraw(turn.at, code)}
+              onDiscard={discard}
+              onSignedOut={onSignedOut}
+              onOpen={(c) => setOpen({ citation: c, asOf: turn.response.as_of })} active={open?.citation} />
           ),
         )}
         {pending && <Pending started={pending.started} stages={pending.stages} followOn={pending.followOn} />}
@@ -232,7 +317,21 @@ function Question({ text, asOf }: { text: string; asOf: string | null }) {
   );
 }
 
-function Answer({ response, at, onOpen, active }: { response: AskResponse; at: string; onOpen: (c: Citation) => void; active?: Citation }) {
+interface AnswerProps {
+  response: AskResponse;
+  at: string;
+  question: string; // what was asked, for the feedback form
+  reported?: string; // the withdrawal code, when this answer was saved for review
+  onReport: (feedback: FeedbackCase, code: string) => Promise<void>;
+  onWithdraw: (code: string) => Promise<void>;
+  onDiscard: (code: string) => Promise<void>;
+  onSignedOut: (message: string) => void;
+  onOpen: (c: Citation) => void;
+  active?: Citation;
+}
+
+function Answer({ response, at, question, reported, onReport, onWithdraw, onDiscard, onSignedOut, onOpen, active }: AnswerProps) {
+  const [reporting, setReporting] = useState(false);
   const parsed = useMemo(() => blocks(response.text, response.citations), [response]);
   const byMarker = useMemo(() => new Map(response.citations.map((c) => [c.marker, c])), [response]);
   const [copied, setCopied] = useState(false);
@@ -319,8 +418,168 @@ function Answer({ response, at, onOpen, active }: { response: AskResponse; at: s
         <button type="button" className="quiet small" onClick={copy}>
           {copied ? "Copied" : "Copy answer"}
         </button>
+        {response.kind !== "failed" && !reported && !reporting && (
+          <button type="button" className="quiet small" onClick={() => setReporting(true)}>
+            Report a problem
+          </button>
+        )}
       </footer>
+      {reporting && !reported && (
+        <FeedbackForm
+          question={question}
+          response={response}
+          onSave={onReport}
+          onDiscard={onDiscard}
+          onDone={() => setReporting(false)}
+          onSignedOut={onSignedOut}
+        />
+      )}
+      {reported && <FeedbackSaved onWithdraw={() => onWithdraw(reported)} onSignedOut={onSignedOut} />}
     </article>
+  );
+}
+
+interface FeedbackFormProps {
+  question: string;
+  response: AskResponse;
+  onSave: (feedback: FeedbackCase, code: string) => Promise<void>;
+  onDiscard: (code: string) => Promise<void>; // withdraw a save that was sent and not kept
+  onDone: () => void; // saved or cancelled: close the form
+  onSignedOut: (message: string) => void;
+}
+
+/** Shows everything that would be saved; nothing is sent before "Save for review". */
+function FeedbackForm({ question, response, onSave, onDiscard, onDone, onSignedOut }: FeedbackFormProps) {
+  const [asked, setAsked] = useState(() => clip(question, MAX_QUESTION_CHARS));
+  const [answer, setAnswer] = useState(() => answerForReview(response));
+  const [comment, setComment] = useState("");
+  const [asOf, setAsOf] = useState(response.as_of);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [code] = useState(newWithdrawCode); // one per form: saving again replaces, never adds
+  // "A save with this code may be stored": set when one is sent, cleared only when one is
+  // confirmed. A later refusal says nothing about an earlier attempt whose reply was lost.
+  const sent = useRef(false);
+  const lastSave = useRef<Promise<unknown>>(Promise.resolve());
+  const found = identifiersIn(asked, answer, comment);
+  const dated = /^\d{4}-\d{2}-\d{2}$/.test(asOf);
+  const ready = asked.trim().length > 0 && answer.trim().length > 0 && dated && found.length === 0 && !saving;
+  const kind = response.kind === "failed" ? "answered" : response.kind;
+
+  // Leaving the form (Cancel, or the conversation deleted) with a save that may have been
+  // stored: withdraw it, once the save itself has settled so the two cannot cross.
+  const discard = useRef(onDiscard);
+  discard.current = onDiscard;
+  useEffect(
+    () => () => {
+      if (sent.current) void lastSave.current.then(() => discard.current(code));
+    },
+    [code],
+  );
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    if (!ready) return;
+    setSaving(true);
+    setError(null);
+    sent.current = true;
+    const saved = onSave({ question: asked, answer, comment, kind, as_of: asOf, cited: citedUnits(response) }, code);
+    lastSave.current = saved.catch(() => {});
+    try {
+      await saved;
+      sent.current = false; // stored, and its code is kept with the answer
+      onDone();
+    } catch (err) {
+      if (err instanceof ApiError && err.signedOut) return onSignedOut(err.message);
+      setError(err instanceof ApiError ? err.message : SAVE_UNSURE);
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="feedback" onSubmit={save} aria-label="Report a problem with this answer">
+      <h3>Save this question and answer to help improve the assistant?</h3>
+      <p className="muted">
+        Nothing has been sent. If you save, what is shown below is stored for the maintainer to review. Nothing else: not
+        who you are, and not the rest of this conversation. Edit out anything personal first: no names, case numbers, or
+        dates that could identify you.
+      </p>
+      <label>
+        <span>The question you asked</span>
+        <textarea value={asked} maxLength={MAX_QUESTION_CHARS} rows={3} onChange={(e) => setAsked(e.target.value)} />
+      </label>
+      <label>
+        <span>The answer you got</span>
+        <textarea value={answer} maxLength={MAX_ANSWER_CHARS} rows={6} onChange={(e) => setAnswer(e.target.value)} />
+      </label>
+      <label>
+        <span>What was wrong? (optional)</span>
+        <textarea value={comment} maxLength={MAX_COMMENT_CHARS} rows={2} onChange={(e) => setComment(e.target.value)} />
+      </label>
+      <div className="feedback-also">
+        <span className="muted">Also saved with it:</span>
+        <label className="inline">
+          <span>The date the rules were asked for</span>
+          <input type="date" value={asOf} required min="1900-01-01" max="9999-12-31" onChange={(e) => setAsOf(e.target.value)} />
+        </label>
+        {asOf !== todayIso() && (
+          <button type="button" className="quiet small" onClick={() => setAsOf(todayIso())}>
+            Use today's date instead
+          </button>
+        )}
+        <span className="muted">Type of answer: {KIND_LABEL[response.kind] ?? "An answer"}</span>
+        {response.citations.length > 0 && (
+          <span className="muted">Sources it cited: {[...new Set(response.citations.map((c) => c.heading))].join("; ")}</span>
+        )}
+      </div>
+      {found.length > 0 && (
+        <p className="error" role="alert">
+          The text contains {found.join(" and ")}. Remove it before saving.
+        </p>
+      )}
+      {error && <p className="error" role="alert">{error}</p>}
+      <div className="feedback-actions">
+        <button type="submit" className="primary" disabled={!ready}>
+          {saving ? "Saving…" : "Save for review"}
+        </button>
+        <button type="button" className="quiet" onClick={onDone} disabled={saving}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function todayIso(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function FeedbackSaved({ onWithdraw, onSignedOut }: { onWithdraw: () => Promise<void>; onSignedOut: (message: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function withdraw() {
+    setBusy(true);
+    setError(null);
+    try {
+      await onWithdraw();
+    } catch (err) {
+      if (err instanceof ApiError && err.signedOut) return onSignedOut(err.message);
+      setError(err instanceof ApiError ? err.message : "It could not be withdrawn. Try again.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <p className="feedback-saved" role="status">
+      Saved for review. Thank you.{" "}
+      <button type="button" className="quiet small" onClick={withdraw} disabled={busy}>
+        {busy ? "Withdrawing…" : "Withdraw it"}
+      </button>
+      <span className="muted"> You can withdraw it from here until you delete this conversation or sign out.</span>
+      {error && <span className="error"> {error}</span>}
+    </p>
   );
 }
 

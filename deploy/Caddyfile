@@ -12,6 +12,19 @@
 		output stdout
 		format json
 	}
+	# Saved feedback is stored without anything that ties it to a request; a log line with
+	# the moment and address of the request that stored it would undo that.
+	@feedback path /feedback /feedback/*
+	log_skip @feedback
+	# A failed request (the API restarting, a body too large) would otherwise be written to
+	# the error log with its address, whatever log_skip says: answer it here instead, and
+	# keep the cause in the access log line of every path but the feedback ones.
+	handle_errors {
+		@feedback_failed path /feedback /feedback/*
+		log_skip @feedback_failed
+		log_append error {err.message}
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
 	encode zstd gzip
 	reverse_proxy api:8000
 	request_body {

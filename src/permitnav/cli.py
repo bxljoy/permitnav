@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections import Counter
@@ -814,6 +815,49 @@ def cmd_import_lifos_results(args: argparse.Namespace) -> int:
         f"{len(pages)} pages, {len(hits)} hits, {len(papers)} papers -> {out}: "
         + ", ".join(f"{n} {d}" for d, n in decided.most_common())
     )
+    return 0
+
+
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """The review queue of feedback people chose to save (phase 6, slice 3). A case goes
+    into the golden set only rewritten into a generic question; then delete it here."""
+    from permitnav import feedback
+
+    with db.connect() as conn:
+        if args.action == "delete":
+            if not args.ids:
+                print("give the ids to delete (see `permitnav feedback list`)")
+                return 2
+            removed = feedback.delete(conn, args.ids)
+            conn.commit()
+            print(f"deleted {removed} of {len(args.ids)}")
+            return 0
+        cases = feedback.waiting(conn)
+    if args.action == "export":
+        if not args.out:
+            print("export needs --out: a file under private/ (which git ignores), or - for stdout")
+            return 2
+        rows = [
+            {"id": c.id, "created_on": c.created_on.isoformat(), "kind": c.kind,
+             "as_of": c.as_of.isoformat(), "question": c.question, "answer": c.answer,
+             "comment": c.comment, "cited": c.cited}
+            for c in cases
+        ]  # fmt: skip
+        lines = [json.dumps(r, ensure_ascii=False) + "\n" for r in rows]
+        if args.out == "-":  # from the server's container, which has nowhere to keep a file
+            sys.stdout.writelines(lines)
+            return 0
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text("".join(lines), encoding="utf-8")
+        print(f"wrote {len(rows)} cases to {args.out}")
+        return 0
+    print(f"{len(cases)} waiting for review")
+    for c in cases:
+        question = " ".join(c.question.split())
+        comment = " ".join(c.comment.split())
+        print(f"  {c.id}  {c.created_on}  {c.kind:<12} as of {c.as_of}  {question[:70]}")
+        if comment:
+            print(f"        comment: {comment[:100]}")
     return 0
 
 
@@ -1856,6 +1900,13 @@ def main(argv: list[str] | None = None) -> int:
     il.add_argument("folder", help="folder with the result pages saved from the browser")
     il.add_argument("--out", default="curation/position_papers.csv")
     il.set_defaults(run=cmd_import_lifos_results)
+    fb = sub.add_parser("feedback", help="the review queue of feedback people chose to save")
+    fb.add_argument("action", choices=["list", "export", "delete"])
+    fb.add_argument("ids", nargs="*", help="delete: the ids of reviewed cases")
+    fb.add_argument(
+        "--out", help="export: a JSON-lines file, e.g. private/feedback.jsonl; - for stdout"
+    )
+    fb.set_defaults(run=cmd_feedback)
     ds = sub.add_parser(
         "describe", help="phase 5 experiment: plain-language descriptions of law sections"
     )

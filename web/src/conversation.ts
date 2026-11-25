@@ -1,5 +1,6 @@
 // The conversation lives in this browser only (phase 6): it survives closing the tab on this
-// device, it is sent back as `history` for follow-on questions, and the server stores none of it.
+// device, it is sent back as `history` for follow-on questions, and the server stores none of it
+// (except an answer the person chooses to save for review: see feedback.ts).
 
 import type { AskResponse } from "./api";
 

@@ -16,17 +16,24 @@ import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 import anyio
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from opentelemetry import context as otel_context
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 from permitnav import tracing
 from permitnav.agent.intake import MAX_HISTORY_ACCEPTED, MAX_QUESTION_CHARS
 from permitnav.answering.answerer import Answer
+from permitnav.feedback import (
+    MAX_CITED,
+    MAX_COMMENT_CHARS,
+    MAX_TEXT_CHARS,
+    FeedbackRefused,
+    quiet_access_log,
+)
 
 NOTICE = "Not legal advice; check with Migrationsverket. You are talking to an AI."
 CREDITS = {
@@ -48,6 +55,8 @@ class Service(Protocol):
         progress: Callable[[str], None] | None = None,
     ) -> Answer: ...
     def source(self, version_id: int) -> dict[str, str] | None: ...
+    def save_feedback(self, case: FeedbackIn) -> None: ...
+    def withdraw_feedback(self, code: str) -> bool: ...
     def healthy(self) -> bool: ...
 
 
@@ -75,6 +84,44 @@ class CitationOut(BaseModel):
     quote: str
     translation: str
     version_id: int | None = None  # the exact wording: what GET /source opens
+
+
+# Made by the browser (32 random bytes, base64url); the server keeps only its hash.
+WithdrawCode = Annotated[
+    str, StringConstraints(min_length=32, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+]
+
+
+class FeedbackIn(BaseModel):
+    """What the person saw in the form and chose to save: nothing else is stored."""
+
+    # The explicit "save this" click: JSON true and nothing else (not 1, not "true").
+    consent: Literal[True]
+    withdraw_code: WithdrawCode
+    question: Question
+    answer: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_TEXT_CHARS)
+    ]
+    comment: Annotated[
+        str, StringConstraints(strip_whitespace=True, max_length=MAX_COMMENT_CHARS)
+    ] = ""
+    kind: Literal["answered", "follow_up", "not_settled", "out_of_scope"]
+    as_of: date
+    cited: Annotated[
+        list[Annotated[str, StringConstraints(min_length=1, max_length=300)]],
+        Field(max_length=MAX_CITED),
+    ] = []
+
+    @field_validator("consent", mode="before")
+    @classmethod
+    def _a_real_true(cls, value: object) -> object:
+        if value is not True:  # Literal[True] alone accepts the number 1
+            raise ValueError("consent must be true")
+        return value
+
+
+class WithdrawIn(BaseModel):
+    withdraw_code: WithdrawCode
 
 
 class ClientGone(Exception):
@@ -167,6 +214,7 @@ def create_app(
         tracing.flush()  # send the last traces
 
     app = FastAPI(title="PermitNav", version="0.0.1", lifespan=lifespan)
+    quiet_access_log()
 
     def authorised(authorization: Annotated[str | None, Header()] = None) -> None:
         expected = state["token"]
@@ -198,6 +246,24 @@ def create_app(
         if found is None:
             raise HTTPException(status_code=404, detail="no such source")
         return SourceOut(**found)
+
+    @app.post("/feedback", dependencies=[Depends(authorised)])
+    def save_feedback(case: FeedbackIn) -> dict[str, bool]:
+        """Store a question and answer the person chose to save. Never traced, and no log
+        line: one with the moment of the request could be matched to the row."""
+        try:
+            state["service"].save_feedback(case)
+        except FeedbackRefused as refused:
+            raise HTTPException(status_code=422, detail=str(refused)) from refused
+        return {"saved": True}
+
+    @app.post("/feedback/withdraw", dependencies=[Depends(authorised)])
+    def withdraw_feedback(request: WithdrawIn) -> dict[str, bool]:
+        """Delete the submission saved under this code. A body, not a URL, so the code
+        never reaches an access log."""
+        if not state["service"].withdraw_feedback(request.withdraw_code):
+            raise HTTPException(status_code=404, detail="no such submission")
+        return {"withdrawn": True}
 
     @app.post("/ask", dependencies=[Depends(authorised)])
     def ask(request: AskRequest) -> AskResponse:

@@ -132,6 +132,31 @@ class AnswerService:
             "text": text,
         }
 
+    def save_feedback(self, case: Any) -> None:
+        """Store what the person chose to save (api.FeedbackIn); see permitnav.feedback."""
+        from permitnav import feedback
+
+        with db.connect(self.database_url) as conn:
+            feedback.save(
+                conn,
+                case.withdraw_code,
+                case.question,
+                case.answer,
+                case.comment,
+                case.kind,
+                case.as_of,
+                case.cited,
+            )
+            conn.commit()
+
+    def withdraw_feedback(self, code: str) -> bool:
+        from permitnav import feedback
+
+        with db.connect(self.database_url) as conn:
+            done = feedback.withdraw(conn, code)
+            conn.commit()
+            return done
+
     def healthy(self) -> bool:
         try:
             url = self.database_url or db.database_url()
