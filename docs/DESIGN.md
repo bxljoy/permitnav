@@ -1339,3 +1339,28 @@ An outside review of ten openings found four weak ones — an opening hedge ("Po
 **From the first code review (10 findings, all fixed before the first commit):** the unshown date; the counter id and the access logs; "nothing was saved" after a lost reply; a save finishing after the conversation was deleted; a second tab or a refused token erasing the code; free text in `cited`; the cap under concurrent saves; sign-out missing from the confirmation; organisation numbers refused as personal numbers.
 
 **Known limits.** Database backups keep a deleted or withdrawn row for up to the bucket's retention (30 days); the privacy page (slice 4) must say so. Anyone with the access token can submit; rate limiting is slice 5, and with the access-log lines gone it has to count requests itself. The roadmap's separate question-donation switch is not part of this slice.
+
+### What a person rules out is kept out of the search (2026-11-25)
+
+**From the first saved feedback case.** After "What salary do I need to get a work permit?", the follow-on "Just an ordinary work permit, not seasonal or EU Blue Card…" was answered "the sources do not state the salary for a first permit". The law does (6 kap. 2 § utlänningslagen) and the corpus has it; it was not retrieved. Neither half of the search reads "not": BM25 counts the words, and the embedding of "not an EU Blue Card" lies next to "an EU Blue Card". Naming three permit types retrieved the rules of all three (6 a and 6 c kap.), and the two that were ruled out crowded out the one that was meant. The answer model was honest about bad sources.
+
+**Measured before fixing** (a probe, not a golden set: 8 dev questions, each also with exclusions added in one turn and as a follow-on; expected source groups among the top k): control 6/12, one turn 2/12, follow-on 3/12. A pattern, and single questions (which skipped intake) had it too.
+
+**The fix.** Intake's call now returns two questions: the self-contained one, which keeps what the person ruled out and goes to the answer model, and a search question without the alternatives they set aside, which only the search uses (`Intake.search`, `Answerer._answer(search_with=…)`). It is used only when something was ruled out in the conversation (`rules_out`: a word list in English and Swedish). A single question gets the call only then, and is still answered exactly as asked.
+
+**Three versions of the instruction, each measured:**
+
+| | Probe: one turn / follow-on (control 6/12) | Existing golden questions | Follow-ons rewritten (14 items × 6) |
+|---|---|---|---|
+| 1. "leave out everything they ruled out" | 6/12, 7/12 | two lost an expected source: "never convicted" and "my spouse doesn't work" were stripped as well | — |
+| 2. only set-aside alternatives; "keep every other word" | 6/12, 7/12 | none changed | 78/84: the new case was never rewritten (that sentence leaked into the rewrite) |
+| 3. two explicit steps: rewrite, then derive the search question from it | 6/12, 6/12 | search changed only for the new case | 84/84 |
+
+Negative facts are the situation ("no job", "didn't take out insurance") and stay; alternatives set aside are what search must not see. Version 3 is what ships.
+
+**Answer quality, before and after, two runs each** (multi-turn with the new case as two draft items, the 14 single questions that contain a ruling-out word, situational; 72 judged answers per arm): right kind 50 → 58, correct 53 → 63, faithful 65 → 68, expected source groups 57 → 62, cost per question $0.0024 → $0.0025. The new case: not settled and judged incorrect in 3 of 4 runs before; answered and correct, with 6 kap. 2 § among the sources, in 4 of 4 after. The rest of the difference is within run-to-run noise (the same arm moved by up to 5 between runs); the claim is that the case is fixed and nothing measured got worse.
+
+**From the code review (8 findings, all fixed): the search question is trusted only as "the question with words taken out".** It is not used when it adds more than two words to the question (a paraphrase, or something put in place of what was removed); a question that names a section is searched in full; when the search question finds nothing above the relevance floor the full question is searched before anything is declined; an unreadable reply to a single question contributes nothing; the reply has room for the question twice (4,000 tokens); a single question reports a stage before its intake call; the second search ranks its candidates by the search question; and the word list covers missing and accented apostrophes ("dont", "don´t"), "cannot", "non-", "apart from". The probe was repeated after these guards: unchanged (6/12, 6/12). The judged runs above were made before them; the search used for every golden question is the same.
+
+**Costs and limits.** A single question containing "not", "no", "without", "inte", "utan"… now makes one more small model call (about $0.0001 and a second) even when nothing was set aside; 14 of the 72 dev and interpretation questions do. Phrasings outside the word list are not covered. The golden items `multi-salary-ruled-out-907` were reviewed and marked checked the same day; the raw submission behind them was then deleted. `permitnav ask` now uses intake for single questions too, as production does.
+

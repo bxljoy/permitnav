@@ -100,7 +100,8 @@ class Answer:
     earlier: list[Completion] = field(default_factory=list)
     # The second search's decision and additions (phase 5), when it ran.
     search: SecondSearch | None = None
-    # How a follow-on question was made self-contained (phase 5), when there was history.
+    # What intake made of the question, when it ran: a follow-on made self-contained
+    # (phase 5), and the search question when the person ruled something out (phase 6).
     intake: Intake | None = None
 
 
@@ -129,7 +130,8 @@ class Answerer:
         self._llm = llm
         self.config = config
         self._second_search = second_search  # None: plain RAG, one search
-        self._intake = intake  # None: earlier questions are ignored (plain RAG)
+        # None: plain RAG (earlier questions are ignored, the question is searched as asked)
+        self._intake = intake
         self._template = load_prompt()
 
     def answer(
@@ -141,9 +143,18 @@ class Answerer:
     ) -> Answer:
         """`history`: the user's earlier questions in the conversation, oldest first, sent by
         the client (memory lives there). Used only with intake; plain RAG asks `question`
-        alone. `progress` hears each stage as it starts (STAGES), for a client to show."""
+        alone. With intake, a question that rules something out ("not an EU Blue Card") is
+        searched without it, with or without history. `progress` hears each stage as it
+        starts (STAGES), for a client to show."""
         as_of = as_of or date.today()
-        report = progress or (lambda stage: None)
+        heard: list[str] = []
+
+        def report(stage: str) -> None:  # each stage once, in the order first reached
+            if stage not in heard:
+                heard.append(stage)
+                if progress:
+                    progress(stage)
+
         with tracing.span(
             "answer",
             "chain",
@@ -157,14 +168,20 @@ class Answerer:
             tracing.text(current, input=question)
             asked = question
             prepared = None
-            if self._intake is not None and history:
-                report("understanding")
+            if self._intake is not None and (history or rules_out(question)):
+                # A stage before the call, so a client sees a step (and one that has gone
+                # is noticed before the call is paid for). Without history the call only
+                # prepares the search.
+                report("understanding" if history else "searching")
                 prepared = self._intake.prepare(question, history)
                 question = prepared.question
             try:
                 # The answer's language comes from the question as asked: a rewrite can carry
                 # the earlier turns' language into a follow-on asked in another one.
-                answer = self._answer(question, as_of, language_of(asked), report)
+                search_with = (prepared.search if prepared else None) or question
+                if named_units(question):
+                    search_with = question  # a named section is looked up from the full text
+                answer = self._answer(question, as_of, language_of(asked), report, search_with)
             except LLMError as error:
                 error.intake = prepared  # type: ignore[attr-defined]  # paid for: evals count it
                 raise
@@ -189,16 +206,29 @@ class Answerer:
             return answer
 
     def _answer(
-        self, question: str, as_of: date, language: str | None, report: Callable[[str], None]
+        self,
+        question: str,
+        as_of: date,
+        language: str | None,
+        report: Callable[[str], None],
+        search_with: str | None = None,
     ) -> Answer:
+        """`search_with`: the question without what the person ruled out, which search
+        would otherwise find (intake). The model is still given `question` in full."""
         report("searching")
-        hits = self._retriever.search(question, as_of=as_of, k=self.config.k)
-        if not _relevant(question, hits, self.config.min_score):
+        search_with = search_with or question
+        hits = self._retriever.search(search_with, as_of=as_of, k=self.config.k)
+        if search_with != question and not _relevant(search_with, hits, self.config.min_score):
+            # The shortened question found nothing: it may have lost what made the question
+            # searchable. Never decline on it; search as before.
+            search_with = question
+            hits = self._retriever.search(question, as_of=as_of, k=self.config.k)
+        if not _relevant(search_with, hits, self.config.min_score):
             return Answer(kind="out_of_scope", text=NOTHING_RELEVANT)
         search = None
         if self._second_search is not None:
             report("checking")
-            hits, search = self._second_search.expand(question, as_of, hits)
+            hits, search = self._second_search.expand(question, as_of, hits, search_with)
         context = build_context(self._conn, hits, as_of)
         report("writing")
         # Told, not left to the model: with an English prompt and mixed sources it answered
@@ -256,6 +286,25 @@ class Answerer:
         answer.earlier = earlier
         answer.search = search
         return answer
+
+
+# Words that rule something out, in English and Swedish. Broad on purpose: a match only
+# means the search question is asked for (single questions) or used (all questions).
+_RULES_OUT = re.compile(
+    r"\b(?:not|no(?!\.)|never|without|cannot|except|excluding|rather\s+than|instead\s+of"
+    r"|other\s+than|apart\s+from|neither|nor|non"
+    r"|inte|ej|icke|utan|ingen|inget|inga|ingenting|förutom|i\s+stället\s+för|istället\s+för"
+    r"|aldrig|varken)\b"
+    # don't, dont, don´t, isn’t, can't, cant …: the apostrophe is often missing or an accent
+    r"|\b(?:do|does|did|is|are|was|were|have|has|had|ca|wo|would|should|could)n[’'´`]?t\b"
+    r"|n[’'´`]t\b",
+    re.IGNORECASE,
+)
+
+
+def rules_out(question: str) -> bool:
+    """Whether the question says what something is not, which search would misread."""
+    return _RULES_OUT.search(question) is not None
 
 
 def _relevant(question: str, hits: list[Hit], min_score: float) -> bool:

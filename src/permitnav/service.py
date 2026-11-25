@@ -87,7 +87,8 @@ class AnswerService:
             self.reranker = LockedReranker(self.reranker, self._model_lock)
         from permitnav.agent.intake import IntakeRewriter
 
-        # Built once (it reads its prompt); it calls the model only for follow-on questions.
+        # Built once (it reads its prompt); it calls the model only for follow-on questions and
+        # for questions that rule something out ("not an EU Blue Card").
         self._intake = IntakeRewriter(self.llm, self.model)
 
     def answer(
@@ -98,8 +99,9 @@ class AnswerService:
         progress: Callable[[str], None] | None = None,
     ) -> Answer:
         """`history`: the user's earlier questions (phase 5 memory, kept by the client). With
-        it, intake makes the question self-contained first (one more model call); without
-        it, nothing changes."""
+        it, intake makes the question self-contained first (one more model call). Without
+        it, a question is searched and answered as asked, unless it rules something out:
+        then the same call writes what to search with (see permitnav.agent.intake)."""
         translator = self._translator()
         with db.connect(self.database_url) as conn:
             retriever = Retriever(conn, self.embedder, self.config, translator, self.reranker)

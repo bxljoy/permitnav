@@ -1339,14 +1339,10 @@ def _second_searcher(args: argparse.Namespace, retriever, llm, model: str):
 
 
 def _intake(args: argparse.Namespace, llm, model: str):
-    """Phase 5's intake, as production uses it: on in `eval-answers` unless `--no-memory`,
-    on in `ask` when `--earlier` questions are given. It calls the model only for questions
-    that have earlier turns."""
-    if args.run is cmd_eval_answers:
-        on = not args.no_memory
-    else:
-        on = bool(getattr(args, "earlier", None))
-    if not on:
+    """Intake, as production uses it: on in `ask`, and in `eval-answers` unless
+    `--no-memory`. It calls the model only for questions that have earlier turns or that
+    rule something out ("not an EU Blue Card"), which search would misread."""
+    if args.run is cmd_eval_answers and args.no_memory:
         return None
     from permitnav.agent.intake import IntakeRewriter
 
@@ -1395,6 +1391,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
     print()
     if answer.intake and answer.intake.rewritten:  # a follow-on: what was searched and answered
         print(f"Understood as: {answer.intake.question}\n")
+    if answer.intake and answer.intake.search:  # something was ruled out: searched without it
+        print(f"Searched with: {answer.intake.search}\n")
     if KIND_LABELS.get(answer.kind):
         print(KIND_LABELS[answer.kind])
     print(answer.text.replace("**", ""))  # bold labels are for the web UI
@@ -1598,6 +1596,7 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
                                 "intake": {
                                     "question": r.answer.intake.question,
                                     "rewritten": r.answer.intake.rewritten,
+                                    "search": r.answer.intake.search,
                                     "situation": r.answer.intake.situation,
                                     "fallback": r.answer.intake.fallback,
                                 }
@@ -1924,7 +1923,7 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument(
         "--earlier",
         action="append",
-        help="an earlier question in the conversation (repeat, oldest first); turns on intake",
+        help="an earlier question in the conversation (repeat, oldest first)",
     )
     ask.add_argument(
         "--check-model",
