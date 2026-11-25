@@ -146,7 +146,7 @@ resource "google_monitoring_alert_policy" "refresh_failed" {
   conditions {
     display_name = "permitnav-refresh wrote an ERROR"
     condition_matched_log {
-      filter = "logName=\"projects/${var.project_id}/logs/permitnav-refresh\" AND severity>=ERROR"
+      filter = "logName=\"projects/${var.project_id}/logs/permitnav-refresh\" AND severity>=ERROR AND NOT textPayload:\"SPEND CAP REACHED\""
     }
   }
   alert_strategy {
@@ -158,6 +158,34 @@ resource "google_monitoring_alert_policy" "refresh_failed" {
   notification_channels = [google_monitoring_notification_channel.email.id]
   documentation {
     content   = "The daily refresh failed: a source could not be fetched or parsed, indexing failed, or retrieval on the live corpus fell below the gate (or a golden item's source disappeared). The service keeps serving the last good versions. On the VM: `sudo journalctl -u permitnav-refresh.service`; the changes are in the change_log table."
+    mime_type = "text/markdown"
+  }
+  depends_on = [google_project_service.monitoring]
+}
+
+# --- Did the site reach its daily spend cap? -------------------------------------------------
+# Reported by the daily refresh for every finished day on which questions were declined
+# (deploy/refresh.sh, permitnav.spend). Until this policy is applied, the line raises
+# "PermitNav refresh failed" instead.
+
+resource "google_monitoring_alert_policy" "spend_cap" {
+  display_name = "PermitNav reached its daily spend cap"
+  combiner     = "OR"
+  conditions {
+    display_name = "permitnav-refresh reported a capped day"
+    condition_matched_log {
+      filter = "logName=\"projects/${var.project_id}/logs/permitnav-refresh\" AND severity>=ERROR AND textPayload:\"SPEND CAP REACHED\""
+    }
+  }
+  alert_strategy {
+    notification_rate_limit {
+      period = "3600s"
+    }
+    auto_close = "86400s"
+  }
+  notification_channels = [google_monitoring_notification_channel.email.id]
+  documentation {
+    content   = "The site declined questions because a day's model spend reached DAILY_SPEND_CAP_USD. Normal use is a few cents a day, so unless that was you, treat the access token as leaked: on the VM put a new random API_TOKEN in /opt/permitnav/.env and run `sudo docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d` (infra/README.md). `permitnav spend` in the api container shows the days."
     mime_type = "text/markdown"
   }
   depends_on = [google_project_service.monitoring]

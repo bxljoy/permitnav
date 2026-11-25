@@ -68,6 +68,17 @@ const WITHDRAW: Messages = {
   failed: "It could not be withdrawn just now. Try again in a moment.",
 };
 
+/** The site's daily spend cap was reached (the server's 429): trying again today won't help. */
+export const DAILY_LIMIT = "PermitNav has reached its limit for today. Try again tomorrow.";
+
+/** What to tell the person when a question fails with this status. */
+export function messageFor(status: number | undefined): string {
+  if (status === 422) return QUESTION.invalid;
+  if (status === 404) return QUESTION.missing;
+  if (status === 429) return DAILY_LIMIT;
+  return QUESTION.failed;
+}
+
 async function call<T>(
   token: string,
   path: string,
@@ -211,6 +222,7 @@ export async function askStream(
   if (response.status === 401) throw new ApiError("The access token was not accepted. Enter it again.", true);
   if (response.status === 422) throw new ApiError(QUESTION.invalid);
   if (response.status === 404) throw new ApiError(QUESTION.missing);
+  if (response.status === 429) throw new ApiError(DAILY_LIMIT);
   if (!response.ok || !response.body) throw new ApiError(QUESTION.failed);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -227,7 +239,7 @@ export async function askStream(
         return data as AskResponse;
       } else if (event === "error") {
         const status = (data as { status?: number }).status;
-        throw new ApiError(status === 422 ? QUESTION.invalid : status === 404 ? QUESTION.missing : QUESTION.failed);
+        throw new ApiError(messageFor(status));
       }
     }
     if (done) throw new ApiError(QUESTION.failed); // ended without an answer

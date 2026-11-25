@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import date
 
 import pytest
 
@@ -90,3 +91,27 @@ def test_a_source_is_read_in_the_exact_wording_that_was_cited(fresh_database_url
         assert got is not None and got["text"] == text and got["unit_id"] == unit
         assert str(valid_from) in got["dates"] if valid_from else True
     assert service.source(10**9) is None
+
+
+@pytest.mark.db
+def test_a_question_is_declined_before_any_work_once_the_days_cap_is_reached(
+    fresh_database_url,
+) -> None:
+    import psycopg
+
+    from permitnav import spend
+
+    class NeverCalled:
+        def complete(self, request):
+            raise AssertionError("no model call after the cap is reached")
+
+    service = AnswerService(
+        model="m", embedder=SlowEmbedder(), llm=NeverCalled(), config=RetrievalConfig(),
+        database_url=fresh_database_url, spend_cap_usd=1.0,
+    )  # fmt: skip
+    with psycopg.connect(fresh_database_url) as conn:
+        spend.record_call(conn, 1.0)
+    with pytest.raises(spend.SpendCapReached):
+        service.answer("Lönekrav?", date(2026, 11, 25))
+    with psycopg.connect(fresh_database_url) as conn:
+        assert spend.days(conn)[0].refused == 1  # counted although the question failed

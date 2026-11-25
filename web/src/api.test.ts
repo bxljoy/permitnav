@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, askStream, parseEvents } from "./api";
+import { ApiError, askStream, DAILY_LIMIT, messageFor, parseEvents } from "./api";
 
 const ANSWER = { kind: "answered", text: "Svar.", citations: [], credits: [], as_of: "2026-11-24", notice: "",
   understood_as: null, situation: {} };
@@ -46,5 +46,13 @@ describe("server-sent events", () => {
     await expect(askStream("t", "q?", null, [], () => {})).rejects.toThrow("could not be prepared");
     vi.stubGlobal("fetch", vi.fn(async () => streamOf([], 401)));
     await expect(askStream("t", "q?", null, [], () => {})).rejects.toMatchObject({ signedOut: true });
+  });
+
+  it("says the daily limit was reached, whether it comes as a status or as an event", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => streamOf(['event: error\ndata: {"status":429,"message":"x"}\n\n'])));
+    await expect(askStream("t", "q?", null, [], () => {})).rejects.toThrow(DAILY_LIMIT);
+    vi.stubGlobal("fetch", vi.fn(async () => streamOf([], 429)));
+    await expect(askStream("t", "q?", null, [], () => {})).rejects.toThrow(DAILY_LIMIT);
+    expect(messageFor(502)).not.toBe(DAILY_LIMIT);
   });
 });

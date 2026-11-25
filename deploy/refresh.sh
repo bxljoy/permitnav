@@ -33,6 +33,28 @@ exec 9>/run/permitnav-deploy.lock
 flock 9 # wait for a running deploy to finish (deploys skip while this holds the lock)
 
 log=$(mktemp)
+
+# The daily spend cap (permitnav.spend), first, so that a failing refresh cannot hide it: a
+# finished day on which questions were declined means the site's model spend reached the cap,
+# which normal use never does. Usually a leaked access token. A day stays unreported until
+# its error is logged, so a run that failed or never happened does not lose it.
+set +e
+"${C[@]}" run --rm -T api permitnav spend --unreported > "$log" 2>&1
+spend_status=$?
+set -e
+capped=$({ grep '^SPEND CAP REACHED' "$log" || true; } | paste -sd';' -)
+if [ "$spend_status" -ne 0 ]; then
+  report ERROR "refresh spend check failed to run (exit $spend_status)"; tail -20 "$log"
+elif [ -n "$capped" ]; then
+  if gcloud logging write permitnav-refresh "refresh: $capped. If this was not you, replace API_TOKEN (infra/README.md)" --severity=ERROR --quiet; then
+    echo "refresh: $capped"
+    "${C[@]}" run --rm -T api permitnav spend --mark-reported > /dev/null 2>&1 \
+      || report ERROR "refresh spend check: could not remember the reported days"
+  else
+    echo "refresh: $capped (the error could not be logged; it is sent again next run)"
+  fi
+fi
+
 set +e
 "${C[@]}" run --rm -T api permitnav refresh > "$log" 2>&1
 refresh=$?
@@ -85,4 +107,5 @@ elif [[ "$drift" == *"(new:"* ]]; then
 else
   report INFO "refresh drift: $drift"
 fi
+
 reported=1

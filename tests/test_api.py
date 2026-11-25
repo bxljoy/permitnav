@@ -489,3 +489,17 @@ def test_the_feedback_endpoints_are_kept_out_of_the_access_log() -> None:
     assert "log_skip @feedback\n" in caddy and "@feedback path /feedback /feedback/*" in caddy
     # a failed request too (Caddy writes errors to a second log unless they are handled)
     assert "handle_errors {" in caddy and "log_skip @feedback_failed" in caddy
+
+
+def test_a_reached_spend_cap_is_a_429_with_a_plain_message(caplog) -> None:
+    from permitnav.api import SPEND_CAP_MESSAGE
+    from permitnav.spend import SpendCapReached
+
+    reached = SpendCapReached("today's model spend has reached the cap of $5.00")
+    with client(FakeService(reached)) as c:
+        response = c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH)
+        got = events(c.post("/ask/stream", json={"question": "q?"}, headers=AUTH).text)
+    assert response.status_code == 429
+    assert response.json() == {"detail": SPEND_CAP_MESSAGE}
+    assert got[-1] == ("error", {"status": 429, "message": SPEND_CAP_MESSAGE})
+    assert "question declined" in caplog.text  # an error in the log: it usually means a leak

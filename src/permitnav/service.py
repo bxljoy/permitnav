@@ -25,7 +25,7 @@ from typing import Any
 
 import psycopg
 
-from permitnav import db
+from permitnav import db, spend
 from permitnav.answering.answerer import BGE_M3_FLOOR, Answer, AnswerConfig, Answerer
 from permitnav.retrieval.retriever import RetrievalConfig, Retriever
 
@@ -78,6 +78,9 @@ class AnswerService:
     translate_model: str | None = None  # None: no query translation
     reranker: Any = None
     database_url: str | None = None
+    # Dollars of model spend per day after which questions are declined (permitnav.spend);
+    # None: no cap. It counts what `llm` records, so `llm` must be a MeteredLLM to matter.
+    spend_cap_usd: float | None = None
     _model_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self) -> None:
@@ -103,6 +106,13 @@ class AnswerService:
         it, a question is searched and answered as asked, unless it rules something out:
         then the same call writes what to search with (see permitnav.agent.intake)."""
         translator = self._translator()
+        if self.spend_cap_usd is not None:
+            with db.connect(self.database_url) as conn:  # committed before the refusal is raised
+                over = spend.reached(conn, self.spend_cap_usd)
+            if over:
+                raise spend.SpendCapReached(
+                    f"today's model spend has reached the cap of ${self.spend_cap_usd:.2f}"
+                )
         with db.connect(self.database_url) as conn:
             retriever = Retriever(conn, self.embedder, self.config, translator, self.reranker)
             answer_config = AnswerConfig(model=self.model, min_score=BGE_M3_FLOOR)
@@ -191,8 +201,9 @@ def build_service() -> AnswerService:
     return AnswerService(
         model=model,
         embedder=BgeM3Embedder(),
-        llm=OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", "")),
+        llm=spend.MeteredLLM(OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))),
         config=config,
+        spend_cap_usd=spend.cap_usd(),  # a mistyped cap stops the start
         translate_model=os.environ.get("TRANSLATE_MODEL", "").strip() or model,
         reranker=_reranker(config.rerank),
     )
