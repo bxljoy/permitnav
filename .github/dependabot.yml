@@ -20,6 +20,12 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
     open-pull-requests-limit: 3
+    ignore:
+      # Major versions of the build tools, TypeScript and React are deliberate upgrades, done
+      # together and tested (vite 8 needs a new major of the React plugin, for one). Security
+      # updates are not affected by this and still arrive.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions   # keeps the SHA pins in ci.yml current
     directory: /
@@ -39,3 +45,7 @@ updates:
       # The 3.12-slim tag already picks up 3.12 patch releases on every build.
       - dependency-name: python
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      # The Node image only builds the chat UI; it stays on the 22 line (an LTS the build
+      # tools support) until a deliberate upgrade.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
