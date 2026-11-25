@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AskResponse, Citation } from "./api";
-import { asPlainText, blocks, hasLead, inline, locateQuote, readableDate } from "./answer";
+import { asPlainText, blocks, hasLead, inline, KIND_LABEL, KIND_NOTE, locateQuote, readableDate } from "./answer";
 
 const cite = (marker: string): Citation => ({
   marker, unit_id: `sfs:2005:716/6kap/${marker}`, heading: `6 kap. ${marker}`, url: "https://x",
@@ -95,5 +95,24 @@ describe("the conclusion", () => {
       as_of: "2026-11-25", notice: "n", understood_as: null, situation: {} };
     expect(asPlainText(response, "2026-11-25T10:00:00Z")).toContain("What to do: Apply.");
     expect(asPlainText(response, "2026-11-25T10:00:00Z")).not.toContain("**");
+  });
+});
+
+describe("the kind of answer", () => {
+  it("names an unconfirmed answer by what PermitNav found, with a sentence that explains it", () => {
+    expect(KIND_LABEL.not_settled).toBe("Answer not confirmed");
+    expect(KIND_NOTE.not_settled).toContain("verify it with Migrationsverket");
+    expect(KIND_LABEL.answered).toBeNull();
+    for (const kind of ["answered", "follow_up", "out_of_scope", "failed"] as const) {
+      expect(KIND_NOTE[kind]).toBeUndefined();
+    }
+  });
+
+  it("keeps the caveat when an unconfirmed answer is copied", () => {
+    const response = { kind: "not_settled" as const, text: "The sources are silent.", citations: [], credits: [],
+      as_of: "2026-11-25", notice: "n", understood_as: null, situation: {} };
+    const copied = asPlainText(response, "2026-11-25T10:00:00Z");
+    expect(copied.startsWith("Answer not confirmed: PermitNav couldn't confirm")).toBe(true);
+    expect(asPlainText({ ...response, kind: "answered" }, "2026-11-25T10:00:00Z").startsWith("The sources are silent.")).toBe(true);
   });
 });

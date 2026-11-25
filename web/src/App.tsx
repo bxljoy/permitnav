@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ApiError, askStream, SAVE_UNSURE, checkToken, saveFeedback, source, withdrawFeedback, type AskResponse, type FeedbackCase, type Citation, type Source, type Stage } from "./api";
-import { asPlainText, blocks, hasLead, KIND_LABEL, locateQuote, readableDate, type Inline } from "./answer";
+import { asPlainText, blocks, hasLead, KIND_LABEL, KIND_NOTE, locateQuote, readableDate, type Inline } from "./answer";
 import { historyFor, loadToken, loadTurns, saveToken, saveTurns, type Turn, type UserTurn } from "./conversation";
 import {
   abandoned,
@@ -372,6 +372,7 @@ function Answer({ response, at, question, reported, onReport, onWithdraw, onDisc
         </p>
       )}
       {label && <span className="kind">{label}</span>}
+      {KIND_NOTE[response.kind] && <p className="kind-note">{KIND_NOTE[response.kind]}</p>}
       <div className="answer-text">
         {parsed.map((b, i) =>
           b.type === "paragraph" ? (

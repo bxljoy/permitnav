@@ -1344,7 +1344,7 @@ def cmd_import_eval_corpus(args: argparse.Namespace) -> int:
 KIND_LABELS = {
     "answered": "",
     "follow_up": "I need one more detail to answer this:",
-    "not_settled": "The rules don't settle this on their own:",
+    "not_settled": "Answer not confirmed (verify with Migrationsverket before relying on it):",
     "out_of_scope": "Outside what PermitNav covers:",
     "failed": "Something went wrong:",
 }
