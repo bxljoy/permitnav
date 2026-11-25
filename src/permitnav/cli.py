@@ -1494,6 +1494,11 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
     same, checked = language_matches(results)
     if checked:
         print(f"in the question's language: {same} of {checked} answers")
+    from permitnav.evals.answers import lead_first, leads_first
+
+    led, covered = leads_first(results)
+    if covered:
+        print(f"conclusion first (short, cited first paragraph): {led} of {covered} answers")
     print(
         f"declined without a model call: {skipped}; failed: {failed}; cost ${cost:.4f}"
         + (f" (+ {unknown} replies with unknown cost)" if unknown else "")
@@ -1543,6 +1548,7 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
                         "text": r.answer.text,
                         "sources": [s.unit_id for s in r.answer.sources],
                         "cost_usd": r.cost_usd,
+                        "lead_first": lead_first(r.kind, r.answer.text),
                         **(
                             {
                                 "intake": {

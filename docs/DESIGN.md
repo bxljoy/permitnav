@@ -1269,3 +1269,28 @@ The edges that looked cut off in the first screenshots were the screenshot's cro
 **Code review (high), all fixed:** each stream had started its own unbounded thread (now anyio's bounded pool, and no second thread blocked on a queue); a client that left kept the answer running and paying for model calls (now stopped at the next stage); `progress` was stored on the answerer instance, so overlapping calls could cross (now passed through the call); the page jumped to the bottom on every stage; the stream client mapped 404 and error events coarsely and did not release the connection after the answer; the event parser did not accept CRLF or `data:` without a space; `Content-Encoding: identity` is reserved by RFC 9110 (replaced by `no-transform`); the unused non-streaming client call was removed; screen readers heard the seconds counter every second (now only the current step is announced).
 
 Tests: stage order in the answerer (with and without history), the event stream (stages, then the answer; an error as an event without provider text; 401 and 422 before streaming; one trace), and the browser-side parser on a stream split mid-event. Checked in a browser on a live follow-on.
+
+### Conclusion first (2026-11-25)
+
+**Problem (first real use):** answers were correct but read as one flowing text; the conclusion was spread over several sentences of a long first paragraph (median 1,500 characters per answer, first paragraphs up to 1,300), so nothing could be set off as "the answer".
+
+**Considered and dropped:** separate `short_answer` and `next_step` fields. Two texts can contradict each other (and the judge reads the answer as a whole); a field that opens with yes/no pushes against rule 6 (never predict an individual outcome); the citation and quote checks would have to cover every new field; `next_step` would mostly repeat the notice.
+
+**Done instead:** answer prompt rule 9 — the first paragraph is the conclusion for the person's situation, at most two sentences, cited, a paragraph of its own; the details follow. The UI sets the first paragraph off (larger, a rule under it) when details follow; no label, so an answer that ignores the rule degrades to today's look. The eval reports "conclusion first" (first paragraph ≤ 350 characters, cited when the kind is answered; `lead_first`).
+
+**Measured** (old prompt from a clean checkout of main; two judged runs each on dev, multi-turn, situational):
+
+| | Old prompt | v1 | v2 | v3 (kept; dev) |
+|---|---|---|---|---|
+| Conclusion first | 35% | 85% | 88% | 40/47, 46/47 |
+| Right kind (dev) | 53, 54 /64 | 53, 53 | 51, 53 | 54, 54 |
+| Not-settled replies (all sets) | 42 | **60** | 38 | — |
+| Out-of-scope declined (dev) | 14, 14 /16 | 13, 14 | 12, 13 | 14, 14 |
+| Judged correct / wrong (dev) | 43, 43 / 3, 3 | 44, 42 / 4, 4 | 42, 41 / 6, 7 | 41, 43 / 3, 4 |
+| Faithful (dev) | 47/50, 47/50 | 46/51, 47/50 | 47/52, 50/51 | 47/50, 46/50 |
+
+- **v1** described what the conclusion says when the sources leave part open and named `not_settled`: the model then chose that kind far more often (42 → 60 replies; right kind on multi-turn 10 → 7–9, situational 5 → 3). A rule about wording moved the kind.
+- **v2** made the rule about order only ("rules 5–7 alone decide kind") and asked for a conclusion "as definitely as the sources allow": kinds returned, but out-of-scope questions were declined a little less often.
+- **v3** scopes the rule to `answered` and `not_settled` replies (a follow-up keeps rule 5's form, a decline rule 7's): dev matches the old prompt on every measure, with the conclusion first in ~91% of answers. One run on multi-turn (right kind 10/12, correct 7, conclusion first 11/12) and situational (6/8, 8/8, 8/8); smoke slice 12 of 12.
+
+**Known cost:** a wrong conclusion is now more visible than it was inside a paragraph (e.g. 202, where the answer follows Migrationsverket's "new application" wording against the law's "extension"). The phase 5 baselines were measured on the old prompt; comparisons from here on need the new one on both sides.

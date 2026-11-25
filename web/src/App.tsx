@@ -238,6 +238,11 @@ function Answer({ response, at, onOpen, active }: { response: AskResponse; at: s
   const [copied, setCopied] = useState(false);
   const label = KIND_LABEL[response.kind];
   const situation = Object.entries(response.situation ?? {});
+  // The answer opens with its conclusion (answer prompt, rule 9): set it off when details follow.
+  const hasLead =
+    (response.kind === "answered" || response.kind === "not_settled") &&
+    parsed.length > 1 &&
+    parsed[0].type === "paragraph";
 
   function render(parts: Inline[]) {
     return parts.map((p, i) => {
@@ -275,7 +280,7 @@ function Answer({ response, at, onOpen, active }: { response: AskResponse; at: s
       <div className="answer-text">
         {parsed.map((b, i) =>
           b.type === "paragraph" ? (
-            <p key={i}>{render(b.parts)}</p>
+            <p key={i} className={i === 0 && hasLead ? "lead" : undefined}>{render(b.parts)}</p>
           ) : (
             <ul key={i}>
               {b.items.map((item, j) => (

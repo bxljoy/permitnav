@@ -898,3 +898,15 @@ def test_a_second_search_adds_its_sources_for_the_answer_and_its_cost_is_counted
     (added,) = [src for src in answer.sources if src.unit_id == "sfs:2005:716/6kap/4§"]
     assert added.text in generate.system  # the added section reached the answer model
     assert AnswerResult(item("a", "q", []), answer).cost_usd == pytest.approx(0.002)
+
+
+def test_the_conclusion_first_check_is_about_shape_only() -> None:
+    from permitnav.evals.answers import LEAD_MAX_CHARS, lead_first
+
+    assert lead_first("answered", "Yes, if the salary is at least 90 percent [S1].\n\nDetails…")
+    assert not lead_first("answered", "Yes, usually.\n\nThe law says… [S1]")  # conclusion uncited
+    assert not lead_first("answered", "x" * (LEAD_MAX_CHARS + 1) + " [S1]\n\nMore")  # a wall
+    assert lead_first("not_settled", "The sources do not settle this.\n\nWhat they say… [S2]")
+    assert lead_first("answered", "One short cited paragraph [S1].")  # nothing more is fine
+    assert lead_first("follow_up", "Which permit do you have?") is None
+    assert lead_first("out_of_scope", "I cannot help with this.") is None

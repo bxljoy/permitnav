@@ -7,6 +7,7 @@ Whether the content is right is the LLM judge's job (phase 2, slice 7).
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -173,3 +174,27 @@ def language_matches(results: list[AnswerResult]) -> tuple[int, int]:
     languages = [(language_of(r.answer.text), r.item.original_language) for r in written]
     told = [(a, q) for a, q in languages if a is not None]
     return sum(a == q for a, q in told), len(told)
+
+
+LEAD_MAX_CHARS = 350  # two sentences with a citation or two
+LEAD_KINDS = ("answered", "not_settled")  # a follow-up asks; a decline is one or two sentences
+_MARKER = re.compile(r"\[S\d+\]")
+
+
+def lead_first(kind: str, text: str) -> bool | None:
+    """Whether an answer opens with its conclusion (answer prompt, rule 9): a short first
+    paragraph, cited when the question is answered. None for kinds the rule does not cover.
+    A mechanical check of shape; whether the conclusion is right is the judge's question."""
+    if kind not in LEAD_KINDS:
+        return None
+    lead = text.strip().split("\n\n", 1)[0].strip()
+    if not lead or len(lead) > LEAD_MAX_CHARS:
+        return False
+    return kind == "not_settled" or bool(_MARKER.search(lead))
+
+
+def leads_first(results: list[AnswerResult]) -> tuple[int, int]:
+    """(answers that open with their conclusion, answers the rule covers)."""
+    checks = [lead_first(r.kind, r.answer.text) for r in results]
+    covered = [c for c in checks if c is not None]
+    return sum(covered), len(covered)
