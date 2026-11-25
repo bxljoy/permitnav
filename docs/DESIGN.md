@@ -1276,7 +1276,7 @@ Tests: stage order in the answerer (with and without history), the event stream 
 
 **Considered and dropped:** separate `short_answer` and `next_step` fields. Two texts can contradict each other (and the judge reads the answer as a whole); a field that opens with yes/no pushes against rule 6 (never predict an individual outcome); the citation and quote checks would have to cover every new field; `next_step` would mostly repeat the notice.
 
-**Done instead:** answer prompt rule 9 — the first paragraph is the conclusion for the person's situation, at most two sentences, cited, a paragraph of its own; the details follow. The UI sets the first paragraph off (larger, a rule under it) when details follow; no label, so an answer that ignores the rule degrades to today's look. The eval reports "conclusion first" (first paragraph ≤ 350 characters, cited when the kind is answered; `lead_first`).
+**Done instead:** answer prompt rule 9 — the first paragraph is the conclusion for the person's situation, at most two sentences, cited, a paragraph of its own; the details follow. The UI sets the first paragraph off (larger, a rule under it) when it has the shape of a conclusion: at most 350 characters, with details after it and not an intro line before a list (`hasLead`); no label. (As first shipped, any first paragraph was set off, so an old or non-conforming answer did not keep the plain look as claimed here; found in review, fixed.) The eval reports "conclusion first" (first paragraph ≤ 350 characters, cited when the kind is answered; `lead_first`).
 
 **Measured** (old prompt from a clean checkout of main; two judged runs each on dev, multi-turn, situational):
 
@@ -1294,3 +1294,28 @@ Tests: stage order in the answerer (with and without history), the event stream 
 - **v3** scopes the rule to `answered` and `not_settled` replies (a follow-up keeps rule 5's form, a decline rule 7's): dev matches the old prompt on every measure, with the conclusion first in ~91% of answers. One run on multi-turn (right kind 10/12, correct 7, conclusion first 11/12) and situational (6/8, 8/8, 8/8); smoke slice 12 of 12.
 
 **Known cost:** a wrong conclusion is now more visible than it was inside a paragraph (e.g. 202, where the answer follows Migrationsverket's "new application" wording against the law's "extension"). The phase 5 baselines were measured on the old prompt; comparisons from here on need the new one on both sides.
+
+### Conclusion first: a wording refinement, measured and not adopted (2026-11-25)
+
+An outside review of ten openings found four weak ones — an opening hedge ("Possibly yes."), a follow-on that restated the earlier answer, "The sources do not say…" where the rule is known and only the outcome is Migrationsverket's assessment, and "a well-behaved life" for *vandel* — and asked for labelled sections and a visible supporting passage.
+
+**Tried in rule 9 (wording only):** answer what is asked now; open with the substance, not a hedge or "According to…"; different wording for an individual assessment and for silent sources; short bold labels on detail paragraphs; "conduct requirement".
+
+**Measured** against the live prompt, two judged runs per set (168 answers per column); the final wording differs from the first by two clarifications from code review:
+
+| | Live prompt | Refined, first | Refined, final |
+|---|---|---|---|
+| Right kind | 140 | 140 | 134 |
+| Judged correct / wrong | 117 / 11 | 116 / 12 | 113 / 11 |
+| Faithful | 133/140 | 136/142 | 132/141 |
+| Conclusion first | 124/134 (93%) | 116 (87%) | 108 (81%) |
+| Opens with a bare hedge | 6 | 1 | 2 |
+| Opens with "According to / The sources…" | 35 | 26 | 26 |
+| Answers with bold labels | 0 | 114 | 116 |
+| Cost per question | $0.0020 | $0.0024 | $0.0026 |
+
+**Not adopted.** Some openings read better (the traffic fine, the salary cut, the follow-on) and details gained labels, but the conclusion-first rate — the point of the rule — fell with each added instruction, correctness did not rise, and cost rose 25–30%. A recommendation to ship made after the first run did not survive the second. The lesson of three rounds on rule 9: every sentence added to it moved something else (kinds in v1, declines in v2, the lead rate here), and wording was being judged by reading ten openings while the judge measures only correctness. A further attempt needs a judged "directness" measure first, calibrated against hand labels as the judge was (D19).
+
+**Not adopted from the review, with reasons:** a direct "No" on the one-room flat (the deciding rule, 4 kap. 4 a § utlänningsförordningen, is not among the answer's sources; asserting it would break rule 1); "retrieve again when evidence is thin" (the second search, measured in phase 5: no gain); claim-to-evidence checking as a gate (the verifier probe flagged 40–60% of good answers). The new-employer answer (202) stays wrong for a retrieval reason.
+
+**Kept from this round (code, no prompt change):** the source panel marks the cited quote inside the full text (`locateQuote`: whitespace- and case-tolerant, as the server accepts quotes; only when the quote occurs exactly once), with a pinned heading and a "Go to the cited passage" button instead of an automatic scroll, and is rebuilt per citation. From a late code review of the conclusion-first change (it had been merged unreviewed): the first paragraph is set off only when it has a conclusion's shape (`hasLead`); "Copy answer" and the CLI drop `**`; the eval's `lead_first` splits paragraphs as the UI does. Known and left: the prompt's format note says the conclusion is "always" its own paragraph while rule 9 limits itself to answered and not-settled replies; it was measured with that wording (out-of-scope declines unchanged).

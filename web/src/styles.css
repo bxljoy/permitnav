@@ -147,7 +147,7 @@ button:disabled { cursor: default; opacity: 0.55; }
 
 /* Source panel */
 .panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100%); background: var(--surface); border-left: 1px solid var(--line); padding: 1rem 1.2rem calc(1rem + env(safe-area-inset-bottom)); overflow-y: auto; display: flex; flex-direction: column; gap: 0.7rem; box-shadow: -12px 0 32px rgb(0 0 0 / 0.08); }
-.panel-head { display: grid; grid-template-columns: auto 1fr auto; gap: 0.6rem; align-items: start; }
+.panel-head { display: grid; grid-template-columns: auto 1fr auto; gap: 0.6rem; align-items: start; position: sticky; top: -1rem; z-index: 1; background: var(--surface); padding-block: 1rem 0.5rem; margin-top: -1rem; }
 .panel-head h2 { margin: 0; font: 600 1.05rem/1.35 var(--serif); }
 .panel-dates { margin: 0; font-size: 0.85rem; color: var(--muted); }
 .panel h3 { margin: 0.4rem 0 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
@@ -174,3 +174,5 @@ button:disabled { cursor: default; opacity: 0.55; }
 /* Touch keyboards have no Shift+Enter worth explaining */
 @media (hover: none) { .composer-hint { display: none; } }
 .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; margin: -1px !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; white-space: nowrap !important; }
+.full-text mark { background: var(--warn-soft); color: inherit; border-radius: 3px; padding: 0.05em 0.1em; box-shadow: 0 0 0 1px var(--warn); }
+.jump { align-self: flex-start; border-color: var(--line); }

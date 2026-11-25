@@ -908,5 +908,7 @@ def test_the_conclusion_first_check_is_about_shape_only() -> None:
     assert not lead_first("answered", "x" * (LEAD_MAX_CHARS + 1) + " [S1]\n\nMore")  # a wall
     assert lead_first("not_settled", "The sources do not settle this.\n\nWhat they say… [S2]")
     assert lead_first("answered", "One short cited paragraph [S1].")  # nothing more is fine
+    assert lead_first("answered", "Yes [S1].\n \n" + "x" * 500)  # a blank line with a space
+    assert lead_first("answered", "Yes [S1].\r\n\r\n" + "x" * 500)
     assert lead_first("follow_up", "Which permit do you have?") is None
     assert lead_first("out_of_scope", "I cannot help with this.") is None

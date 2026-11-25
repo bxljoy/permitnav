@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, askStream, checkToken, source, type AskResponse, type Citation, type Source, type Stage } from "./api";
-import { asPlainText, blocks, KIND_LABEL, readableDate, type Inline } from "./answer";
+import { asPlainText, blocks, hasLead, KIND_LABEL, locateQuote, readableDate, type Inline } from "./answer";
 import { historyFor, loadToken, loadTurns, saveToken, saveTurns, type Turn } from "./conversation";
 
 const EXAMPLES = [
@@ -202,7 +202,7 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
 
       <Composer disabled={!!pending} onSend={send} asOf={asOf} onAsOf={setAsOf} restore={draftBack} onRestored={() => setDraftBack(null)} />
 
-      {open && <SourcePanel token={token} citation={open.citation} onClose={() => setOpen(null)} onSignedOut={onSignedOut} />}
+      {open && <SourcePanel key={`${open.citation.marker}-${open.citation.version_id ?? open.citation.unit_id}`} token={token} citation={open.citation} onClose={() => setOpen(null)} onSignedOut={onSignedOut} />}
     </div>
   );
 }
@@ -238,11 +238,7 @@ function Answer({ response, at, onOpen, active }: { response: AskResponse; at: s
   const [copied, setCopied] = useState(false);
   const label = KIND_LABEL[response.kind];
   const situation = Object.entries(response.situation ?? {});
-  // The answer opens with its conclusion (answer prompt, rule 9): set it off when details follow.
-  const hasLead =
-    (response.kind === "answered" || response.kind === "not_settled") &&
-    parsed.length > 1 &&
-    parsed[0].type === "paragraph";
+  const lead = hasLead(response.kind, parsed); // rule 9's conclusion, when it has that shape
 
   function render(parts: Inline[]) {
     return parts.map((p, i) => {
@@ -280,7 +276,7 @@ function Answer({ response, at, onOpen, active }: { response: AskResponse; at: s
       <div className="answer-text">
         {parsed.map((b, i) =>
           b.type === "paragraph" ? (
-            <p key={i} className={i === 0 && hasLead ? "lead" : undefined}>{render(b.parts)}</p>
+            <p key={i} className={i === 0 && lead ? "lead" : undefined}>{render(b.parts)}</p>
           ) : (
             <ul key={i}>
               {b.items.map((item, j) => (
@@ -490,6 +486,33 @@ function DateChip({ asOf, onAsOf }: { asOf: string; onAsOf: (d: string) => void 
   );
 }
 
+/** A source's full text with the cited passage marked. No automatic scroll: the panel opens
+ * on its heading, the quote and its translation; a button goes to the passage. */
+function FullText({ source: full, quote }: { source: Source; quote: string }) {
+  const parts = useMemo(() => (quote ? locateQuote(full.text, quote) : null), [full.text, quote]);
+  const mark = useRef<HTMLElement>(null);
+  return (
+    <>
+      {parts && (
+        <button type="button" className="quiet small jump" onClick={() => mark.current?.scrollIntoView({ block: "center", behavior: "smooth" })}>
+          Go to the cited passage ↓
+        </button>
+      )}
+      <div className="full-text" lang={full.unit_id.startsWith("web:en") ? "en" : "sv"}>
+        {parts ? (
+          <>
+            {parts[0]}
+            <mark ref={mark}>{parts[1]}</mark>
+            {parts[2]}
+          </>
+        ) : (
+          full.text
+        )}
+      </div>
+    </>
+  );
+}
+
 function SourcePanel({ token, citation, onClose, onSignedOut }: { token: string; citation: Citation; onClose: () => void; onSignedOut: (m: string) => void }) {
   const [full, setFull] = useState<Source | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -538,7 +561,7 @@ function SourcePanel({ token, citation, onClose, onSignedOut }: { token: string;
       <h3>Full text of the cited wording</h3>
       {error && <p className="error">{error}</p>}
       {!full && !error && <p className="muted">Loading…</p>}
-      {full && <div className="full-text" lang={full.unit_id.startsWith("web:en") ? "en" : "sv"}>{full.text}</div>}
+      {full && <FullText source={full} quote={citation.quote} />}
       <a className="external" href={citation.url} target="_blank" rel="noreferrer noopener">
         Open the original
       </a>

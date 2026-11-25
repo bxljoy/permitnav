@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AskResponse, Citation } from "./api";
-import { asPlainText, blocks, inline, readableDate } from "./answer";
+import { asPlainText, blocks, hasLead, inline, locateQuote, readableDate } from "./answer";
 
 const cite = (marker: string): Citation => ({
   marker, unit_id: `sfs:2005:716/6kap/${marker}`, heading: `6 kap. ${marker}`, url: "https://x",
@@ -57,5 +57,43 @@ describe("answer text", () => {
     expect(text).toContain('"lönen"');
     expect(text).toContain("Rules as of 2026-11-24; answered 2026-11-25");
     expect(text.trim().endsWith("Not legal advice.")).toBe(true);
+  });
+});
+
+describe("the cited passage in a source", () => {
+  it("is found across line breaks and extra spaces", () => {
+    const text = "Arbetstillstånd får ges om\n\n1. lönen  minst uppgår (till) 90 procent.\nSlut.";
+    expect(locateQuote(text, "lönen minst uppgår (till) 90 procent.")).toEqual([
+      "Arbetstillstånd får ges om\n\n1. ", "lönen  minst uppgår (till) 90 procent.", "\nSlut.",
+    ]);
+  });
+  it("is found whatever the letter case, as the server accepts it", () => {
+    expect(locateQuote("… om arbetstillstånd får ges till …", "Arbetstillstånd får ges")?.[1]).toBe("arbetstillstånd får ges");
+    expect(locateQuote("ÄNDRING ska göras", "ändring ska")?.[1]).toBe("ÄNDRING ska");
+  });
+  it("is not marked when it occurs more than once", () => {
+    expect(locateQuote("ska ansökan avslås. … Då ska ansökan avslås.", "ska ansökan avslås")).toBeNull();
+  });
+  it("is null when the text does not contain it", () => {
+    expect(locateQuote("annan text", "lönen")).toBeNull();
+    expect(locateQuote("text", "  ")).toBeNull();
+  });
+});
+
+describe("the conclusion", () => {
+  const c = [cite("S1")];
+  it("is set off only when it has the shape of one", () => {
+    expect(hasLead("answered", blocks("Yes, if the salary is enough [S1].\n\nDetails.", c))).toBe(true);
+    expect(hasLead("not_settled", blocks("The sources I have do not cover this.\n\nDetails.", c))).toBe(true);
+    expect(hasLead("answered", blocks("x".repeat(400) + " [S1].\n\nDetails.", c))).toBe(false); // an old, long opening
+    expect(hasLead("answered", blocks("You need:\n- a\n- b", c))).toBe(false); // an intro line before a list
+    expect(hasLead("answered", blocks("Only one paragraph [S1].", c))).toBe(false);
+    expect(hasLead("follow_up", blocks("Which permit?\n\nIt matters because…", c))).toBe(false);
+  });
+  it("copies bold labels without the asterisks", () => {
+    const response = { kind: "answered" as const, text: "Yes [S1].\n\n**What to do:** Apply.", citations: c, credits: [],
+      as_of: "2026-11-25", notice: "n", understood_as: null, situation: {} };
+    expect(asPlainText(response, "2026-11-25T10:00:00Z")).toContain("What to do: Apply.");
+    expect(asPlainText(response, "2026-11-25T10:00:00Z")).not.toContain("**");
   });
 });

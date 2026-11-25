@@ -1353,7 +1353,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         print(f"Understood as: {answer.intake.question}\n")
     if KIND_LABELS.get(answer.kind):
         print(KIND_LABELS[answer.kind])
-    print(answer.text)
+    print(answer.text.replace("**", ""))  # bold labels are for the web UI
     if answer.citations:
         print("\nSources")
         for c in answer.citations:

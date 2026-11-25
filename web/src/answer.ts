@@ -77,7 +77,7 @@ export const KIND_LABEL: Record<Kind, string | null> = {
 
 /** The answer with its sources and dates, for copying or saving. */
 export function asPlainText(response: AskResponse, answeredAt: string): string {
-  const lines = [response.text.trim(), ""];
+  const lines = [response.text.trim().replace(/\*\*/g, ""), ""]; // bold labels: plain text has none
   if (response.citations.length) {
     lines.push("Sources:");
     for (const c of response.citations) {
@@ -97,4 +97,32 @@ export function readableDate(iso: string): string {
   if (!y || !m || !d) return iso;
   return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })
     .format(new Date(Date.UTC(y, m - 1, d)));
+}
+
+/** The cited quote inside a source's full text, as [before, quote, after], whatever the line
+ * breaks, spacing and letter case (the server accepts quotes on the same terms); null when it
+ * is not there, or is there more than once: marking the first of several could show a passage
+ * the answer did not rely on. */
+export function locateQuote(text: string, quote: string): [string, string, string] | null {
+  const words = quote.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return null;
+  const escaped = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const matches = [...text.matchAll(new RegExp(escaped.join("\\s+"), "giu"))];
+  if (matches.length !== 1) return null;
+  const [match] = matches;
+  const at = match.index ?? 0;
+  return [text.slice(0, at), match[0], text.slice(at + match[0].length)];
+}
+
+/** The longest first paragraph still shown as the conclusion (the eval's LEAD_MAX_CHARS). */
+export const LEAD_MAX_CHARS = 350;
+
+/** Whether an answer opens with a conclusion worth setting off: a short first paragraph with
+ * details after it. An older or non-conforming answer keeps the plain look. */
+export function hasLead(kind: Kind, parsed: Block[]): boolean {
+  if (kind !== "answered" && kind !== "not_settled") return false;
+  const [first, second] = parsed;
+  if (!first || !second || first.type !== "paragraph" || second.type === "list") return false;
+  const length = first.parts.reduce((n, p) => n + (p.type === "marker" ? p.marker.length + 2 : p.text.length), 0);
+  return length <= LEAD_MAX_CHARS;
 }
