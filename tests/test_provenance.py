@@ -50,3 +50,12 @@ def test_git_version_marks_uncommitted_changes(tmp_path):
 
 def test_git_version_outside_a_checkout(tmp_path):
     assert git_version(tmp_path) == "unknown"
+
+
+def test_the_report_header_names_the_answer_models_reasoning_effort_when_set(capsys):
+    from permitnav.cli import _print_provenance
+
+    _print_provenance(RetrievalConfig(), "a-model")
+    assert "reasoning effort" not in capsys.readouterr().out
+    _print_provenance(RetrievalConfig(), "a-model", answer_effort="low")
+    assert "answer=a-model (reasoning effort low)" in capsys.readouterr().out

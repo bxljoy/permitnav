@@ -912,3 +912,25 @@ def test_the_conclusion_first_check_is_about_shape_only() -> None:
     assert lead_first("answered", "Yes [S1].\r\n\r\n" + "x" * 500)
     assert lead_first("follow_up", "Which permit do you have?") is None
     assert lead_first("out_of_scope", "I cannot help with this.") is None
+
+
+@pytest.mark.db
+def test_the_answer_models_reasoning_effort_comes_from_the_environment(
+    conn: psycopg.Connection, stored: Retriever, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reply = json.dumps({"kind": "answered", "answer": "At least 90 percent [S1]."})
+
+    def effort_sent() -> str | None:
+        llm = ScriptedLLM(reply)
+        Answerer(conn, stored, llm, AnswerConfig(model="m", k=3)).answer(
+            "lönen medianlönen procent lönekravet", as_of=date(2026, 11, 20)
+        )
+        return llm.requests[-1].reasoning_effort
+
+    monkeypatch.delenv("ANSWER_REASONING_EFFORT", raising=False)
+    assert effort_sent() is None  # the model's default
+    monkeypatch.setenv("ANSWER_REASONING_EFFORT", " Low ")
+    assert effort_sent() == "low"
+    monkeypatch.setenv("ANSWER_REASONING_EFFORT", "fast")
+    with pytest.raises(ValueError, match="ANSWER_REASONING_EFFORT"):
+        AnswerConfig(model="m")
