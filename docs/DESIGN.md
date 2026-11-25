@@ -1423,3 +1423,31 @@ The label for a `not_settled` answer read as a statement about the law, while th
 **From the code review (9 findings, all fixed):** a capped day could go unreported when the refresh failed or did not run; failed calls and zero or non-numeric costs were not counted safely; an unwritten amount was dropped; the bound on overshoot was understated; the alert mail would have said "refresh failed".
 
 **Found while building:** the first version raised from inside the transaction that counted the declined question, so the count was rolled back; a test for the count caught it. Tried with the real model and a cap of $0.003: two questions answered, the third declined on `/ask` and as an error event on `/ask/stream`.
+
+### The questions that fail every time: a tabulation and two fixes (2026-11-25)
+
+**Tabulated from the runs already made that day** (reasoning on; 6 runs per dev question, 10 per multi-turn, 4 per situational): 23 of 86 golden questions got the wrong kind or were not judged correct in at least half their runs; 48 never failed. Five groups:
+
+1. **A follow-on dragged the earlier question into its rewrite** (multi-spouse-work-901-en: not correct in 10 of 10). "What salary does my job need?" then "And can my spouse come here and work too?" came out as "…I must know what salary my job needs to pay. Can my spouse come…", and the search returned salary rules only. The intake prompt listed "what they asked before" among the facts to bring in.
+2. **Rules the law names only by section number** (the family and maintenance rules of utlänningsförordningen 4 kap. 4 a, 4 c, 4 e §§; 5 questions): rank 75–175 among law sections. The known limit of 2026-11-24 (second search, descriptions: measured, not adopted). Unchanged here.
+3. **A page section not found** (employer steps 101, new-or-extension 202, 905; 5 questions).
+4. **Judged correct, but another kind than expected** (8 questions, e.g. "can my permit be revoked after a salary cut": a correct answer labelled not settled because the outcome depends on the case; or a page now answers what the item expects to be unsettled). For the maintainer's review of the expectations, not a code fix.
+5. **Scope and asking back** (refugee family reunification answered in 4 of 6 Swedish runs; deportation with a work permit; "my first application" answered where a follow-up is expected).
+
+**Fix 1, intake prompt.** A latest question that asks something new comes out as that question with the facts the person stated about themselves, without the earlier question; a question that narrows an earlier one still comes out as the earlier question with the detail (the 907 case). Checked on every multi-turn item's rewrite.
+
+**Fix 1 alone moved the miss, it did not remove it** (multi-turn, 3 runs): the English spouse question now found family pages (right kind 2 of 5 → 3 of 3) but the Swedish one fell from 4 of 5 correct to 0 of 3: the search showed the family section of the *researchers'* page (the English one: the *self-employed* page, with its savings amounts), which does not say that a spouse may work. The rule "show the variant the question names, else the general page" (variants.py) was applied only among the candidates found, and the variants of a section score within a few hundredths of each other, so which of them is a candidate is chance.
+
+**Fix 2, the page to show is looked up.** When a variant group among the candidates has no member of the page to show (the named variant, else the employees' page), that page's section with the same anchor is fetched (one small query, only then) and shown in the group's place, if it matches the question about as well as the section found (cosine at most 0.05 lower): most variants differ by a few words, but some are different content under the same heading (the athletes' "requirements to get an extended work permit" is thirty times the employees' text), and there the found section stays. A variant the question names only to rule it out is not fetched. On the dev set 10 of 64 questions change in the top 8, each a specialised page's section replaced by the employees' one; the retrieval gate is unchanged (R@5 0.52, MRR 0.37).
+
+**Both fixes, judged** (before: the day's default runs; after: 2 runs of dev and situational, 3 of multi-turn, made after the review fixes below):
+
+| set | right kind | correct | judged wrong | faithful |
+|---|---|---|---|---|
+| dev (128 answers each) | 80% → 84% | 84% → 85% | 9% → 6% | 95% → 97% |
+| multi-turn (70, 42) | 93% → 98% | 77% → 76% | 17% → 5% | 94% → 93% |
+| situational (16 each) | 56% → 69% | 100% → 100% | 0% → 0% | 88% → 94% |
+
+The target: multi-spouse-work-901-en right kind 2 of 5 → 3 of 3 and correct 0 of 5 → 2 of 3; its Swedish twin unchanged (good). The dev and situational differences are within what two runs can show; the claim is that the target is fixed and nothing measured got worse. Multi-turn "correct" is flat because multi-new-employer-905-en went from 4 of 5 to 0 of 3 (all "partly") with the same rewrite, the same sources and the same answer in substance ("a new work permit, not an extension"): the judge reads that sentence against the reference's nuance differently from run to run. That item belongs to group 3, and its verdicts are not evidence either way.
+
+**From the code review (7 findings, all fixed):** the general page was substituted unconditionally (now only within the margin above); a named variant whose page lacks the section fell back to chance (the general page is asked for too); a variant named to rule it out could be fetched; a follow-on that points back at the earlier question ("How long does it take?") could lose its subject under the new prompt wording (the prompt now names that case); identical text on two pages could make a lookup return nothing; a group's score could come from a section the search did not find; and the prompt's example quoted the golden item word for word (replaced; the rewrites were then checked on all 14 multi-turn items and five probes outside the golden set). `rules_out` moved to `permitnav/negation.py`, since the search uses it too.

@@ -427,6 +427,47 @@ def test_near_duplicate_page_variants_take_one_slot(
     assert pages(RetrievalConfig(), "Jag är artist. " + query) == ["artist" + anchor]
 
 
+def test_the_general_page_is_shown_even_when_only_siblings_were_among_the_candidates(
+    conn: psycopg.Connection,
+) -> None:
+    """Variants of a section score almost alike, so which one makes the candidates is chance:
+    a question about an ordinary permit was shown the researchers' page's family section."""
+    from permitnav.corpus.store import ingest_page
+    from permitnav.parsing.webpage import parse_page
+    from tests.test_webpage import FIXTURE as PAGE
+    from tests.test_webpage import SV, raw_page
+
+    ingest_page(conn, raw_page(PAGE, 20), parse_page(PAGE, SV))
+    # Three sibling pages whose union section is a word shorter, so it scores a little higher.
+    wording = "till det fackförbund som är aktuellt"
+    shorter = {
+        "sjoman": "till det fackförbund som är",
+        "forskare": "till fackförbund som är aktuellt",
+        "ict-tillstand": "till det fackförbund som aktuellt",
+    }
+    assert wording in PAGE
+    for slug, text in shorter.items():
+        url = SV.replace("/anstalld.html", f"/{slug}.html")
+        page = PAGE.replace(wording, text)
+        ingest_page(conn, raw_page(page, 20, url=url), parse_page(page, url))
+    build_chunks(conn, "structure")
+    embed_chunks(conn, FAKE)
+    anchor = "#fackforbundetfarmojlighetattyttrasig"
+    question = "arbetsgivaren skickar erbjudandet fackförbund"
+
+    def top(config: RetrievalConfig) -> tuple[str, float]:
+        (hit,) = Retriever(conn, FAKE, config).search(question, as_of=date(2026, 11, 21), k=1)
+        return hit.unit_id.split("/")[-1], hit.score
+
+    # The three siblings are the only candidates (k=1 looks at three), each a little better
+    # than the general page's section, which is looked up and shown at what was found.
+    found, best = top(RetrievalConfig(collapse_variants=False))
+    assert found != "anstalld" + anchor
+    shown, score = top(RetrievalConfig())
+    assert shown == "anstalld" + anchor
+    assert score == best  # the slot keeps the score of what the search found
+
+
 def test_rulings_complement_the_results_in_one_last_slot(
     conn: psycopg.Connection, retriever: Retriever
 ) -> None:

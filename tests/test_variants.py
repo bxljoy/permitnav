@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime
 
 from permitnav.retrieval.retriever import Hit
-from permitnav.retrieval.variants import collapse_variants, named_variants, variant_key
+from permitnav.retrieval.variants import (
+    SIBLING_MARGIN,
+    collapse_variants,
+    named_variants,
+    preferred_siblings,
+    variant_key,
+    with_siblings,
+)
 
 EXT = "web:en/employers/extending-a-permit/"
 PREP = "#applicationpreparationsforemployers"
@@ -93,3 +101,51 @@ def test_a_group_keeps_its_best_cosine_score_when_the_reranker_put_another_first
     general = dataclasses.replace(hit(EXT + "employees" + PREP), score=0.62, rerank_score=1.0)
     (shown,) = collapse_variants([artist, general], "What must be prepared?")
     assert (shown.unit_id, shown.score, shown.rerank_score) == (general.unit_id, 0.62, 3.0)
+
+
+def test_the_page_to_show_is_asked_for_when_only_a_sibling_was_found() -> None:
+    key = variant_key(EXT + "employees" + PREP)
+    assert key is not None
+    found = [hit(EXT + "seasonal-workers" + PREP), hit("sfs:2005:716/6kap/2§"), hit(EXT + "x#y")]
+    general = sorted(
+        EXT + slug + PREP for slug in ("anstalld", "anstallning", "employees", "employment")
+    )
+    # No variant named: the general page's section, under each general page name.
+    assert preferred_siblings(found, "What must my employer prepare?") == {key: general}
+    # The question names a variant that was not found: that one, and the general page in case
+    # the named page has no such section (collapse_variants prefers the named one).
+    artists = [EXT + slug + PREP for slug in ("artist", "artister", "artists")]
+    asked = "What must the employer of an artist prepare?"
+    assert preferred_siblings(found, asked) == {key: artists + general}
+    assert preferred_siblings([*found, hit(EXT + "employees" + PREP)], asked) == {key: artists}
+    # A variant named only to rule it out is not fetched.
+    ruled_out = "An ordinary permit, not for an artist. What must my employer prepare?"
+    with_general = [hit(EXT + "employees" + PREP), hit(EXT + "x#y")]
+    assert preferred_siblings(with_general, ruled_out, use_named=False) == {}
+    assert preferred_siblings(found, ruled_out, use_named=False) == {key: general}
+    # Nothing to look up when the page to show is already there, or nothing has variants.
+    assert preferred_siblings([*found, hit(EXT + "employees" + PREP)], "What to prepare?") == {}
+    assert preferred_siblings(found, "What must a seasonal worker's employer prepare?") == {}
+    assert preferred_siblings([hit("sfs:2005:716/6kap/2§")], "What to prepare?") == {}
+
+
+def test_a_looked_up_sibling_joins_its_group_and_is_the_one_shown() -> None:
+    law, seasonal = "sfs:2005:716/6kap/2§", EXT + "seasonal-workers" + PREP
+    found = [hit(law), hit(seasonal), hit(EXT + "x#y")]
+    general = dataclasses.replace(hit(EXT + "employees" + PREP), score=0.9)
+    joined = with_siblings(found, [general, hit(EXT + "employees#unrelated")])
+    assert [h.unit_id for h in joined] == [law, seasonal, EXT + "employees" + PREP, EXT + "x#y"]
+    assert joined[2].score == 0.5  # at most what the search found, not the sibling's own
+    shown = [h.unit_id for h in collapse_variants(joined, "What must my employer prepare?")]
+    assert shown == [law, EXT + "employees" + PREP, EXT + "x#y"]  # in the group's place
+
+
+def test_a_sibling_that_matches_clearly_worse_or_repeats_a_found_text_is_left_out() -> None:
+    seasonal = hit(EXT + "seasonal-workers" + PREP)
+    weaker = dataclasses.replace(hit(EXT + "employees" + PREP), score=0.5 - SIBLING_MARGIN - 0.01)
+    close = dataclasses.replace(weaker, score=0.5 - SIBLING_MARGIN + 0.01)
+    assert with_siblings([seasonal], [weaker]) == [seasonal]  # different content: found stays
+    assert [h.unit_id for h in with_siblings([seasonal], [close])][1] == EXT + "employees" + PREP
+    elsewhere = dataclasses.replace(hit("web:en/other/page#section"), text_hash="same text")
+    copy = dataclasses.replace(hit(EXT + "employees" + PREP), text_hash="same text")
+    assert with_siblings([seasonal, elsewhere], [copy]) == [seasonal, elsewhere]

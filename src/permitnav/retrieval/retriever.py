@@ -34,10 +34,11 @@ from psycopg import sql
 from permitnav import tracing
 from permitnav.corpus.indexing import EMBEDDING_TABLES, to_pgvector
 from permitnav.embedding.port import Embedder
+from permitnav.negation import rules_out
 from permitnav.parsing.references import named_units
 from permitnav.reranking.port import Reranker
 from permitnav.retrieval.translate import Translator, is_swedish
-from permitnav.retrieval.variants import collapse_variants
+from permitnav.retrieval.variants import collapse_variants, preferred_siblings, with_siblings
 
 
 @dataclass(frozen=True)
@@ -318,6 +319,11 @@ class Retriever:
                 cut = self.config.rerank_depth
                 hits = self._rerank(query, hits[:cut]) + hits[cut:]
             if self.config.collapse_variants:
+                missing = preferred_siblings(hits, query, use_named=not rules_out(query))
+                if missing:  # the general (or named) page's section, when it exists on the date
+                    ids = [unit for units in missing.values() for unit in units]
+                    found = self._search(vector, as_of, len(ids), None, units=ids, copies=True)
+                    hits = with_siblings(hits, found)
                 hits = collapse_variants(hits, query)
             return hits[:depth]
 
@@ -473,11 +479,13 @@ class Retriever:
         order_vector: str | None = None,
         untranslated_only: bool = False,
         kind: str = "text",
+        copies: bool = False,
     ) -> list[Hit]:
         """One ranking: by cosine distance, or by BM25 when `keyword` (the question's text for
         Swedish and for English chunks) is given. `units` restricts it to those units.
         `order_vector` orders a vector ranking by another vector (the translated question);
-        the score stays against `vector`."""
+        the score stays against `vector`. `copies`: keep units with identical text apart (a
+        lookup of named units wants each of them, not one per text)."""
         keyword_ctes = sql.SQL("")
         keyword_join = sql.SQL("")
         keyword_where = sql.SQL("")
@@ -526,8 +534,9 @@ class Retriever:
                 ),
                 -- The site repeats identical sections on many pages; keep one per text.
                 best AS (
-                  SELECT DISTINCT ON (text_hash) * FROM best_per_unit
-                  ORDER BY text_hash, rank_key, unit_id
+                  SELECT DISTINCT ON (text_hash, CASE WHEN %(copies)s THEN unit_id END) *
+                  FROM best_per_unit
+                  ORDER BY text_hash, CASE WHEN %(copies)s THEN unit_id END, rank_key, unit_id
                 )
                 SELECT unit_id, version_id, chunk_id, text, 1 - distance, authority, heading,
                        url, valid_from, valid_to, observed_from, text_hash, NULL, via_description
@@ -547,6 +556,7 @@ class Retriever:
                 "q": vector,
                 "oq": order_vector,
                 "untranslated": untranslated_only,
+                "copies": copies,
                 "strategy": self.config.strategy,
                 "kind": kind,
                 "d": as_of,
