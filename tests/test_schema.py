@@ -38,6 +38,26 @@ def test_migrations_are_idempotent(conn: psycopg.Connection) -> None:
     assert db.migrate(conn) == []
 
 
+def test_a_migration_leaves_the_planner_with_statistics(conn: psycopg.Connection, tmp_path) -> None:
+    """A column added with a default changes no rows, so autovacuum never analyses it; the
+    planner then guessed that 0.5% of chunks had kind 'text' and joined row by row."""
+    d = _setup(conn)
+    _add(conn, d)
+    (tmp_path / "900_new_column.sql").write_text(
+        "ALTER TABLE unit ADD COLUMN probe text NOT NULL DEFAULT 'same'", encoding="utf-8"
+    )
+
+    def analysed() -> int:
+        row = conn.execute(
+            "SELECT count(*) FROM pg_stats WHERE tablename = 'unit' AND attname = 'probe'"
+        ).fetchone()
+        return row[0] if row else 0
+
+    assert db.migrate(conn, tmp_path) == ["900_new_column.sql"]
+    assert analysed() == 1
+    assert db.migrate(conn, tmp_path) == []
+
+
 def test_current_and_upcoming_wordings_can_coexist(conn: psycopg.Connection) -> None:
     d = _setup(conn)
     _add(conn, d, valid_from=None, valid_to="2028-01-01")

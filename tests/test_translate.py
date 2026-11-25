@@ -269,6 +269,59 @@ def test_pages_can_also_be_searched_with_the_translated_question(
 
 
 @pytest.mark.db
+def test_an_english_twin_counts_from_either_side_and_only_while_it_exists(
+    conn: psycopg.Connection, corpus: None
+) -> None:
+    """The pairing may be recorded by the Swedish page, by the English page or by both; a
+    twin whose sections are no longer on the site does not count."""
+    from permitnav.corpus.store import ingest_page
+    from permitnav.parsing.webpage import parse_page
+    from tests.test_webpage import EN, SV, raw_page
+    from tests.test_webpage import FIXTURE as PAGE
+
+    ingest_page(conn, raw_page(PAGE, 20), parse_page(PAGE, SV))
+    ingest_page(conn, raw_page(PAGE, 20, url=EN), parse_page(PAGE, EN))
+    build_chunks(conn, "structure")
+    embed_chunks(conn, FAKE)
+    question = "Does the trade union get to comment on kronor in sverige?"
+    words = Dictionary({question: "fackförbund erbjudandet anställning yttra"})
+
+    def lifted() -> list[str]:
+        return [u for u in _units_lifted(conn, words, question) if u.startswith("web:sv/")]
+
+    def record(*pairs: tuple[str, str, str]) -> None:
+        conn.execute("DELETE FROM page_translation")
+        for pair in pairs:
+            conn.execute(
+                "INSERT INTO page_translation (document, language, translation)"
+                " VALUES (%s, %s, %s)",
+                pair,
+            )
+
+    documents = dict(
+        conn.execute(
+            "SELECT language, document FROM unit WHERE source_type = 'web_page'"
+            " GROUP BY language, document"
+        ).fetchall()
+    )
+    swedish, english = documents["sv"], documents["en"]
+
+    record((swedish, "sv", english))  # only the Swedish page names its twin
+    assert not lifted()
+    record((english, "en", swedish))  # only the English page names it
+    assert not lifted()
+    record()  # no pairing: the page counts as Swedish-only
+    assert lifted()
+    record((swedish, "sv", english), (english, "en", swedish))
+    assert not lifted()
+    conn.execute(  # the English page is gone from the site
+        "UPDATE unit_version SET observed_to = now() WHERE unit_id IN"
+        " (SELECT id FROM unit WHERE language = 'en' AND source_type = 'web_page')"
+    )
+    assert lifted()
+
+
+@pytest.mark.db
 def test_the_translated_page_ranking_keeps_scores_against_the_question(
     conn: psycopg.Connection, corpus: None
 ) -> None:

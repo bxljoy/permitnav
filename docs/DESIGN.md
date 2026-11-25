@@ -1364,3 +1364,19 @@ Negative facts are the situation ("no job", "didn't take out insurance") and sta
 
 **Costs and limits.** A single question containing "not", "no", "without", "inte", "utan"… now makes one more small model call (about $0.0001 and a second) even when nothing was set aside; 14 of the 72 dev and interpretation questions do. Phrasings outside the word list are not covered. The golden items `multi-salary-ruled-out-907` were reviewed and marked checked the same day; the raw submission behind them was then deleted. `permitnav ask` now uses intake for single questions too, as production does.
 
+
+### Where an answer's time goes, and a faster search (2026-11-25)
+
+**Measured first, on the live site** (five questions through `/ask/stream`, timed on the VM, 2 vCPUs): the search step takes about 3 s for an English question and 1 s for a Swedish one; writing the answer takes 6–8 s; the whole answer 9–11.5 s. So search is about a third of the wait, not most of it. Inside the search step (timed in the API container): translating the question 0.8–1.9 s (one model call), embedding the question and its translation 0.3–0.4 s each, and seven database queries 1.4–1.7 s together.
+
+**The database part had three avoidable costs:**
+
+- **No planner statistics for `chunk.kind`.** The column was added by a migration with a default, which changes no rows, so autovacuum never analysed it. Postgres then guessed that 0.5% of chunks have kind `text` (all do), expected 33 rows instead of 6,564 and joined row by row. After `ANALYZE` on the server the law's vector ranking went from 95 ms to 27 ms and the "other sources" one from 81 ms to 20 ms. `db.migrate` now runs `ANALYZE` whenever it applied a migration.
+- **The "Swedish page with no English version" check ran once per page section** (a subquery scanning the unit table 1,500 times): 0.4–0.9 s, the slowest query. The pages that have a live English twin are now worked out once per query.
+- **Each keyword ranking joined chunk, wording and unit again for every word of the question** to count how many chunks contain it. The group's chunks are now worked out once and the counts read that.
+
+**Result so far, measured locally** (the 64 dev questions replayed without models, 17,891 chunks): the hit lists are identical before and after (unit, chunk and score for every question), and the time in the database fell from 34 s to 21 s. The server's figure is to be measured after the deploy; its statistics were refreshed by hand on 2026-11-25.
+
+**Not done:** running the translation call and the embedding at the same time would save about 0.3 s and needs threads inside the retriever; left for now. The larger part of the wait is the answer model writing about 1,500 tokens.
+
+**From the code review (5 findings, all fixed; none in the rewritten search SQL's results):** migrations were not each in their own transaction as documented (a bare SELECT opened one around them all, so a failing migration would undo the ones before it); `ANALYZE` is now an optimisation that reports a failure instead of failing the migration and keeping the API from starting; a snapshot import analyses too, since a bulk load after migrating an empty database left the same missing statistics; the per-word counts are a join, not an `IN` that is fast only while the set fits in `work_mem`; and the twin check has tests for a pairing recorded from the Swedish side only, from the English side only, and for a twin that is gone from the site.
