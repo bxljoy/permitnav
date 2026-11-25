@@ -30,6 +30,8 @@ from pathlib import Path
 import psycopg
 from psycopg import sql
 
+from permitnav import db
+
 HEADER = "PERMITNAV-EVAL-CORPUS 1"
 END = "\\."
 STRATEGY = "structure"
@@ -157,6 +159,7 @@ def import_snapshot(conn: psycopg.Connection, path: Path) -> dict:
                 ).format(sql.Identifier(column), sql.Identifier(table)),
                 (table, column),
             )
+    db.analyze(conn)  # a bulk load: without it the first searches run on guessed statistics
     return manifest
 
 

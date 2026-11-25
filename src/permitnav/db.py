@@ -7,6 +7,7 @@ transaction, and recorded in `schema_migration`. There is no ORM and no down-mig
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import LiteralString, cast
 
@@ -33,7 +34,9 @@ def migrate(conn: psycopg.Connection, migrations_dir: Path = MIGRATIONS_DIR) -> 
             "CREATE TABLE IF NOT EXISTS schema_migration ("
             " name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
         )
-    applied = {row[0] for row in conn.execute("SELECT name FROM schema_migration")}
+        # Read inside this block: a bare SELECT would open a transaction around everything
+        # below, and a failing migration would then undo the ones applied before it.
+        applied = {row[0] for row in conn.execute("SELECT name FROM schema_migration")}
     newly_applied = []
     for path in sorted(migrations_dir.glob("*.sql")):
         if path.name in applied:
@@ -43,4 +46,19 @@ def migrate(conn: psycopg.Connection, migrations_dir: Path = MIGRATIONS_DIR) -> 
             conn.execute(cast(LiteralString, path.read_text(encoding="utf-8")))
             conn.execute("INSERT INTO schema_migration (name) VALUES (%s)", (path.name,))
         newly_applied.append(path.name)
+    if newly_applied:
+        analyze(conn)
     return newly_applied
+
+
+def analyze(conn: psycopg.Connection) -> None:
+    """Refresh the planner's statistics, after a migration or a bulk load. A column added
+    with a default changes no rows, so autovacuum never analyses it and the planner guesses
+    (0.5% of rows match): that guess for chunk.kind made every search query join row by row,
+    95 ms instead of 27 ms for the law's vector ranking. Only an optimisation: a failure is
+    reported and never fails what came before it."""
+    try:
+        with conn.transaction():
+            conn.execute("ANALYZE")
+    except psycopg.Error as error:
+        print(f"warning: ANALYZE failed ({type(error).__name__}: {error})", file=sys.stderr)

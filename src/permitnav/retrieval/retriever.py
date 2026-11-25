@@ -497,7 +497,7 @@ class Retriever:
         rows = self._conn.execute(
             sql.SQL(
                 """
-                WITH {keyword_ctes}
+                WITH {keyword_ctes} {twinned}
                 scored AS MATERIALIZED (
                   SELECT u.id AS unit_id, v.id AS version_id, c.id AS chunk_id,
                          CASE WHEN c.kind = 'text' THEN c.text ELSE (
@@ -535,6 +535,7 @@ class Retriever:
                 """
             ).format(
                 no_twin=sql.SQL(NO_LIVE_ENGLISH_TWIN),
+                twinned=sql.SQL(TWINNED_CTE),
                 keyword_ctes=keyword_ctes,
                 order=order,
                 table=sql.Identifier(self._table),
@@ -562,16 +563,21 @@ class Retriever:
 
 # A Swedish page with no English version that still exists: no twin recorded from either
 # side (the Swedish page's hreflang, or an English page naming it) whose sections are still
-# observed. A twin that disappeared from the site no longer counts.
-NO_LIVE_ENGLISH_TWIN = """NOT EXISTS (
-  SELECT 1 FROM page_translation pt
-  JOIN unit tu ON tu.document = CASE WHEN pt.document = u.document THEN pt.translation
-                                     ELSE pt.document END
+# observed. A twin that disappeared from the site no longer counts. The Swedish pages that do
+# have a live twin are worked out once per query (TWINNED_CTE): as a subquery per unit this
+# was the slowest part of a search on the server (0.4-0.9 s of about 1.5 s in the database).
+TWINNED_CTE = """
+twinned AS MATERIALIZED (
+  SELECT DISTINCT pair.document
+  FROM (SELECT document, translation AS twin FROM page_translation WHERE language = 'sv'
+        UNION ALL
+        SELECT translation, document FROM page_translation WHERE language = 'en') AS pair
+  JOIN unit tu ON tu.document = pair.twin AND tu.language = 'en'
   JOIN unit_version tv ON tv.unit_id = tu.id AND tv.observed_to IS NULL
-  WHERE tu.language = 'en'
-    AND ((pt.document = u.document AND pt.language = 'sv')
-         OR (pt.translation = u.document AND pt.language = 'en'))
-)"""
+  WHERE %(untranslated)s
+),
+"""
+NO_LIVE_ENGLISH_TWIN = "NOT EXISTS (SELECT 1 FROM twinned tw WHERE tw.document = u.document)"
 
 
 # BM25 over the chunks of one strategy whose wording applies on the date, the statistics
@@ -589,23 +595,26 @@ terms AS (
          AS q(cfg, text),
        LATERAL unnest(to_tsvector(q.cfg, q.text)) AS t
 ),
--- Collection statistics of the group being searched (its source types), not of every
--- source: each group is ranked on its own, so adding one kind of source (e.g. position
--- papers) must not shift how another is ranked.
-corpus AS MATERIALIZED (
-  SELECT c.ts_config AS cfg, count(*) AS n, avg(length(c.tsv)) AS avglen
+-- The chunks of the group being searched (its source types) whose wording applies on the date,
+-- worked out once: the collection statistics and every term's document frequency read it,
+-- instead of each joining chunk, wording and unit again (per term, that was half of a keyword
+-- ranking's time).
+eligible AS MATERIALIZED (
+  SELECT c.id, c.ts_config AS cfg, length(c.tsv) AS len
   FROM chunk c JOIN unit_version v ON v.id = c.version_id JOIN unit u ON u.id = v.unit_id
   WHERE c.strategy = %(strategy)s AND {applies} AND {in_group} AND c.kind = 'text'
-  GROUP BY c.ts_config
+),
+-- Collection statistics of that group, not of every source: each group is ranked on its own,
+-- so adding one kind of source (e.g. position papers) must not shift how another is ranked.
+corpus AS MATERIALIZED (
+  SELECT cfg, count(*) AS n, avg(len) AS avglen FROM eligible GROUP BY cfg
 ),
 df AS MATERIALIZED (
-  SELECT t.cfg, t.lexeme,
-         (SELECT count(*) FROM chunk c JOIN unit_version v ON v.id = c.version_id
-          JOIN unit u ON u.id = v.unit_id
-          WHERE c.strategy = %(strategy)s AND c.ts_config = t.cfg
-            AND c.tsv @@ quote_literal(t.lexeme)::tsquery AND {applies} AND {in_group}
-            AND c.kind = 'text') AS df
+  SELECT t.cfg, t.lexeme, count(*) AS df
   FROM terms t
+  JOIN chunk c ON c.ts_config = t.cfg AND c.tsv @@ quote_literal(t.lexeme)::tsquery
+  JOIN eligible e ON e.id = c.id
+  GROUP BY t.cfg, t.lexeme
 ),
 queries AS (
   SELECT cfg, string_agg(quote_literal(lexeme), ' | ')::tsquery AS tsq FROM terms GROUP BY cfg
