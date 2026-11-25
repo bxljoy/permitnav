@@ -2,7 +2,7 @@
 # The model weights are not baked in: they download once into the /models volume.
 
 # The chat UI (phase 6), built once and served by the API itself (same origin as /ask).
-FROM node:22.12.0-alpine AS web
+FROM node:26.13.1-alpine AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
