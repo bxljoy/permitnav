@@ -88,6 +88,19 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
   gcloud storage cp gs://<bucket>/db/<file>.dump /tmp/restore.dump
   sudo $C exec -T db pg_restore --clean --if-exists -U permitnav -d permitnav < /tmp/restore.dump
   ```
+- **Daily spend cap:** the site declines questions once a day's model spend reaches
+  `DAILY_SPEND_CAP_USD` (default 5, Stockholm days; set it in `.env` to change it, then
+  `sudo $C up -d`). It limits what a leaked access token can cost; normal use is a few cents
+  a day. `sudo $C exec api permitnav spend` shows the last days. If questions were declined,
+  the next daily refresh reports each such day in the `permitnav-refresh` log as an error
+  (alert "PermitNav reached its daily spend cap", up to a day later; a day stays unreported
+  until its error is logged). The cap does not cover a leaked OpenRouter key:
+  that is what the credit limit on the server's key at OpenRouter is for.
+- **If the access token or a key leaked:** put a new random `API_TOKEN` in `.env` and run
+  `sudo $C up -d` (everyone signs in again with the new token). For the OpenRouter key:
+  delete the key at OpenRouter, create a new server-only key with a credit limit, put it in
+  `.env`, `sudo $C up -d`. To let questions through again the same day after a capped day,
+  raise `DAILY_SPEND_CAP_USD` for that day or wait for midnight in Stockholm.
 - **Security updates** install daily by themselves; a reboot, when needed, at 04:30 UTC.
 
 ## Costs and the free trial

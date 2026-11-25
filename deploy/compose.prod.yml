@@ -15,6 +15,9 @@ services:
     environment:
       DATABASE_URL: postgresql://permitnav:${POSTGRES_PASSWORD:?}@db:5432/permitnav
       PERMITNAV_ENV: production
+      # Model spend per day after which the site declines questions (permitnav.spend): what a
+      # leaked access token can cost. Set DAILY_SPEND_CAP_USD in .env to change it.
+      DAILY_SPEND_CAP_USD: ${DAILY_SPEND_CAP_USD:-5}
     volumes:
       - raw:/app/data/raw       # raw downloads, kept as evidence (the daily refresh)
     restart: unless-stopped

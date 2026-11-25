@@ -46,6 +46,9 @@ CREDITS = {
 log = logging.getLogger("permitnav.api")
 
 
+SPEND_CAP_MESSAGE = "PermitNav has reached its limit for today. Try again tomorrow."
+
+
 class Service(Protocol):
     def answer(
         self,
@@ -363,9 +366,14 @@ def create_app(
         progress: Callable[[str], None] | None = None,
     ) -> AskResponse:
         from permitnav.llm.port import LLMError
+        from permitnav.spend import SpendCapReached
 
         try:
             answer = state["service"].answer(question, as_of, history, progress)
+        except SpendCapReached as reached:
+            # Usually a leaked access token: an error in the log, a plain message to the person.
+            log.error("question declined: %s", reached)
+            raise HTTPException(status_code=429, detail=SPEND_CAP_MESSAGE) from reached
         except LLMError as error:
             # The provider's message can carry account or billing details: logged, not returned.
             log.error("model call failed: %s", _first_part(error))

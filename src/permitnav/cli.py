@@ -837,6 +837,43 @@ def cmd_import_lifos_results(args: argparse.Namespace) -> int:
     return 0
 
 
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return value
+
+
+def cmd_spend(args: argparse.Namespace) -> int:
+    """What the site's model calls cost per day (the daily spend cap, permitnav.spend).
+    `--unreported` and `--mark-reported` are for the daily refresh: one line per finished day
+    on which questions were declined (usually a leaked access token), until it is reported."""
+    from permitnav import spend
+
+    with db.connect() as conn:
+        if args.unreported:
+            for day in spend.unreported(conn):
+                print(
+                    f"SPEND CAP REACHED on {day.day}: ${day.usd:.2f} in {day.calls} model calls,"
+                    f" {day.refused} questions declined"
+                )
+            return 0
+        if args.mark_reported:
+            print(f"spend: {spend.mark_reported(conn)} capped days marked as reported")
+            return 0
+        rows = spend.days(conn, args.days)
+    cap = spend.cap_usd()
+    print(f"daily cap: {'none' if cap is None else f'${cap:.2f}'} (Stockholm days, the site only)")
+    for day in rows:
+        notes = [f"{day.refused} questions declined"] if day.refused else []
+        if day.unpriced:
+            notes.append(f"{day.unpriced} calls without a reported cost, estimated")
+        print(f"  {day.day}  ${day.usd:.4f}  {day.calls} calls" + "".join(f"; {n}" for n in notes))
+    if not rows:
+        print("  nothing recorded yet")
+    return 0
+
+
 def cmd_feedback(args: argparse.Namespace) -> int:
     """The review queue of feedback people chose to save (phase 6, slice 3). A case goes
     into the golden set only rewritten into a generic question; then delete it here."""
@@ -1933,6 +1970,11 @@ def main(argv: list[str] | None = None) -> int:
     il.add_argument("folder", help="folder with the result pages saved from the browser")
     il.add_argument("--out", default="curation/position_papers.csv")
     il.set_defaults(run=cmd_import_lifos_results)
+    sp = sub.add_parser("spend", help="the site's model spend per day (the daily cap)")
+    sp.add_argument("--days", type=_positive_int, default=7)
+    sp.add_argument("--unreported", action="store_true", help="capped days not yet reported")
+    sp.add_argument("--mark-reported", action="store_true", help="remember they were reported")
+    sp.set_defaults(run=cmd_spend)
     fb = sub.add_parser("feedback", help="the review queue of feedback people chose to save")
     fb.add_argument("action", choices=["list", "export", "delete"])
     fb.add_argument("ids", nargs="*", help="delete: the ids of reviewed cases")
