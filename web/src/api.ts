@@ -62,6 +62,12 @@ const SOURCE: Messages = {
   failed: "The source could not be loaded just now. Try again, or open the original.",
 };
 
+const WITHDRAW: Messages = {
+  invalid: "This submission cannot be withdrawn from here.",
+  missing: "gone",
+  failed: "It could not be withdrawn just now. Try again in a moment.",
+};
+
 async function call<T>(
   token: string,
   path: string,
@@ -103,6 +109,53 @@ export function source(token: string, versionId: number): Promise<Source> {
     },
     SOURCE,
   );
+}
+
+export interface FeedbackCase {
+  question: string;
+  answer: string;
+  comment: string;
+  kind: Kind;
+  as_of: string;
+  cited: string[];
+}
+
+/** A failed save whose outcome is not known: the request may have reached the server. */
+export const SAVE_UNSURE =
+  "PermitNav did not confirm the save, so it may or may not be stored. Save again to be sure (it is stored only once), or cancel and it will be removed as soon as PermitNav can be reached.";
+
+/** Save what the person confirmed in the form, under a withdrawal code made in the browser.
+ * Only ever called from the form's Save button. Saving again with the same code replaces. */
+export async function saveFeedback(token: string, feedback: FeedbackCase, code: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch("/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ consent: true, withdraw_code: code, ...feedback }),
+    });
+  } catch {
+    throw new ApiError(SAVE_UNSURE);
+  }
+  if (response.status === 401) throw new ApiError("The access token was not accepted. Enter it again.", true);
+  if (response.status === 422) {
+    // refused, so not stored: the server says what to remove, or that the queue is full
+    const detail = await response.json().then((b: { detail?: unknown }) => b.detail, () => null);
+    throw new ApiError(typeof detail === "string" ? detail : "This could not be saved as written. Check the text and the date, and try again.");
+  }
+  if (!response.ok) throw new ApiError(SAVE_UNSURE); // a proxy error can follow a completed save
+}
+
+/** Undo a submission. Resolves also when there is nothing to undo (never stored, or
+ * already reviewed and deleted). */
+export async function withdrawFeedback(token: string, code: string): Promise<void> {
+  const init = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ withdraw_code: code }) };
+  try {
+    await call(token, "/feedback/withdraw", init, WITHDRAW);
+  } catch (e) {
+    if (e instanceof ApiError && e.message === WITHDRAW.missing) return;
+    throw e;
+  }
 }
 
 export type Stage = "understanding" | "searching" | "checking" | "writing";

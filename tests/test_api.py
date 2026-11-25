@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -34,6 +35,16 @@ class FakeService:
 
     def healthy(self) -> bool:
         return self._healthy
+
+    def save_feedback(self, case) -> None:
+        from permitnav.feedback import FeedbackRefused, identifiers_in
+
+        if identifiers_in(case.question, case.answer, case.comment):
+            raise FeedbackRefused("The text contains an email address. Remove it and save again.")
+        self.feedback = {**getattr(self, "feedback", {}), case.withdraw_code: case}
+
+    def withdraw_feedback(self, code: str) -> bool:
+        return getattr(self, "feedback", {}).pop(code, None) is not None
 
     def source(self, version_id: int) -> dict[str, str] | None:
         if version_id != 7:
@@ -403,3 +414,78 @@ def test_a_client_that_goes_away_stops_the_answer_at_the_next_stage() -> None:
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+# --- phase 6 slice 3: feedback with consent -----------------------------------------------
+
+CODE = "c" * 43
+CASE = {
+    "consent": True, "withdraw_code": CODE, "question": "Lönekrav?", "answer": "Svar [S1].",
+    "comment": "Fel belopp.", "kind": "answered", "as_of": "2026-11-25",
+    "cited": ["sfs:2005:716/6kap/2§"],
+}  # fmt: skip
+
+
+def test_feedback_is_saved_only_with_the_explicit_consent() -> None:
+    service = FakeService()
+    with client(service) as c:
+        assert c.post("/feedback", json=CASE).status_code == 401
+        assert c.post("/feedback", json=CASE, headers=AUTH).json() == {"saved": True}
+        for consent in (False, None, "yes", 1, "true"):
+            refused = c.post("/feedback", json={**CASE, "consent": consent}, headers=AUTH)
+            assert refused.status_code == 422, consent
+        for missing in ("consent", "withdraw_code"):
+            without = {k: v for k, v in CASE.items() if k != missing}
+            assert c.post("/feedback", json=without, headers=AUTH).status_code == 422
+        weak = {**CASE, "withdraw_code": "short"}
+        assert c.post("/feedback", json=weak, headers=AUTH).status_code == 422
+    assert list(service.feedback) == [CODE] and service.feedback[CODE].question == "Lönekrav?"
+
+
+def test_identifying_text_is_refused_with_a_message_for_the_person() -> None:
+    with client() as c:
+        r = c.post("/feedback", json={**CASE, "comment": "mejla anna@example.com"}, headers=AUTH)
+    assert r.status_code == 422 and "email address" in r.json()["detail"]
+
+
+def test_a_submission_is_withdrawn_with_the_code_it_was_saved_under() -> None:
+    with client() as c:
+        c.post("/feedback", json=CASE, headers=AUTH)
+        mine = {"withdraw_code": CODE}
+        assert c.post("/feedback/withdraw", json=mine).status_code == 401
+        other = {"withdraw_code": "d" * 43}
+        assert c.post("/feedback/withdraw", json=other, headers=AUTH).status_code == 404
+        assert c.post("/feedback/withdraw", json=mine, headers=AUTH).json() == {"withdrawn": True}
+        assert c.post("/feedback/withdraw", json=mine, headers=AUTH).status_code == 404
+
+
+def test_feedback_leaves_no_trace_and_no_log_line(spans, caplog) -> None:
+    import logging
+
+    with caplog.at_level(logging.DEBUG), client() as c:
+        c.post("/feedback", json={**CASE, "question": "En ovanlig formulering xyzzy"}, headers=AUTH)
+        c.post("/feedback/withdraw", json={"withdraw_code": CODE}, headers=AUTH)
+    assert spans.get_finished_spans() == ()  # the sampler keeps only questions
+    assert "xyzzy" not in caplog.text
+    ours = [r for r in caplog.records if r.name.startswith(("permitnav", "uvicorn"))]
+    assert not any("feedback" in r.getMessage().lower() for r in ours)  # the client's own aside
+
+
+def test_the_feedback_endpoints_are_kept_out_of_the_access_log() -> None:
+    import logging
+
+    with client():
+        access = logging.getLogger("uvicorn.access")
+
+        def kept(path: str) -> bool:
+            args = ("203.0.113.9:5000", "POST", path, "1.1", 200)
+            record = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, "%s", args, None)
+            return access.filter(record) is not False
+
+        assert not kept("/feedback") and not kept("/feedback/withdraw")
+        assert not kept("/feedback/") and not kept("/feedback?x=1") and kept("/feedbacks")
+        assert kept("/ask/stream") and kept("/health")
+    caddy = (Path(__file__).parent.parent / "deploy" / "Caddyfile").read_text(encoding="utf-8")
+    assert "log_skip @feedback\n" in caddy and "@feedback path /feedback /feedback/*" in caddy
+    # a failed request too (Caddy writes errors to a second log unless they are handled)
+    assert "handle_errors {" in caddy and "log_skip @feedback_failed" in caddy

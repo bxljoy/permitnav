@@ -176,3 +176,16 @@ button:disabled { cursor: default; opacity: 0.55; }
 .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; margin: -1px !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; white-space: nowrap !important; }
 .full-text mark { background: var(--warn-soft); color: inherit; border-radius: 3px; padding: 0.05em 0.1em; box-shadow: 0 0 0 1px var(--warn); }
 .jump { align-self: flex-start; border-color: var(--line); }
+
+/* Feedback with consent: the form shows exactly what would be saved. */
+.feedback { display: grid; gap: 0.6rem; margin-top: 0.8rem; padding: 0.8rem; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.feedback h3 { margin: 0; font-size: 1rem; }
+.feedback p { margin: 0; font-size: 0.9rem; }
+.feedback label { display: grid; gap: 0.25rem; font-size: 0.85rem; color: var(--muted); min-width: 0; }
+.feedback textarea { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.45rem 0.6rem; resize: vertical; width: 100%; box-sizing: border-box; }
+.feedback textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.feedback-actions { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.feedback-saved { margin: 0.6rem 0 0; font-size: 0.9rem; }
+.feedback-also { display: grid; gap: 0.35rem; font-size: 0.85rem; justify-items: start; min-width: 0; }
+.feedback label.inline { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.feedback input[type="date"] { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.2rem 0.4rem; }
