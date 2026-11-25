@@ -56,8 +56,15 @@ def _translator(enabled: bool):
     return LLMTranslator(llm, model.strip(), cache_path=_translations_cache())
 
 
-def _print_provenance(config, answer_model: str | None = None, judge: str | None = None) -> None:
-    """The version behind a report, so its numbers can be tied to one reproducible setup."""
+def _print_provenance(
+    config,
+    answer_model: str | None = None,
+    judge: str | None = None,
+    answer_effort: str | None = None,
+) -> None:
+    """The version behind a report, so its numbers can be tied to one reproducible setup.
+    `answer_effort`: the reasoning effort the answers were made with, when one was set (it
+    changes answers and their cost)."""
     from permitnav.evals.provenance import provenance
 
     translate = None
@@ -66,6 +73,8 @@ def _print_provenance(config, answer_model: str | None = None, judge: str | None
             os.environ.get("TRANSLATE_MODEL", "").strip()
             or os.environ.get("ANSWER_MODEL", "").strip()
         )
+    if answer_model and answer_effort:
+        answer_model = f"{answer_model} (reasoning effort {answer_effort})"
     models = {
         "answer": answer_model,
         "judge": judge,
@@ -75,6 +84,16 @@ def _print_provenance(config, answer_model: str | None = None, judge: str | None
     }
     for line in provenance(config, models):
         print(line)
+
+
+def _answer_effort() -> str | None:
+    """ANSWER_REASONING_EFFORT, or a one-line exit when it is mistyped (before any model loads)."""
+    from permitnav.answering.answerer import answer_reasoning_effort
+
+    try:
+        return answer_reasoning_effort()
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
 
 
 def _reranker(enabled: bool):
@@ -1196,6 +1215,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     if not model:
         print("ANSWER_MODEL is not set; see .env.example")
         return 1
+    answer_effort = _answer_effort()
     smoke = SmokeSlice.load(Path(args.smoke))
     by_id = {i.id: i for i in load_golden(Path(args.file))}
     missing = [i for i in smoke.items if i not in by_id]
@@ -1238,7 +1258,9 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     def ask(questions: list) -> list:
         with db.connect() as conn:
             retriever = Retriever(conn, embedder, config, translator, reranker)
-            answer_config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR)
+            answer_config = AnswerConfig(
+                model=model, min_score=BGE_M3_FLOOR, reasoning_effort=answer_effort
+            )
             return run_answers(questions, Answerer(conn, retriever, llm, answer_config))
 
     try:
@@ -1247,7 +1269,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         print(f"{error}: refresh the recorded queries (see evals/README.md)")
         return 1
     print(f"\nSmoke slice: {len(items)} questions, model={model}")
-    _print_provenance(config, model)
+    _print_provenance(config, model, answer_effort=answer_effort)
     failures = 0
     cost = 0.0
     unknown_cost = 0
@@ -1360,6 +1382,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     if not model:
         print("ANSWER_MODEL is not set; see .env.example")
         return 1
+    answer_effort = _answer_effort()
     try:
         from permitnav.embedding.bge_m3 import BgeM3Embedder
 
@@ -1374,7 +1397,9 @@ def cmd_ask(args: argparse.Namespace) -> int:
             config = _retrieval_config(args)
             translator = _translator(config.translate)
             retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
-            answer_config = AnswerConfig(model=model, min_score=BGE_M3_FLOOR, k=args.k)
+            answer_config = AnswerConfig(
+                model=model, min_score=BGE_M3_FLOOR, k=args.k, reasoning_effort=answer_effort
+            )
             answerer = Answerer(
                 conn,
                 retriever,
@@ -1453,6 +1478,7 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
     if not model:
         print("ANSWER_MODEL is not set; see .env.example")
         return 1
+    answer_effort = _answer_effort()
     items = load_golden(Path(args.file))
     if not args.include_drafts:
         items = [i for i in items if i.review == "checked"]
@@ -1486,7 +1512,7 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
             conn,
             retriever,
             llm,
-            AnswerConfig(model=model, min_score=floor, k=args.k),
+            AnswerConfig(model=model, min_score=floor, k=args.k, reasoning_effort=answer_effort),
             _second_searcher(args, retriever, llm, model),
             _intake(args, llm, model),
         )
@@ -1516,7 +1542,9 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
     memory = "no memory (--no-memory)" if args.no_memory else "memory (earlier turns rewritten in)"
     print(f"workflow: {second if args.second_search else 'plain RAG (one search)'}; {memory}")
     effort = f" (reasoning effort {judge_effort})" if judge_effort else ""
-    _print_provenance(config, model, f"{judge_model}{effort}" if judge_model else None)
+    _print_provenance(
+        config, model, f"{judge_model}{effort}" if judge_model else None, answer_effort
+    )
     print(f"{'expected kind':<14} {'n':>3} {'right':>5}  given instead")
     for row in kind_table(results):
         instead = ", ".join(f"{kind} {n}" for kind, n in row.got.most_common())
@@ -1697,6 +1725,7 @@ def cmd_judge_sample(args: argparse.Namespace) -> int:
     if not model:
         print("ANSWER_MODEL is not set; see .env.example")
         return 1
+    answer_effort = _answer_effort()
     out = Path(args.out)
     if out.exists() and not args.force:
         print(f"{out} exists; its labels would no longer match. Use --force to replace it.")
@@ -1722,7 +1751,12 @@ def cmd_judge_sample(args: argparse.Namespace) -> int:
     failed: list[str] = []
     with db.connect() as conn:
         retriever = Retriever(conn, embedder, config, translator, _reranker(config.rerank))
-        answerer = Answerer(conn, retriever, llm, AnswerConfig(model=model, min_score=BGE_M3_FLOOR))
+        answerer = Answerer(
+            conn,
+            retriever,
+            llm,
+            AnswerConfig(model=model, min_score=BGE_M3_FLOOR, reasoning_effort=answer_effort),
+        )
         for n, item in enumerate(items, start=1):
             print(f"  answering {n}/{len(items)}", end="\r", flush=True)
             try:

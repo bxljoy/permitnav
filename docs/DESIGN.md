@@ -1375,8 +1375,31 @@ Negative facts are the situation ("no job", "didn't take out insurance") and sta
 - **The "Swedish page with no English version" check ran once per page section** (a subquery scanning the unit table 1,500 times): 0.4–0.9 s, the slowest query. The pages that have a live English twin are now worked out once per query.
 - **Each keyword ranking joined chunk, wording and unit again for every word of the question** to count how many chunks contain it. The group's chunks are now worked out once and the counts read that.
 
-**Result so far, measured locally** (the 64 dev questions replayed without models, 17,891 chunks): the hit lists are identical before and after (unit, chunk and score for every question), and the time in the database fell from 34 s to 21 s. The server's figure is to be measured after the deploy; its statistics were refreshed by hand on 2026-11-25.
+**Result so far, measured locally** (the 64 dev questions replayed without models, 17,891 chunks): the hit lists are identical before and after (unit, chunk and score for every question), and the time in the database fell from 34 s to 21 s. On the server after the deploy: the database part of an English question's search went from 1.4–1.7 s to about 0.6 s (Swedish: 0.8 s to 0.44 s), the slowest query from 0.4–0.9 s to 0.08 s, and the search step from 3.1–3.9 s to 2.0–2.5 s.
 
 **Not done:** running the translation call and the embedding at the same time would save about 0.3 s and needs threads inside the retriever; left for now. The larger part of the wait is the answer model writing about 1,500 tokens.
 
 **From the code review (5 findings, all fixed; none in the rewritten search SQL's results):** migrations were not each in their own transaction as documented (a bare SELECT opened one around them all, so a failing migration would undo the ones before it); `ANALYZE` is now an optimisation that reports a failure instead of failing the migration and keeping the API from starting; a snapshot import analyses too, since a bulk load after migrating an empty database left the same missing statistics; the per-word counts are a join, not an `IN` that is fast only while the set fits in `work_mem`; and the twin check has tests for a pairing recorded from the Swedish side only, from the English side only, and for a twin that is gone from the site.
+
+### The answer model's writing time: measured, default kept (2026-11-25)
+
+**Question:** writing is 5–9 s of a 7–11 s answer. What decides it, and can it be shortened without worse answers?
+
+**Measured** with the real answer requests of four questions (7–12K tokens in), streamed, so the first visible token is timed:
+
+- **The provider route does not matter.** Five routes for Claude Haiku 5.5 on OpenRouter (Anthropic, Vertex, Bedrock, Azure, Claude Platform on AWS) and OpenRouter's throughput and latency sorting: medians of 6.3–7.6 s for the whole call, within run-to-run spread (single calls ranged 4.6–10.2 s).
+- **Hidden reasoning is most of it.** The model thinks before it writes: 700–1,400 of about 1,500 output tokens are reasoning, and the first visible token arrives after about 4.5–5 s. Whole call, median of 20 calls: default 7.6 s, effort `low` 5.8 s, `minimal` 5.4 s; with reasoning off 2.6 s (8 calls), first token at 0.7 s.
+
+**Quality, judged, two runs each on the 64 dev questions** (right kind of 64 / correct of 48 / cost of the run):
+
+| reasoning | right kind | correct | not-settled items declined (of 16) | cost |
+|---|---|---|---|---|
+| default | 52, 50 | 42, 42 | 12, 11 | $0.125, $0.129 |
+| low | 51, 54 | 42, 41 | 11, 13 | $0.113, $0.115 |
+| minimal | 53, 51 | 42, 42 | 11, 10 | $0.114, $0.119 |
+| off | 48, 44 | 39, 38 | 5, 3 | $0.087, $0.091 |
+
+- **Off is rejected:** it answers most of the questions the sources do not settle, the failure this project is built to avoid, and puts the conclusion first less often (25–31 of about 45 answers, against 39–44).
+- **Low and minimal match the default on the dev set.** On the multi-turn set, five runs each: `low` gave the right kind in 59 of 70 answers against 65 of 70 (it declined the two spouse scenarios more often, and one reply was malformed JSON), with the same judged correctness (55 against 54 of 70). On the situational set (two runs) no difference beyond noise.
+
+**Decision: the default stays.** `low` would save about 1.8 s of roughly 9 (and 10% of cost), and what it costs is more "the sources don't settle this" on follow-on questions, the outcome a real user had just reported as a problem. The setting exists (`ANSWER_REASONING_EFFORT`: `none`, `minimal` or `low`, the measured values; unset in production; eval headers and the generation span name it when set) so the question can be asked again with another model or prompt. Showing the text as it is written would not help much either: with reasoning on, the first visible word comes about 4.5 s into the call.

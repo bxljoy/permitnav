@@ -17,6 +17,7 @@ verifier (D13).
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -105,6 +106,21 @@ class Answer:
     intake: Intake | None = None
 
 
+# Only the efforts that were measured (DESIGN.md, 2026-11-25). "medium" and "high" would also
+# need a larger max_tokens: the thinking counts against it.
+REASONING_EFFORTS = ("none", "minimal", "low")
+
+
+def answer_reasoning_effort() -> str | None:
+    """ANSWER_REASONING_EFFORT from the environment; unset or empty: the model's default."""
+    value = os.environ.get("ANSWER_REASONING_EFFORT", "").strip().lower()
+    if not value:
+        return None
+    if value not in REASONING_EFFORTS:
+        raise ValueError(f"ANSWER_REASONING_EFFORT must be one of {REASONING_EFFORTS}: {value!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class AnswerConfig:
     model: str
@@ -113,6 +129,9 @@ class AnswerConfig:
     # Decline without a model call when every source scores below this (0 = off). Scores are
     # the embedding model's cosine similarities, so the value belongs to that model.
     min_score: float = 0.0
+    # How much hidden thinking the answer model does before it writes (REASONING_EFFORTS);
+    # None leaves the model's default. From ANSWER_REASONING_EFFORT unless given.
+    reasoning_effort: str | None = field(default_factory=lambda: answer_reasoning_effort())
 
 
 class Answerer:
@@ -251,6 +270,7 @@ class Answerer:
                     system=system,
                     messages=messages,
                     max_tokens=max_tokens,
+                    reasoning_effort=self.config.reasoning_effort,
                 ),
                 "generate",
             )

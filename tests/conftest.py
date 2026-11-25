@@ -83,3 +83,9 @@ def fresh_database_url() -> Iterator[str]:
     finally:
         with psycopg.connect(base, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+@pytest.fixture(autouse=True)
+def _no_answer_reasoning_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AnswerConfig reads ANSWER_REASONING_EFFORT: tests must not depend on the shell's .env."""
+    monkeypatch.delenv("ANSWER_REASONING_EFFORT", raising=False)

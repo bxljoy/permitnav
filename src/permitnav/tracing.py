@@ -231,6 +231,8 @@ def complete(llm: LLM, request: CompletionRequest, name: str) -> Completion:
     """A model call as a Langfuse generation: model, tokens, cost, finish reason."""
     with span(name, "generation", **{"gen_ai.request.model": request.model}) as current:
         current.set_attribute("gen_ai.request.max_tokens", request.max_tokens)
+        if request.reasoning_effort:  # it changes latency, cost and the answer: a setting, not text
+            current.set_attribute("permitnav.reasoning_effort", request.reasoning_effort)
         text(current, input={"system": request.system, "messages": request.messages})
         completion = llm.complete(request)
         record_completion(current, completion)
