@@ -11,6 +11,16 @@ updates:
         update-types: [minor, patch]
     open-pull-requests-limit: 5
 
+  - package-ecosystem: npm         # the chat UI (web/package.json + package-lock.json)
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      web:                         # one PR for minor and patch updates, not one per package
+        patterns: ["*"]
+        update-types: [minor, patch]
+    open-pull-requests-limit: 3
+
   - package-ecosystem: github-actions   # keeps the SHA pins in ci.yml current
     directory: /
     schedule:
