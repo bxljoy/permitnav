@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -60,6 +61,57 @@ REASK = (
     "(no JSON, invalid JSON such as an unescaped quote inside a string, or no non-empty "
     '"answer" field). Reply again with only that JSON object.'
 )
+# Sent once when the reply was readable but its answer was not an answer (unusable_answer).
+REASK_ANSWER = (
+    'That reply could not be used: its "answer" field did not hold the answer itself, only a '
+    'pointer to text that is not there (such as "see above") or only source markers. Reply '
+    'again with the same JSON object, with the whole answer written out in the "answer" field.'
+)
+# An "answer" that is only a pointer to text that is not there. Seen 2026-11-26: the whole
+# answer was "(se ovan)"; the model had written the answer in its hidden reasoning. Matched
+# against the whole answer (see unusable_answer), never against part of one.
+PLACEHOLDERS = frozenset(
+    {
+        "above",
+        "see above",
+        "as above",
+        "same as above",
+        "as stated above",
+        "as explained above",
+        "see the answer above",
+        "see my answer above",
+        "see answer above",
+        "see the above",
+        "see previous answer",
+        "see the previous answer",
+        "see earlier",
+        "see below",
+        "see reasoning",
+        "see my reasoning",
+        "see reasoning above",
+        "see the reasoning above",
+        "see analysis",
+        "see analysis above",
+        "see the analysis above",
+        "ibid",
+        "ovan",
+        "se ovan",
+        "som ovan",
+        "enligt ovan",
+        "samma som ovan",
+        "se svaret ovan",
+        "se ovanstående",
+        "se föregående svar",
+        "se tidigare svar",
+        "se nedan",
+        "se resonemanget",
+        "se resonemanget ovan",
+        "se analysen ovan",
+    }
+)
+# Words that may stand in front of a pointer without making it an answer ("Svar: se ovan").
+FILLERS = frozenset({"answer", "please", "svar", "svaret", "vänligen"})
+BARE_MARKER = re.compile(r"s\d+")  # a source marker written without its brackets: "(S1)"
 # The relevance floor for bge-m3 cosine scores, calibrated on the dev set (phase 2, slice 2):
 # in-scope questions' best source scored 0.589–0.809, unrelated ones 0.491–0.641. The ranges
 # overlap, so the floor sits below every in-scope question with a margin and only catches
@@ -105,6 +157,9 @@ class Answer:
     # What intake made of the question, when it ran: a follow-on made self-contained
     # (phase 5), and the search question when the person ruled something out (phase 6).
     intake: Intake | None = None
+    # Why a "failed" answer failed, for logs and traces (never shown): the reply was not the
+    # JSON asked for, or its answer field held no answer.
+    problem: str = ""
 
 
 # Only the efforts that were measured (DESIGN.md, 2026-11-25). "medium" and "high" would also
@@ -292,7 +347,12 @@ class Answerer:
                 reask = [
                     *messages,
                     {"role": "assistant", "content": completion.text},
-                    {"role": "user", "content": REASK},
+                    {
+                        "role": "user",
+                        "content": REASK_ANSWER
+                        if answer.problem.startswith("no answer")
+                        else REASK,
+                    },
                 ]
             try:
                 second = ask(reask)
@@ -317,16 +377,50 @@ def _relevant(question: str, hits: list[Hit], min_score: float) -> bool:
     return any(h.score >= min_score for h in hits)
 
 
+def unusable_answer(text: str) -> bool:
+    """Whether an answer text is not an answer at all: empty, only source markers or
+    punctuation, or only a pointer to text that is not there ("(se ovan)"). Not a judgement
+    of length: "Ja [S1]." and "No [S2]." are answers. The pointer phrases are compared with
+    the whole text, ignoring case, source markers however they are written, brackets,
+    punctuation and spacing; a pointer inside a real sentence is left alone."""
+    text = unicodedata.normalize("NFC", text)  # "å" as one character, not "a" + a ring
+    without_markers = MARKER.sub(" ", GROUP.sub(" ", text))
+    words = "".join(c if c.isalnum() else " " for c in without_markers).casefold().split()
+    loose_marker = any(BARE_MARKER.fullmatch(w) for w in words) or without_markers != text
+    # Numbers and "and" count as part of the source markers only when there are markers
+    # ("[S1 och S2]", "[S1, 2]"): "4 år" and "90" keep their number.
+    said = [
+        w
+        for w in words
+        if not BARE_MARKER.fullmatch(w)
+        and not (loose_marker and (w.isdigit() or w in {"and", "och"}))
+    ]
+    if not said:
+        return True
+    pointer = [w for w in said if not w.isdigit()]  # "see above [1]"
+    while pointer and pointer[0] in FILLERS:
+        pointer = pointer[1:]
+    return " ".join(pointer) in PLACEHOLDERS
+
+
 def parse_answer(completion: Completion, context: Context) -> Answer:
     data = _json_object(completion.text)
     raw_answer = data.get("answer") if data else None
+    problem = ""
     if data is None or not isinstance(raw_answer, str) or not raw_answer.strip():
+        problem = "not the JSON object asked for"
+    elif unusable_answer(raw_answer):
+        problem = "no answer in the answer field"  # only a pointer or source markers
+    if problem:
+        # Never shown as an answer: asked for once more, then this message (see _answer).
         return Answer(
             kind="failed",
             text="The model's reply could not be read. Please try again.",
             sources=context.sources,
             completion=completion,
+            problem=problem,
         )
+    assert data is not None and isinstance(raw_answer, str)  # checked above
     raw_kind = data.get("kind")
     kind = raw_kind if isinstance(raw_kind, str) and raw_kind in KINDS else "answered"
     text = GROUP.sub(lambda m: "".join(f"[{x}]" for x in _expand(m[1])), raw_answer.strip())

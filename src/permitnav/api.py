@@ -378,8 +378,9 @@ def create_app(
             # The provider's message can carry account or billing details: logged, not returned.
             log.error("model call failed: %s", _first_part(error))
             raise HTTPException(status_code=502, detail="model call failed") from error
-        if answer.kind == "failed":  # unreadable or cut-off reply, even after asking again
-            log.error("answer failed: the model's reply could not be read")
+        if answer.kind == "failed":  # unreadable, cut off or without an answer, even when re-asked
+            # The reason, never the reply's text (it can repeat the question).
+            log.error("answer failed: %s", answer.problem or "the reply could not be read")
             raise HTTPException(status_code=502, detail="the model's reply could not be read")
         return to_response(answer, as_of)
 
