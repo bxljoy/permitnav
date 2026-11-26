@@ -1512,3 +1512,21 @@ The maintainer reviewed the seven questions (both languages each) where the kind
 - **The reranker helps, and does not fit the server.** With `--rerank` (depth 20): R@5 0.58 → 0.62, page-only groups among the eight 16 → 19 of 24 (it also loses one). Timed on two CPU threads of the development machine, a lower bound for the VM's two vCPUs: 6.9 s for 20 page candidates, 8.6 s for 20 law sections, 3.3 s for 8. An answer takes 7–10 s today.
 
 **Decision:** nothing changed. The lever that works costs more time than the whole answer on this server; the alternatives are a reranking service outside the server (a provider and privacy decision, like the answer model's) or a larger machine, neither of which is a code change. The item-104 search check stays as it is (it passes on 5 kap. 18 § alone).
+
+### The judge's calibration sample labelled again: the judge no longer passes (2026-11-26)
+
+**Why:** thirteen of the sample's thirty answers carried reference answers that the golden set had corrected since the labels were given on 2026-11-21 (the family rule, the spouse's permanent residence, items 104, 204, 207, 302, 304 and others). The judge was being calibrated against references that were known to be wrong.
+
+**What:** the maintainer labelled the thirteen again on a review page, against the current references: nine labels changed (eight from correct to partly, one from correct to incorrect), four were kept. The sample's references and expected kinds now equal the golden set's, each decision is recorded in `adjudications.jsonl`, and a test fails when a golden reference changes without the answer being labelled again. Faithfulness labels were not asked again; they do not depend on the reference.
+
+**Result: the judge is more lenient than the maintainer.** Three runs of `judge-calibrate` (Gemini 3.5 Flash-Lite, reasoning effort low, 42 labelled answers including the seeded errors):
+
+| | before the relabelling | after |
+|---|---|---|
+| correctness agreement (the 85% bar) | 88% | 76% |
+| real answers | 93% | 73–77% |
+| faithfulness agreement | 86% | 90–93% |
+
+Of the nine changed labels the judge disagrees with seven: it calls "correct" an answer the maintainer calls "partly" (the main point right, an essential condition of the corrected reference missing), and once "correct" for "incorrect" (204: a question back where the reference now expects "it can"). The two known cases for item 104 are still judged right.
+
+**What it means for earlier numbers.** Every "judged correct" figure in this document since 2026-11-21 was produced by a judge that passed its bar against the old labels. Comparisons between two arms judged the same way still hold (the leniency applies to both), but the absolute level is too high: against the maintainer's labels, about a quarter of the answers the judge calls correct on this sample are only partly correct. The judge is not changed here; recalibrating it (its prompt, its model, or the bar) is the next decision.
