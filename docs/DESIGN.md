@@ -1530,3 +1530,25 @@ The maintainer reviewed the seven questions (both languages each) where the kind
 Of the nine changed labels the judge disagrees with seven: it calls "correct" an answer the maintainer calls "partly" (the main point right, an essential condition of the corrected reference missing), and once "correct" for "incorrect" (204: a question back where the reference now expects "it can"). The two known cases for item 104 are still judged right.
 
 **What it means for earlier numbers.** Every "judged correct" figure in this document since 2026-11-21 was produced by a judge that passed its bar against the old labels. Comparisons between two arms judged the same way still hold (the leniency applies to both), but the absolute level is too high: against the maintainer's labels, about a quarter of the answers the judge calls correct on this sample are only partly correct. The judge is not changed here; recalibrating it (its prompt, its model, or the bar) is the next decision.
+
+### Recalibrating the judge: candidates measured, none clearly passes (2026-11-26)
+
+Against the labels as given again that day (42 answers with the seeded errors; the bar is 85% agreement on correct or not):
+
+| judge | correctness agreement | real answers | seeded errors c / f | cost per calibration |
+|---|---|---|---|---|
+| Gemini 3.5 Flash-Lite, low (current) | 76%, 76%, 76% | 73–77% | 75–83% / 83–92% | $0.10–0.14 |
+| the same, medium effort | 76% | 70% | 92% / 100% | $0.26 |
+| the same, high effort | 74% | 67% | 92% / 100% | $0.40 |
+| Gemini 3.8 Flash, low | 79% | 77% | 83% / 100% | $0.22 |
+| GPT-6.1 Terra, low | 71% | 63% | 92% / 100% | $0.35 |
+| **Gemini 3.5 Flash, low** | **86%, 83%, 83%** | 80–83% | 92% / 100% | $0.54–0.64 |
+
+- **More reasoning effort does not make the current judge agree more.** GPT-6.1 Terra is too harsh (11 of 19 answers labelled correct came back "partly") and missed a known case.
+- **Gemini 3.5 Flash is the best candidate and sits at the bar, not above it** (84% on average over three runs). It catches the planted errors better than the current judge and gets both known cases right, at about five times the cost (a judged dev run would be about $0.75, against $0.16).
+- **A checking procedure added to the judge's instructions** (list the reference's conclusion, conditions and exceptions; check each; one missing means "partly") was tried on both models, two runs each: Flash-Lite 79% and 81%, Gemini 3.5 Flash 79% and 76%. It helps the weaker model a little and makes the stronger one over-strict (answers labelled correct came back "partly" five times in one run). Not adopted.
+- **What stays in disagreement** in every configuration is the same handful: answers the maintainer calls "partly" and every judge calls "correct" (the two family-spouse answers, the refused-extension answer, the job-loss answer, a seeded one). The labels carry no notes, so what the maintainer found missing in them is not written down; that is the information a further change to the judge's instructions would need.
+
+**Decision (the maintainer's): the judge stays Gemini 3.5 Flash-Lite at low effort for routine runs.** Its "correct" figures are to be read as lenient: against the maintainer's labels it passes about a quarter of the answers that are only partly correct. Gemini 3.5 Flash is the judge to use when an absolute level matters (`--model google/gemini-3.5-flash` on `judge-calibrate`; `JUDGE_MODEL` for an eval run). The 85% bar of D19 is not met by the routine judge; this entry is the record of that.
+
+**Spending.** These two days' eval runs cost about $27 on the development key and ran the shared OpenRouter account down to under a dollar, which the live site also draws on; the last experiment failed on it. From now on the balance is checked before and after every batch of model calls and reported with the result.
