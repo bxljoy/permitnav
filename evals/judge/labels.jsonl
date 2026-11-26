@@ -1,5 +1,5 @@
-{"id": "family-spouse-004-en", "correctness": "partly", "faithful": true, "note": ""}
-{"id": "family-spouse-004-sv", "correctness": "partly", "faithful": true, "note": ""}
+{"id": "family-spouse-004-en", "correctness": "partly", "faithful": true, "note": "Partly (reason given 2026-11-26): omits that the spouse's residence permit is valid for the same period as the principal work permit, and incorrectly says the sources do not establish whether the two-year permit duration matters."}
+{"id": "family-spouse-004-sv", "correctness": "partly", "faithful": true, "note": "Partly (reason given 2026-11-26): omits that the spouse's residence permit is valid for the same period as the principal work permit, and incorrectly states that the sources do not establish how the two-year validity period affects the spouse's permit."}
 {"id": "family-spouse-put-income-401-sv", "correctness": "partly", "faithful": true, "note": ""}
 {"id": "family-spouse-put-income-401-en", "correctness": "partly", "faithful": true, "note": ""}
 {"id": "family-spouse-stays-403-en", "correctness": "correct", "faithful": true, "note": ""}
@@ -11,7 +11,7 @@
 {"id": "put-conduct-006-sv", "correctness": "correct", "faithful": true, "note": ""}
 {"id": "put-conduct-006-en", "correctness": "correct", "faithful": true, "note": ""}
 {"id": "put-job-search-gaps-301-en", "correctness": "correct", "faithful": true, "note": ""}
-{"id": "put-refused-extension-304-sv", "correctness": "partly", "faithful": true, "note": ""}
+{"id": "put-refused-extension-304-sv", "correctness": "partly", "faithful": true, "note": "Partly (reason given 2026-11-26): correctly explains that the applications are decided separately, but omits the mandatory extension-refusal ground for prior permit-condition breaches under 6 kap. 4 a § andra stycket 4 and the minor-breach or unreasonableness exceptions under 7 kap. 7 e §."}
 {"id": "put-work-003-en", "correctness": "correct", "faithful": true, "note": ""}
 {"id": "ref-blue-card-501-sv", "correctness": "correct", "faithful": true, "note": ""}
 {"id": "ref-ict-seasonal-504-en", "correctness": "correct", "faithful": true, "note": ""}
@@ -21,7 +21,7 @@
 {"id": "work-extension-insurance-history-204-en", "correctness": "incorrect", "faithful": true, "note": ""}
 {"id": "work-extension-unknown-insurance-205-sv", "correctness": "correct", "faithful": false, "note": ""}
 {"id": "work-insurance-gap-request-106-en", "correctness": "correct", "faithful": true, "note": ""}
-{"id": "work-job-loss-three-months-201-sv", "correctness": "partly", "faithful": false, "note": ""}
+{"id": "work-job-loss-three-months-201-sv", "correctness": "partly", "faithful": false, "note": "Partly (reason given 2026-11-26): correctly explains the three-month period and when it starts, but incorrectly says that staying in the same occupation always avoids a new application, ignoring employer-specific permit restrictions, and states too categorically that the person must leave after three months rather than distinguishing possible revocation from automatic expiry."}
 {"id": "work-new-or-extension-202-en", "correctness": "incorrect", "faithful": true, "note": "Relabelled from correct after the judge flagged it: the answer says to apply for a new permit, not an extension, against the reference. Faithful: the cited Migrationsverket page says 'new application', which conflicts with the law."}
 {"id": "work-salary-001-sv", "correctness": "correct", "faithful": true, "note": ""}
 {"id": "work-switch-in-sweden-104-en", "correctness": "partly", "faithful": true, "note": ""}
