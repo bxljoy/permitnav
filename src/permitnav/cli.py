@@ -1943,14 +1943,13 @@ def cmd_judge_calibrate(args: argparse.Namespace) -> int:
         right = (verdict.correctness == "correct") == (label.correctness == "correct")
         if not right:
             known_missed.append(case_id)
-        faith = (
-            ""
-            if verdict.faithful == label.faithful
-            else (
-                f" (faithfulness differs: labelled {'faithful' if label.faithful else 'not faithful'},"
-                f" judge says {'faithful' if verdict.faithful else 'not faithful'})"
+        words = {True: "faithful", False: "not faithful"}
+        faith = ""
+        if verdict.faithful != label.faithful:
+            faith = (
+                f" (faithfulness differs: labelled {words[label.faithful]},"
+                f" judge says {words[bool(verdict.faithful)]})"
             )
-        )
         print(
             f"  known case {'ok  ' if right else 'MISS'} {case_id}: labelled {label.correctness},"
             f" judge says {verdict.correctness or 'unreadable'}{faith}"
