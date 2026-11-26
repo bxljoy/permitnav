@@ -229,3 +229,24 @@ def test_a_recording_survives_options_that_only_lay_results_out(tmp_path: Path, 
     assert cli._query_settings(same_texts) == cli._query_settings(settings)
     other_texts = {**settings, "config": {**settings["config"], "translate": False}}
     assert cli._query_settings(other_texts) != cli._query_settings(settings)
+
+
+def test_named_items_must_have_an_expected_source_among_the_answers_sources() -> None:
+    """The check behind `eval --must-find`: item 104's rule (apply from outside Sweden) must
+    reach the answer model from any authoritative source, statute or page."""
+    from types import SimpleNamespace
+
+    from permitnav.evals.run import ItemResult, RetrievalRun, must_find
+
+    def result(item_id: str, *ranks: int | None) -> ItemResult:
+        return ItemResult(item=SimpleNamespace(id=item_id), retrieved=(), ranks=ranks)  # type: ignore[arg-type]
+
+    run = RetrievalRun(results=[result("found", 6), result("deep", 9), result("split", 2, None)])
+    assert must_find(run, ["found"], 8) == ([], [])
+    unscored, missing = must_find(run, ["found", "deep", "split", "gone"], 8)
+    assert unscored == ["gone"]  # a renamed or skipped item must not pass silently
+    assert missing == [
+        "deep: no expected source in the top 8 (ranks 9)",
+        "split: no expected source in the top 8 (ranks 2, -)",
+    ]
+    assert must_find(run, [], 8) == ([], [])

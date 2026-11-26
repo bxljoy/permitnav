@@ -63,7 +63,7 @@ One JSON object per line.
 | `expected` | Required groups of alternative units (D16). Each inner list is one group; a group is found if any of its units is retrieved. Empty only for out-of-scope items. |
 | `reference_answer` | A short correct answer, written from the source text. Used by the judge, not shown to the model. |
 | `expects_follow_up` | The right first response is a question back (D14). |
-| `expects_not_settled` | The sources don't settle it; the assistant must say so. |
+| `expects_not_settled` | The sources don't settle the question asked: they are silent, they give a general rule that does not decide the situation, or the person asks how their own case will be decided. A question whether something *can* happen ("can my permit be revoked?") is settled when the law says it can, even though each case is assessed individually: that item expects an answer (reviewed 2026-11-26: 954, 204). |
 | `expects_out_of_scope` | Outside the service: asylum, protection or deportation, or any unrelated topic (driving licences, taxes, housing); the assistant must decline and point to Migrationsverket or the authority responsible (D18, prompt rule 7). At most one `expects_*` flag is true. |
 | `authority` | Optional. Which kind of source answers it (D22): `law` (a legal requirement), `agency` (Migrationsverket practice the law doesn't set) or `both`. Results are reported per kind. |
 | `turns` | Optional. Earlier user questions in the same conversation, oldest first; `question` is the turn that is scored. Without memory (plain RAG) only `question` is asked; the judge always sees the earlier turns. Checked for personal data like the question. Results get a `multi-turn` row. |
@@ -80,7 +80,7 @@ One JSON object per line.
 | `time-dependent` | The answer is true on `as_of` and may change later. |
 | `version-dependent` | The answer depends on which version of a rule applies (transitional provisions). Needs the history rebuilt in phase 4; add these in phase 4. |
 | `needs-follow-up` | The assistant must ask about the user's situation first. |
-| `not-settled` | Discretionary; the sources don't decide it. |
+| `not-settled` | The sources don't decide the question asked (see `expects_not_settled`). |
 | `out-of-scope` | Asylum, protection, deportation. |
 
 Target for the dev set: at least 6 items of each type except `version-dependent`, plus 6–8 out-of-scope items, with every original in both languages. At least a third of the in-scope items should be `agency` or `both` (D22).
@@ -176,3 +176,22 @@ evals/queries.dev.json` records every checked dev question, including those the 
 eval skips). When the answer prompt or model changes on purpose, check the slice still
 passes locally before merging; replace questions only with ones that are stable over
 several runs, never to make a failing change pass.
+
+## Checks for named items and known cases
+
+Averages hide single questions, so two things are checked by name.
+
+- **`permitnav eval --must-find ID …`** (CI runs it for `work-switch-in-sweden-104`): every
+  expected group of the named items must have a member among the eight sources an answer is
+  given, or the eval fails like a gate (exit 3; exit 2 when a named item is not scored). An expected group lists every source that carries
+  the rule, statute sections as well as pages, so the check does not depend on one page or
+  one chunk staying as it is.
+- **`evals/judge/known_cases.jsonl`**: whole answers kept because the judge once got them
+  wrong, each with its counterpart the judge must keep getting right, their labels and a note
+  saying what happened. `judge-calibrate` reports them one by one ("known case ok / MISS",
+  with the judge's reason for a miss), keeps them out of the agreement bar, since they are
+  picked, not sampled, and fails when one is missed. The first
+  pair is item 104: an answer that applies the 30-credit rule for research permits to a work
+  permit (incorrect; the judge passed such answers on 25 and 26 November 2026 against the
+  earlier reference) and one that mentions the rule without applying it (correct). A check on
+  the words alone would fail both or pass both; the difference is in the reference answer.

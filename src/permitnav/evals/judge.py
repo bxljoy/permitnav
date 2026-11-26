@@ -16,6 +16,7 @@ construction.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections import Counter
 from dataclasses import dataclass, field
@@ -267,6 +268,32 @@ def load_seeded(
         labels[raw["id"]] = Label(
             raw["id"], raw["correctness"], raw["faithful"], raw.get("kind_of_error", "")
         )
+    return items, labels
+
+
+def load_known_cases(path: Path) -> tuple[list[CalibrationItem], dict[str, Label]]:
+    """Known cases: whole answers kept because the judge once got them wrong (or their
+    counterpart, which it must keep getting right), each with its labels and a note saying
+    what happened. Unlike the calibration sample they are not a random draw, so they are
+    reported on their own and do not count toward the agreement bar."""
+    items, labels = [], {}
+    fields = {f.name for f in dataclasses.fields(CalibrationItem)}
+    required = fields - {"turns"}
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        raw = json.loads(line)
+        if raw.get("correctness") not in CORRECTNESS or not isinstance(raw.get("faithful"), bool):
+            raise ValueError(f"{path} line {n}: bad labels")
+        if not str(raw.get("note", "")).strip():
+            raise ValueError(f"{path} line {n}: a known case needs a note saying why it is kept")
+        absent = sorted(required - raw.keys())
+        if absent:
+            raise ValueError(f"{path} line {n}: missing {', '.join(absent)}")
+        if raw["id"] in labels:
+            raise ValueError(f"{path} line {n}: {raw['id']!r} appears twice")
+        items.append(CalibrationItem(**{k: v for k, v in raw.items() if k in fields}))
+        labels[raw["id"]] = Label(raw["id"], raw["correctness"], raw["faithful"], raw["note"])
     return items, labels
 
 

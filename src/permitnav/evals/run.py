@@ -111,6 +111,22 @@ def run_retrieval(
     return run
 
 
+def must_find(run: RetrievalRun, item_ids: Sequence[str], k: int) -> tuple[list[str], list[str]]:
+    """A check for named items, beside the averages: (ids that were not scored, messages for
+    items with an expected group that has no member in the top `k`). A group lists every
+    source that carries the rule (statute sections and pages alike), so the check does not
+    depend on one page or one chunk staying as it is."""
+    by_id = {r.item.id: r for r in run.results}
+    unscored = [i for i in item_ids if i not in by_id]
+    missing = []
+    for item_id in item_ids:
+        result = by_id.get(item_id)
+        if result is not None and any(rank is None or rank > k for rank in result.ranks):
+            ranks = ", ".join("-" if x is None else str(x) for x in result.ranks)
+            missing.append(f"{item_id}: no expected source in the top {k} (ranks {ranks})")
+    return unscored, missing
+
+
 @dataclass(frozen=True)
 class SliceSummary:
     name: str

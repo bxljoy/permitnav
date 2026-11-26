@@ -1,5 +1,5 @@
 {
-  "about": "The LLM smoke slice (CI, on merge to main and nightly). Chosen 2026-11-22 from the dev questions answered right (kind, judged correct and faithful) in all five dev runs of the current configuration, covering every answer kind and both languages. See evals/README.md.",
+  "about": "The LLM smoke slice (CI, on merge to main and nightly). Chosen 2026-11-22 from the dev questions answered right (kind, judged correct and faithful) in all five dev runs of the current configuration, covering every answer kind and both languages. See evals/README.md. Changed 2026-11-26: work-switch-in-sweden-104-en replaced by work-insurance-gap-request-106-en (right kind, judged correct and faithful in all eight dev runs of 25-26 November), because item 104's expectation was corrected from not settled to an answer and its answers are not yet stable.",
   "max_failures": 1,
   "items": [
     "work-salary-001-en",
@@ -10,7 +10,7 @@
     "work-job-loss-three-months-201-sv",
     "put-work-003-en",
     "put-conduct-006-sv",
-    "work-switch-in-sweden-104-en",
+    "work-insurance-gap-request-106-en",
     "oos-apply-asylum-601-en",
     "oos-expulsion-crime-605-en",
     "oos-unrelated-607-sv"

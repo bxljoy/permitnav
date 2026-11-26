@@ -99,6 +99,7 @@ jobs:
         run: >-
           uv run permitnav eval --queries evals/queries.dev.json
           --min-r5 0.52 --min-mrr 0.35
+          --must-find work-switch-in-sweden-104-en work-switch-in-sweden-104-sv
       # Questions whose answer depends on which wording applies (transitional provisions,
       # historical dates): they need the rebuilt statute history in the corpus (phase 4).
       - name: Version-dependent slice with recorded queries (fails below the minimums)

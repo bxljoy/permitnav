@@ -988,7 +988,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
     from permitnav.evals.golden import load_golden
-    from permitnav.evals.run import run_retrieval, slices
+    from permitnav.evals.run import must_find, run_retrieval, slices
     from permitnav.retrieval.retriever import (
         Retriever,
         units_applying_on,
@@ -1171,11 +1171,25 @@ def cmd_eval(args: argparse.Namespace) -> int:
         below.append(f"R@5 {overall.recall_5:.4f} < {args.min_r5}")
     if args.min_mrr is not None and overall.mrr < args.min_mrr - 1e-9:
         below.append(f"MRR {overall.mrr:.4f} < {args.min_mrr}")
+    # Named items whose rule must reach the answer model (its top MUST_FIND_K sources).
+    unscored, missing = must_find(run, args.must_find or [], AnswerConfig.k)
+    if unscored:
+        print(
+            "MUST-FIND ERROR: not scored (unknown id, a draft, or skipped above):"
+            f" {', '.join(unscored)}"
+        )
+        return 2
+    below += missing
     if below:
         print(f"RETRIEVAL REGRESSION: {'; '.join(below)}")
         return 3
     if args.min_r5 is not None or args.min_mrr is not None:
         print(f"gate passed: R@5 {overall.recall_5:.4f}, MRR {overall.mrr:.4f}")
+    if args.must_find:
+        print(
+            f"must-find passed: {len(args.must_find)} named items have an expected source of"
+            f" every group in the top {AnswerConfig.k}"
+        )
     return 0
 
 
@@ -1845,8 +1859,10 @@ def cmd_judge_calibrate(args: argparse.Namespace) -> int:
 
     from permitnav.evals.judge import (
         THRESHOLD,
+        Label,
         agreement,
         load_items,
+        load_known_cases,
         load_labels,
         load_seeded,
     )
@@ -1860,6 +1876,19 @@ def cmd_judge_calibrate(args: argparse.Namespace) -> int:
         items.update({i.id: i for i in seeded})
         labels.update(seeded_labels)
         seeded_ids = set(seeded_labels)
+    known_labels: dict[str, Label] = {}
+    if args.known_cases:  # '' for none; a path that does not exist is a mistake, not "none"
+        try:
+            known, known_labels = load_known_cases(Path(args.known_cases))
+        except (OSError, ValueError) as error:
+            print(f"cannot read the known cases: {error}")
+            return 1
+        clash = sorted(known_labels.keys() & items.keys())
+        if clash:  # it would replace a sampled answer and drop it from the bar
+            print(f"known cases reuse ids of calibration answers: {', '.join(clash)}")
+            return 1
+        items.update({i.id: i for i in known})
+        labels.update(known_labels)
     missing = sorted(items.keys() - labels.keys())
     if missing:
         more = "…" if len(missing) > 5 else ""
@@ -1881,7 +1910,9 @@ def cmd_judge_calibrate(args: argparse.Namespace) -> int:
     failed = sum(v.reason.startswith("model call failed") for v in verdicts.values())
     if failed:
         print(f"\n{failed} verdicts failed (model call errors); they count as disagreements")
-    result = agreement(labels, verdicts)
+    # Known cases are picked, not sampled: they are reported below and kept out of the bar.
+    sampled = {k: v for k, v in labels.items() if k not in known_labels}
+    result = agreement(sampled, verdicts)
     verdict_word = "PASSES" if result.passes() else "does not pass"
     effort = f", reasoning effort {effort_used}" if effort_used else ""
     print(
@@ -1895,7 +1926,7 @@ def cmd_judge_calibrate(args: argparse.Namespace) -> int:
     print(f"  faithfulness agreement {result.faithfulness:.0%}")
     if seeded_ids:
         for name, subset in (
-            ("real answers", {k: v for k, v in labels.items() if k not in seeded_ids}),
+            ("real answers", {k: v for k, v in sampled.items() if k not in seeded_ids}),
             ("seeded errors", {k: v for k, v in labels.items() if k in seeded_ids}),
         ):
             part = agreement(subset, verdicts)
@@ -1903,6 +1934,31 @@ def cmd_judge_calibrate(args: argparse.Namespace) -> int:
                 f"  {name:<14} n={part.n:<3} correctness {part.correctness:.0%}, "
                 f"faithfulness {part.faithfulness:.0%}"
             )
+    # A known case is kept for one mistake about correctness. It is missed when the judge and
+    # the label disagree on correct or not ("partly" for "incorrect" is not a miss);
+    # faithfulness is shown beside it and does not decide.
+    known_missed = []
+    for case_id, label in sorted(known_labels.items()):
+        verdict = verdicts[case_id]
+        right = (verdict.correctness == "correct") == (label.correctness == "correct")
+        if not right:
+            known_missed.append(case_id)
+        faith = (
+            ""
+            if verdict.faithful == label.faithful
+            else (
+                f" (faithfulness differs: labelled {'faithful' if label.faithful else 'not faithful'},"
+                f" judge says {'faithful' if verdict.faithful else 'not faithful'})"
+            )
+        )
+        print(
+            f"  known case {'ok  ' if right else 'MISS'} {case_id}: labelled {label.correctness},"
+            f" judge says {verdict.correctness or 'unreadable'}{faith}"
+        )
+        if not right:
+            print(f"      judge's reason: {verdict.reason[:300]}")
+    if known_missed:
+        print(f"  KNOWN CASES MISSED: {', '.join(known_missed)} (the command fails)")
     print(
         "  correctness (you → judge): "
         + ", ".join(f"{a}→{b} {n}" for (a, b), n in sorted(result.correctness_confusion.items()))
@@ -1930,7 +1986,7 @@ def cmd_judge_calibrate(args: argparse.Namespace) -> int:
             ),
             encoding="utf-8",
         )
-    return 0 if result.passes() else 2
+    return 0 if result.passes() and not known_missed else 2
 
 
 def traces(args: argparse.Namespace) -> bool:
@@ -2028,6 +2084,13 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--record-queries", help="record question vectors and translations here")
     ev.add_argument("--min-r5", type=float, help="fail (exit 3) if overall R@5 is below this")
     ev.add_argument("--min-mrr", type=float, help="fail (exit 3) if overall MRR is below this")
+    ev.add_argument(
+        "--must-find",
+        nargs="+",
+        metavar="ID",
+        help="fail (exit 3) unless each of these items has an expected source of every group"
+        f" among the {AnswerConfig.k} sources an answer is given; exit 2 if one is not scored",
+    )
     ev.set_defaults(run=cmd_eval)
     rf = sub.add_parser(
         "refresh", help="fetch, ingest and index everything; summarise what changed (daily)"
@@ -2093,6 +2156,11 @@ def main(argv: list[str] | None = None) -> int:
         "--seeded",
         default="evals/judge/seeded.jsonl",
         help="seeded errors to include ('' for none)",
+    )
+    jc.add_argument(
+        "--known-cases",
+        default="evals/judge/known_cases.jsonl",
+        help="whole answers the judge once got wrong, and their counterparts; reported apart",
     )
     jc.add_argument("--model", help="judge model (default: JUDGE_MODEL)")
     jc.add_argument(
