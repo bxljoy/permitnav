@@ -350,3 +350,25 @@ def test_the_checked_in_known_cases_pair_a_wrong_application_with_a_harmless_men
     reference = golden["work-switch-in-sweden-104-en"].reference_answer
     assert wrong.reference_answer == fine.reference_answer == reference  # judged as the item is
     assert "does not apply to a work permit" in reference
+
+
+def test_the_calibration_sample_is_judged_against_the_golden_sets_current_references() -> None:
+    """The sample was once a snapshot: thirteen of its references had been corrected in the
+    golden set while the labels still answered to the old ones (relabelled 2026-11-26). A
+    golden reference changed from now on fails here until the answer is labelled again."""
+    from pathlib import Path
+
+    from permitnav.evals.golden import load_golden
+    from permitnav.evals.judge import load_items
+
+    golden = {i.id: i for i in load_golden(Path("evals/golden.dev.jsonl"))}
+    stale = [
+        item.id
+        for item in load_items(Path("evals/judge/answers.jsonl"))
+        if item.id in golden
+        and (
+            item.reference_answer != golden[item.id].reference_answer
+            or item.expected_kind != golden[item.id].expected_kind
+        )
+    ]
+    assert stale == [], f"label these again against the corrected reference: {stale}"
