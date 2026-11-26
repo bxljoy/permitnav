@@ -1604,3 +1604,23 @@ Against the labels as given again that day (42 answers with the seeded errors; t
 **From the code review (8 findings, all fixed):** a question that mixes languages was held to its majority language; a second reply was accepted on language alone (it could change the kind, lose its citations, or be too short to tell); an answer that came from the re-ask for an unreadable reply was never flagged; Swedish quotation marks (”…”) were not recognised as quotes; a failed re-ask was swallowed without a log line; one test assertion could not fail; and `Answer.earlier` now also holds a second reply that was not used, which its comment says.
 
 **Tests** (no model): a mismatch then the right language (two calls); a mismatch twice (shown and flagged, two calls, no third); a broken second reply (the first stands); the right language, an English question, and a short answer (one call each).
+
+### Why four answers are "partly": the maintainer's reasons (2026-11-26)
+
+The four answers the maintainer labels "partly" and every judge tried calls "correct" now carry their reasons in `evals/judge/labels.jsonl`. Read against the reference answers, none of them is a borderline call:
+
+- **Three contradict a point the reference makes.** The two family-spouse answers say the sources do not establish how the permit's two-year length matters, where the reference says the spouse's permit is valid for the same period. The job-loss answer says the person must leave after three months and that the same occupation always avoids a new application, where the reference says the permit *may* be revoked ("not an automatic expiry") and that a new job may need an application depending on the employer.
+- **One leaves out half of the reference:** the refused-extension answer omits the ground on which an extension must be refused (6 kap. 4 a § andra stycket 4) and its exceptions.
+
+So the judge had what it needed in every case and still said "correct". What it lacks is not a new criterion but strictness on two it already has: an answer that says the sources do not cover a point the reference states, or that states as certain or automatic what the reference gives as conditional or discretionary, has that point wrong.
+
+**Tried the same night: a rule about conflict with the reference, not adopted.** Added to `judge_correctness.md`: an answer that says the sources do not cover a point the reference states, or that states as certain or automatic what the reference gives as conditional, has that point wrong (at best "partly"). Unlike the checking procedure of the afternoon ("every condition, or partly") it did not make either judge over-strict, and it did not help either:
+
+| judge | before | with the rule |
+|---|---|---|
+| Gemini 3.5 Flash-Lite, low (routine) | 76%, 76%, 76% | 79%, 76%, 79% |
+| Gemini 3.5 Flash, low | 86%, 83%, 83% | 88%, 83% |
+
+Of the four answers, both judges caught one of the two family-spouse answers per run (a different one each time) and never the job-loss or the refused-extension answer; asked for its reason, the stronger judge still wrote that the job-loss answer "correctly states" the three months. The instruction names exactly what is wrong with these answers and the judges do not see it, so this is a limit of the models at this price, not of the wording. The judge's instructions are unchanged.
+
+**What follows.** The judged "correct" share stays an upper bound, and comparisons between two versions judged the same way stay valid. For an absolute level, the labelled sample is the measure, not the judge. A stronger judge family was not tried (the two tried above it, Gemini 3.8 Flash and GPT-6.1 Terra, were no better or too harsh without this rule).
