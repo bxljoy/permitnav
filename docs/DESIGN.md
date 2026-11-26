@@ -1466,3 +1466,37 @@ The maintainer reviewed the seven questions (both languages each) where the kind
   - `work-extension-unknown-insurance-205`: three of four Swedish answers advise not to submit until the details are found, which no source says and which is risky for an application that must be made before the permit expires.
 
 **Effect on the retrieval gate:** dev R@5 0.52 → 0.58 and MRR 0.37 → 0.41 with no change to the search, because the added sources are ones it already found. The CI thresholds (0.52, 0.35) are left where they are for now: they are floors, and raising them belongs with the next retrieval change.
+
+### Rule 6 reworded again: measured, not adopted (2026-11-26)
+
+**Why:** after the review of group 4, correct answers to "can X happen" questions (the salary cut, the one-room flat) still carried "Answer not confirmed", because rule 6 sends every outcome that depends on an individual assessment to "not settled".
+
+**Tried, three wordings** (judged; before = the runs after the follow-on fix; dev scored with item 204 expecting an answer and item 104 still expecting "not settled", as the set stood during the runs: ten not-settled answers per run. The committed set has eight, since 104 was corrected afterwards):
+
+| wording | situational, right kind | dev, right kind | dev, not-settled items declined | dev, correct |
+|---|---|---|---|---|
+| rule 6 as it is | 69% | 84% | 17 of 20 | 85% |
+| two cases (silent sources; own-case outcome), 3 runs | 96% | 82% | 17 of 30 | 85% |
+| three cases (adds: a general rule that does not decide the situation), 3 runs | 69% | 81% | 24 of 30 | 86% |
+
+- The two-case wording fixed the targets in every run and left correctness flat, but stopped declining questions that are open, and the code review found why: it had no case for "the sources give a rule that does not decide this situation", tied the own-case test to the English word "Will", was not limited to in-scope questions, and quoted two dev items as its examples.
+- The three-case wording kept the declines and lost the gain: the salary-cut question stayed fixed, the one-room flat and the a-kassa question flipped back. The spent hold-out did not move (right kind 13, 13 → 14, 15 of 24; judged correct 13, 13 → 12, 12 of 18; answerable questions declined 4 → 4), nor did ten probes outside the golden sets (17 of 20 right both ways), and the smoke slice passed 12 of 12 three times.
+- **Decision: the prompt is unchanged.** This is the second attempt (the first on 2026-11-24) to move this line with a general rule, with the same result: the model does not hold a distinction that fine across questions. The label stays a known weakness for `sit-salary-cut-954`, `sit-family-housing-951` and now `work-extension-insurance-history-204`.
+- **Kept from the attempt:** `work-extension-insurance-history-204` expects an answer (its reference begins "It can"; the same decision as 954), and the definition of "not settled" in `evals/README.md` says so. Open: `put-conduct-006-sv` asks "Kan det hindra…" where its English original asks "Will that stop me…"; the pair expects one kind and the two wordings invite two.
+
+### Item 104 corrected: a rule for research permits had been applied to work permits (2026-11-26)
+
+**Found while checking a recommendation.** `work-switch-in-sweden-104` ("I'm here as the family member of a student. Can I apply for a work permit from inside Sweden?") expected "not settled", with a reference saying no source covers the case. Several answers said "yes, if the student has completed 30 credits", citing Migrationsverket, and the judge marked them correct; the assistant recommending the change of expectation had trusted that verdict without reading the page. The page is the one for *researchers*, and its list is about permits for research.
+
+**What the law says** (wording in force on the item's date, 2026-11-20): a work permit must be applied for and granted before entry, and an application made after entry may not be approved except in the cases in 5 kap. 18 § andra-fjärde styckena and 18 a-19 §§ (6 kap. 4 § utlänningslagen). None of those covers a holder of a residence permit as a student's family member as such; what could apply rests on something else (the applicant's own study permit with two completed semesters, a visit to an employer in an occupation in high demand, exceptional grounds). The 30-credit rule is 5 b kap. 15 § andra stycket 5 and concerns applications for a permit for research or doctoral studies. Migrationsverket's page for employees says the same as the law: a first application must be made from outside Sweden, and its list of who may apply from inside does not include a student's family member. Not verified: under which provision a student's family member's own permit is granted.
+
+**Changes (decided by the maintainer):**
+- The item expects an **answer**: "Normally not, unless another statutory exception applies." The question asks about eligibility to apply, not about how one application will be decided. The reference states that the 30-credit rule does not apply to a work permit, that an answer presenting it as a route is incorrect, and that an answer explaining it does not apply is fine.
+- **Expected sources:** one group of alternatives, 6 kap. 4 §, 5 kap. 18 § and the employees' page section in both languages. The statute is as authoritative as the page, so neither a page nor a chunk is the only acceptable source. CI checks by name that one of them is among the sources an answer is given (`eval --must-find`); today 5 kap. 18 § is (rank 6), the employees' page section is not.
+- **The real case** behind the item (an application from inside Sweden, approved) is recorded as a historical case whose legal basis is not known, not as evidence of a general entitlement.
+- **A known judge failure, kept:** `evals/judge/known_cases.jsonl` holds a real answer that applies the rule (labelled incorrect) and a real answer that mentions it without applying it (labelled correct, and not faithful for another claim). With the corrected reference the judge gets both right; `judge-calibrate` reports them one by one, shows the judge's reason for a miss, and fails when one is missed. No check on the words: both answers contain "30 ECTS".
+- **The smoke slice** asked this question expecting "not settled"; it is replaced by `work-insurance-gap-request-106-en` (right kind, judged correct and faithful in all eight dev runs of 25 and 26 November).
+
+**Limits of the two checks.** The search check passes today on 5 kap. 18 § alone, which speaks of residence permits; the two sources that tie the rule to work permits (6 kap. 4 § and the employees' page section) are not among the eight, so the check would only notice the loss of 5 kap. 18 §. And the judge's calibration sample (`evals/judge/answers.jsonl`, 30 answers with the maintainer's labels) is a snapshot from 2026-11-21: thirteen of its entries, 104 and 204 among them, carry reference answers that the golden set has since corrected. Their labels were given against the references of that day, so they were left as they are; bringing the sample up to date means labelling those answers again, which is the maintainer's to do.
+
+**What is not fixed:** the answers themselves. The model is still shown the researchers' section and not the employees' one, and of eight answers generated on 2026-11-26 none said "normally not" with the label "answered"; they said the sources do not settle it. The item now measures that.

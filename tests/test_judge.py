@@ -299,3 +299,54 @@ def test_a_follow_on_question_is_judged_with_the_earlier_questions() -> None:
     plain = by_task({"correctness": "correct"}, {"faithful": True})
     Judge(plain, model="m").judge(item())
     assert all("Earlier questions" not in r.messages[0]["content"] for r in plain.requests)
+
+
+def test_known_cases_are_whole_answers_with_labels_and_a_reason_to_keep_them(tmp_path) -> None:
+    from permitnav.evals.judge import load_known_cases
+
+    base = item()
+    case = {**base.__dict__, "id": "known-1", "correctness": "incorrect", "faithful": True}
+    path = tmp_path / "known.jsonl"
+    path.write_text(json.dumps({**case, "note": "the judge passed it once"}) + "\n", "utf-8")
+    items, labels = load_known_cases(path)
+    assert items[0].answer == base.answer and items[0].id == "known-1"
+    assert (labels["known-1"].correctness, labels["known-1"].faithful) == ("incorrect", True)
+    assert labels["known-1"].note == "the judge passed it once"
+    whole = {**case, "note": "n"}
+    without_sources = {k: v for k, v in whole.items() if k != "sources"}
+    for broken, why in (
+        ({**case, "note": " "}, "note"),
+        ({**whole, "correctness": "wrong"}, "labels"),
+        (without_sources, "missing sources"),
+    ):
+        path.write_text(json.dumps(broken) + "\n", "utf-8")
+        with pytest.raises(ValueError, match=why):
+            load_known_cases(path)
+    path.write_text((json.dumps(whole) + "\n") * 2, "utf-8")
+    with pytest.raises(ValueError, match="appears twice"):
+        load_known_cases(path)
+
+
+def test_the_checked_in_known_cases_pair_a_wrong_application_with_a_harmless_mention() -> None:
+    """Item 104: applying the 30-credit rule for research permits to a work permit is the
+    error; mentioning that rule is not. Both answers name it, and their labels differ, so a
+    check on the words alone cannot pass this pair."""
+    from pathlib import Path
+
+    from permitnav.evals.golden import load_golden
+    from permitnav.evals.judge import load_items, load_known_cases
+
+    items, labels = load_known_cases(Path("evals/judge/known_cases.jsonl"))
+    by_id = {i.id: i for i in items}
+    wrong, fine = (
+        by_id["known-104-wrong-rule-applied"],
+        by_id["known-104-rule-mentioned-not-applied"],
+    )
+    assert "30 ECTS" in wrong.answer and "30 ECTS" in fine.answer
+    assert labels[wrong.id].correctness == "incorrect" and labels[fine.id].correctness == "correct"
+    sample = {i.id for i in load_items(Path("evals/judge/answers.jsonl"))}
+    assert not sample & set(by_id)  # a shared id would replace a sampled answer
+    golden = {i.id: i for i in load_golden(Path("evals/golden.dev.jsonl"))}
+    reference = golden["work-switch-in-sweden-104-en"].reference_answer
+    assert wrong.reference_answer == fine.reference_answer == reference  # judged as the item is
+    assert "does not apply to a work permit" in reference
