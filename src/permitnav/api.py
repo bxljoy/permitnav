@@ -382,6 +382,8 @@ def create_app(
             # The reason, never the reply's text (it can repeat the question).
             log.error("answer failed: %s", answer.problem or "the reply could not be read")
             raise HTTPException(status_code=502, detail="the model's reply could not be read")
+        if answer.other_language:  # shown all the same; counted here (no text, no question)
+            log.warning("answer in another language than the question")
         return to_response(answer, as_of)
 
     # The chat UI (phase 6), when built: the page, its icon and /assets only, by GET, so
