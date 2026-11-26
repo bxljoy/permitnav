@@ -934,3 +934,17 @@ def test_the_answer_models_reasoning_effort_comes_from_the_environment(
     monkeypatch.setenv("ANSWER_REASONING_EFFORT", "fast")
     with pytest.raises(ValueError, match="ANSWER_REASONING_EFFORT"):
         AnswerConfig(model="m")
+
+
+def test_the_prompt_answers_for_the_ordinary_work_permit_and_keeps_its_limits() -> None:
+    """Rule 5: "What salary do I need for a work permit?" was asked back ("which permit?") in
+    five of six production answers (2026-11-26). The default has limits that were each added
+    after a measured or reviewed failure; a later edit must not drop them."""
+    from permitnav.answering.answerer import load_prompt
+
+    rule = next(line for line in load_prompt().splitlines() if line.startswith("5. "))
+    assert "means the ordinary work permit for an employee" in rule
+    assert "neither names nor describes a special kind" in rule  # a company transfer, berries
+    assert "if the sources show that other kinds of work permit" in rule  # rule 1: sources only
+    assert "has said which permit they hold" in rule  # "I have a work permit" is not asked back
+    assert "work while an application is pending" in rule  # still asked back
