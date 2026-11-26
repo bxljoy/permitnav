@@ -237,7 +237,7 @@ def test_answerer_sends_sources_and_the_date_and_returns_cited_answers(
     conn: psycopg.Connection, stored: Retriever
 ) -> None:
     llm = ScriptedLLM(
-        json.dumps({"kind": "answered", "answer": "At least 90 percent of the median salary [S1]."})
+        json.dumps({"kind": "answered", "answer": "Minst 90 procent av medianlönen [S1]."})
     )
     answerer = Answerer(conn, stored, llm, AnswerConfig(model="test-model", k=3))
     answer = answerer.answer("lönen medianlönen procent lönekravet", as_of=date(2026, 11, 20))
@@ -1050,3 +1050,148 @@ def test_a_second_placeholder_answer_is_a_controlled_failure(
     assert answer.text == "The model's reply could not be read. Please try again."
     assert "se ovan" not in answer.text and not answer.citations
     assert answer.problem == "no answer in the answer field"  # for the log, never shown
+
+
+SWEDISH_QUESTION = "Vilken lön krävs för att jag ska få ett arbetstillstånd och hur räknas den?"
+IN_ENGLISH = "The salary must be at least 90 percent of the median salary when you apply [S1]."
+IN_SWEDISH = "Lönen ska vara minst 90 procent av medianlönen när du ansöker om tillståndet [S1]."
+
+
+def test_only_a_clear_mismatch_counts_as_the_wrong_language() -> None:
+    from permitnav.answering.answerer import single_language, wrong_language
+
+    assert wrong_language(IN_ENGLISH, "sv") and wrong_language(IN_SWEDISH, "en")
+    assert not wrong_language(IN_SWEDISH, "sv") and not wrong_language(IN_ENGLISH, "en")
+    assert not wrong_language("Ja [S1].", "en")  # too short to tell: never asked again
+    assert not wrong_language(IN_ENGLISH, None)  # the question's language is not single
+    # An English answer that quotes Swedish law outside quotation marks is mixed, not Swedish.
+    quoting = (
+        "No. The law says that en utlänning som ska arbeta i Sverige ska ha arbetstillstånd "
+        "[S1], and that is the rule for your case: you need the permit before you start."
+    )
+    assert not wrong_language(quoting, "en")
+    # The form seen on 2026-11-26: a Swedish opening sentence, the rest in English.
+    drifting = (
+        "Ja, men bara i den meningen att ansökan kan lämnas in [S1]. The sources do not say "
+        "that a new application is refused for this reason, so this is the limit of what "
+        "can be said. According to the agency, you must apply before the permit expires, "
+        "and if you apply later the application is treated in another way [S1]."
+    )
+    assert wrong_language(drifting, "sv")
+
+    assert single_language(SWEDISH_QUESTION) == "sv"
+    assert (
+        single_language("Jag har lämnat in en ansökan enligt 6 kap. 2 a §. Vad händer nu?") == "sv"
+    )
+    assert single_language("What salary do I need to get a work permit?") == "en"
+    pasted = (
+        "My decision letter says ansökan avslås eftersom anställningsvillkoren är sämre än "
+        "kollektivavtal. Can I appeal?"
+    )
+    assert single_language(pasted) is None  # English with a pasted Swedish sentence
+    assert single_language("Can I change jobs?") is None  # too little to tell
+
+
+@pytest.mark.db
+def test_an_answer_in_the_other_language_is_asked_for_again_in_the_questions(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    first = json.dumps({"kind": "answered", "answer": IN_ENGLISH})
+    replies = iter([first, json.dumps({"kind": "answered", "answer": IN_SWEDISH})])
+    llm = ScriptedLLM(lambda request: next(replies))
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        SWEDISH_QUESTION, date(2026, 11, 20)
+    )
+    assert answer.kind == "answered" and answer.text == IN_SWEDISH and not answer.other_language
+    one, two = llm.requests
+    assert two.messages[1] == {"role": "assistant", "content": first}
+    assert "asked in Swedish" in two.messages[2]["content"]
+    assert len(answer.earlier) == 1  # the first call is still counted
+
+
+@pytest.mark.db
+def test_an_answer_still_in_the_other_language_is_shown_and_flagged(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    llm = ScriptedLLM(json.dumps({"kind": "answered", "answer": IN_ENGLISH}))
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        SWEDISH_QUESTION, date(2026, 11, 20)
+    )
+    assert answer.kind == "answered" and answer.text == IN_ENGLISH  # useful, so it is shown
+    assert answer.other_language and len(llm.requests) == 2  # asked once more, not twice
+    assert len(answer.earlier) == 1  # both calls are counted
+
+
+@pytest.mark.db
+def test_a_broken_second_reply_does_not_replace_a_usable_first_one(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    replies = iter([json.dumps({"kind": "answered", "answer": IN_ENGLISH}), "not JSON"])
+    llm = ScriptedLLM(lambda request: next(replies))
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        SWEDISH_QUESTION, date(2026, 11, 20)
+    )
+    assert answer.kind == "answered" and answer.text == IN_ENGLISH and answer.other_language
+
+
+@pytest.mark.db
+def test_the_right_language_and_short_answers_cost_no_second_call(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    for question, reply in (
+        (SWEDISH_QUESTION, IN_SWEDISH),
+        ("What salary do I need to get a work permit, and how is it counted?", IN_ENGLISH),
+        (SWEDISH_QUESTION, "Ja [S1]."),  # too short to tell
+    ):
+        llm = ScriptedLLM(json.dumps({"kind": "answered", "answer": reply}))
+        answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+            question, date(2026, 11, 20)
+        )
+        assert answer.text == reply and len(llm.requests) == 1 and not answer.other_language
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(
+    "second",
+    [
+        {"kind": "not_settled", "answer": IN_SWEDISH},  # another verdict
+        {"kind": "answered", "answer": "Kontakta Migrationsverket."},  # too short to tell
+        {"kind": "answered", "answer": IN_SWEDISH.replace(" [S1]", "")},  # lost its source
+    ],
+)
+def test_a_second_reply_is_used_only_when_it_is_the_same_answer_in_the_right_language(
+    conn: psycopg.Connection, stored: Retriever, second: dict
+) -> None:
+    replies = iter([json.dumps({"kind": "answered", "answer": IN_ENGLISH}), json.dumps(second)])
+    llm = ScriptedLLM(lambda request: next(replies))
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        SWEDISH_QUESTION, date(2026, 11, 20)
+    )
+    assert answer.text == IN_ENGLISH and answer.kind == "answered" and answer.citations
+    assert answer.other_language and len(llm.requests) == 2
+
+
+@pytest.mark.db
+def test_a_question_that_mixes_languages_is_never_held_to_one(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    llm = ScriptedLLM(json.dumps({"kind": "answered", "answer": IN_ENGLISH}))
+    pasted = (
+        "My decision letter says lönen är lägre än medianlönen och ansökan avslås därför. "
+        "Can I appeal?"
+    )
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(pasted, date(2026, 11, 20))
+    assert answer.text == IN_ENGLISH and len(llm.requests) == 1 and not answer.other_language
+
+
+@pytest.mark.db
+def test_an_answer_that_needed_the_other_re_ask_is_still_flagged(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    replies = iter(["not JSON", json.dumps({"kind": "answered", "answer": IN_ENGLISH})])
+    llm = ScriptedLLM(lambda request: next(replies))
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        SWEDISH_QUESTION, date(2026, 11, 20)
+    )
+    assert answer.text == IN_ENGLISH and answer.other_language  # counted, not asked a third time
+    assert len(llm.requests) == 2

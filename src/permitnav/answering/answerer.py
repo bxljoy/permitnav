@@ -17,6 +17,7 @@ verifier (D13).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import unicodedata
@@ -34,13 +35,14 @@ from permitnav.negation import rules_out
 from permitnav.parsing.references import named_units
 from permitnav.prompting import load_prompt
 from permitnav.retrieval.retriever import Hit, Retriever
-from permitnav.retrieval.translate import language_of
+from permitnav.retrieval.translate import clear_language, language_evidence, language_of
 
 if TYPE_CHECKING:
     from permitnav.agent.intake import Intake, IntakeRewriter
     from permitnav.agent.second_search import SecondSearch, SecondSearcher
 
 KINDS = ("answered", "follow_up", "not_settled", "out_of_scope")
+log = logging.getLogger("permitnav.answer")
 MARKER = re.compile(r"\[(S\d+)\]")
 # "[S1, S2]", "[S1–S3]", "[S1; S4]": groups the model sometimes writes instead of [S1][S2]
 GROUP = re.compile(r"\[(S\d+(?:\s*[,;–-]\s*S\d+)+)\]")
@@ -67,6 +69,14 @@ REASK_ANSWER = (
     'pointer to text that is not there (such as "see above") or only source markers. Reply '
     'again with the same JSON object, with the whole answer written out in the "answer" field.'
 )
+# Sent once when a readable answer is in the other language than the question (about one
+# Swedish question in ninety was answered in English, never the reverse; DESIGN.md).
+REASK_LANGUAGE = (
+    "That answer is in the wrong language: the question was asked in {language}. Reply again "
+    'with the same JSON object, with the "answer" written in {language}. Keep the quotes '
+    "from the sources in Swedish."
+)
+LANGUAGE_NAMES = {"sv": "Swedish", "en": "English"}
 # An "answer" that is only a pointer to text that is not there. Seen 2026-11-26: the whole
 # answer was "(se ovan)"; the model had written the answer in its hidden reasoning. Matched
 # against the whole answer (see unusable_answer), never against part of one.
@@ -150,7 +160,8 @@ class Answer:
     dropped_markers: list[str] = field(default_factory=list)  # cited but not a given source
     sources: list[Source] = field(default_factory=list)  # everything the model was shown
     completion: Completion | None = None
-    # Earlier calls for the same answer (a reply cut off or unreadable, then asked again).
+    # The other calls made for the same answer: a reply cut off or unreadable and then asked
+    # again, or a second reply (asked for in the question's language) that was not used.
     earlier: list[Completion] = field(default_factory=list)
     # The second search's decision and additions (phase 5), when it ran.
     search: SecondSearch | None = None
@@ -160,6 +171,9 @@ class Answer:
     # Why a "failed" answer failed, for logs and traces (never shown): the reply was not the
     # JSON asked for, or its answer field held no answer.
     problem: str = ""
+    # The answer is in the other language than the question, even after asking again: shown
+    # all the same (a right answer in the wrong language still helps), and logged.
+    other_language: bool = False
 
 
 # Only the efforts that were measured (DESIGN.md, 2026-11-25). "medium" and "high" would also
@@ -310,6 +324,8 @@ class Answerer:
         # more than half of the Swedish dev questions in English (phase 2). Only when the
         # question is clearly Swedish or English; otherwise (a tie, another language) the
         # model follows the question.
+        # The language to hold the answer to: only when the question is in one language alone.
+        only_language = language if language == single_language(question) else None
         language = ANSWER_LANGUAGE.get(language, ANSWER_LANGUAGE[None])
         system = self._template.format(
             as_of=as_of.isoformat(), sources=context.render(), language=language
@@ -362,6 +378,42 @@ class Answerer:
                 earlier.append(completion)
                 answer = parse_answer(second, context)
                 cut_off = second.extra.get("finish_reason") == "length"
+        elif answer.kind != "failed" and wrong_language(answer.text, only_language):
+            # A readable answer in the other language: ask once more. Unlike an unusable
+            # answer it is still worth showing, so it stands unless the second reply is the
+            # same answer in the right language.
+            try:
+                second = ask(
+                    [
+                        *messages,
+                        {"role": "assistant", "content": completion.text},
+                        {
+                            "role": "user",
+                            "content": REASK_LANGUAGE.format(
+                                language=LANGUAGE_NAMES[only_language or ""]
+                            ),
+                        },
+                    ]
+                )
+            except LLMError as error:
+                second = None  # the first answer stands; the provider's text is not logged
+                log.warning(
+                    "asking again for the answer's language failed: %s", type(error).__name__
+                )
+            if second is not None:
+                again = parse_answer(second, context)
+                better = (
+                    again.kind == answer.kind  # not a different verdict
+                    and clear_language(again.text) == only_language  # not merely undetectable
+                    and (bool(again.citations) or not answer.citations)  # not without its sources
+                )
+                if better:
+                    earlier.append(completion)
+                    answer = again
+                else:  # the first answer stands; the second call is still counted
+                    earlier.append(second)
+        if answer.kind != "failed":  # also after a re-ask for an unreadable reply
+            answer.other_language = wrong_language(answer.text, only_language)
         if cut_off and answer.kind == "failed":
             answer.text = "The reply was too long and was cut off. Please ask a narrower question."
         answer.earlier = earlier
@@ -375,6 +427,34 @@ def _relevant(question: str, hits: list[Hit], min_score: float) -> bool:
     if min_score <= 0 or named_units(question):
         return True
     return any(h.score >= min_score for h in hits)
+
+
+# Words that are English evidence for the detector and ordinary Swedish too ("lämna in",
+# "6 kap. 2 a §"): not counted when asking whether a Swedish question has English in it.
+SHARED_WORDS = re.compile(r"\b(?:in|a)\b", re.IGNORECASE)
+
+
+def single_language(question: str) -> str | None:
+    """The language a question is written in, only when nothing in it speaks for the other:
+    a person who writes in English and pastes a Swedish sentence has not asked for the
+    majority language of their text, and holding the answer to it would be wrong."""
+    swedish, english = language_evidence(question)
+    if swedish >= 2 and language_evidence(SHARED_WORDS.sub(" ", question))[1] == 0:
+        return "sv"
+    if english >= 2 and swedish == 0:
+        return "en"
+    return None
+
+
+def wrong_language(text: str, asked_in: str | None) -> bool:
+    """Whether an answer is overwhelmingly in the other language than the question was asked
+    in. False whenever that cannot be said for sure (a short answer such as "Ja [S1].", an
+    answer that mixes the two, a question whose language is not single): only a clear
+    mismatch is worth another call."""
+    if asked_in not in LANGUAGE_NAMES:
+        return False
+    written_in = clear_language(text)
+    return written_in is not None and written_in != asked_in
 
 
 def unusable_answer(text: str) -> bool:

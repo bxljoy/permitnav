@@ -37,25 +37,44 @@ WORD = re.compile(r"[A-Za-zÅÄÖåäöÉé]+")
 STATUTE_NAME = re.compile(r"\b\w*(?:lagen|förordningen)s?\b", re.IGNORECASE)
 
 
-QUOTED = re.compile(r'"[^"]*"|“[^”]*”|«[^»]*»|„[^“]*“')
+QUOTED = re.compile(r'"[^"]*"|“[^”]*”|”[^”]*”|«[^»]*»|„[^“]*“')
 
 
-def language_of(text: str) -> str | None:
-    """ "sv" or "en" when one language has more evidence than the other, None when neither
-    does (a tie, too few words, another language). Swedish evidence: Swedish function words,
-    and lowercase words with å, ä or ö; English evidence: English function words. Statute
-    names ("utlänningslagens"), capitalised words ("Malmö") and quoted passages are ignored,
-    so English text that mentions them, or a Swedish term like "uppehållstillstånd", stays
+def language_evidence(text: str) -> tuple[int, int]:
+    """(Swedish, English) evidence in a text. Swedish: Swedish function words, and lowercase
+    words with å, ä or ö; English: English function words. Statute names
+    ("utlänningslagens"), capitalised words ("Malmö") and quoted passages are ignored, so
+    English text that mentions them, or a Swedish term like "uppehållstillstånd", stays
     English."""
     words = WORD.findall(STATUTE_NAME.sub(" ", QUOTED.sub(" ", text)))
     lower = [w.lower() for w in words]
     swedish = sum(w in SWEDISH_WORDS for w in lower)
     swedish += sum(w.islower() and any(ch in "åäö" for ch in w) for w in words)
     english = sum(w in ENGLISH_WORDS for w in lower)
+    return swedish, english
+
+
+def language_of(text: str) -> str | None:
+    """ "sv" or "en" when one language has more evidence than the other, None when neither
+    does (a tie, too few words, another language); see language_evidence."""
+    swedish, english = language_evidence(text)
     # At least two pieces of evidence: one shared word ("in" in German) decides nothing.
     if swedish > english and swedish >= 2:
         return "sv"
     if english > swedish and english >= 2:
+        return "en"
+    return None
+
+
+def clear_language(text: str, ratio: int = 3, least: int = 4) -> str | None:
+    """ "sv" or "en" only when the text is overwhelmingly in that language: at least `least`
+    pieces of evidence and `ratio` times the other language's. For deciding to act on a
+    language (asking a model again), where a mixed text (an English answer quoting Swedish
+    law, a question with a pasted Swedish sentence) must count as undecided."""
+    swedish, english = language_evidence(text)
+    if swedish >= least and swedish >= ratio * english:
+        return "sv"
+    if english >= least and english >= ratio * swedish:
         return "en"
     return None
 
