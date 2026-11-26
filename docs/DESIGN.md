@@ -1576,3 +1576,17 @@ Against the labels as given again that day (42 answers with the seeded errors; t
 
 **Not done:** the probe questions are not golden items, so nothing in CI holds this fix beyond the smoke slice (which allows one failure) and a test that the rule's sentences are present.
 
+
+### An answer that only points elsewhere is not shown (2026-11-26)
+
+**Seen** in one of ten answers while reviewing the scenarios in `golden.kinds.jsonl`: the whole answer to a Swedish question was "(se ovan)" ("see above"). The model had written its answer in its hidden reasoning and left a pointer in the "answer" field; the reply parsed, the field was not empty, so it was accepted and would have been shown as an answer.
+
+**Change:** `unusable_answer` in `answering/answerer.py`. An answer text is not an answer when, with source markers, brackets, punctuation, case and spacing set aside, nothing is left (empty, only "[S1]", only "…") or what is left is one of a fixed list of pointer phrases in English and Swedish ("see above", "as above", "se ovan", "enligt ovan"…), compared with the whole text and never with part of it. Such a reply goes down the path that already existed for unreadable replies: asked for once more, with the re-ask now saying that the answer must be written out in the field, and if the second reply is no better, the controlled message ("The model's reply could not be read. Please try again."; a 502 from the API). The invalid text is never shown.
+
+**Not a length test** (the maintainer's condition): "Ja [S1]." and "No [S2]." are answers, and a pointer inside a real sentence ("See above for the dates: the rule is in 6 kap. 2 § [S1]") is left alone.
+
+**Tests** (no model): each invalid form, short answers that must pass, a placeholder followed by a real answer, and two invalid replies ending in the controlled failure after two calls.
+
+**From the code review (5 findings, all fixed):** source markers written in other ways than `[S1]` ("(S1)", "[s1]", "[S1 och S2]", "[1]", "[S1-3]") no longer hide a pointer or count as an answer, while a number that is the answer ("4 år", "90") stays one; the list gained the wordings that name the reasoning ("see reasoning", "se resonemanget ovan"), a leading "Svar:" or "Please", and "ibid"; Swedish letters written as a letter plus a combining mark are read as the letter; a failed answer now carries its reason (`Answer.problem`: not the JSON asked for, or no answer in the answer field), which the API logs in place of one message for both; and the re-ask for broken JSON keeps its measured wording, with a re-ask of its own for this case.
+
+**Not covered:** a reply that points elsewhere in other words than the list's, and the separate defect seen in the same run, a Swedish question answered in English (counted by the eval as "in the question's language"; not changed here).

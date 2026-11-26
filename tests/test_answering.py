@@ -948,3 +948,105 @@ def test_the_prompt_answers_for_the_ordinary_work_permit_and_keeps_its_limits() 
     assert "if the sources show that other kinds of work permit" in rule  # rule 1: sources only
     assert "has said which permit they hold" in rule  # "I have a work permit" is not asked back
     assert "work while an application is pending" in rule  # still asked back
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "(se ovan)",  # the reply seen on 2026-11-26
+        "Se ovan.",
+        "  SE OVAN  ",
+        "[se ovan]",
+        "Se ovan [S1].",
+        "See above.",
+        "(See the answer above)",
+        "As above",
+        "Enligt ovan.",
+        "Se svaret ovan!",
+        "[S1]",
+        "[S1][S2].",
+        "[S1, S3]",
+        "Se ovan (S1).",  # markers written in other ways
+        "Se ovan [s1].",
+        "Se ovan [S1 och S2].",
+        "See above [1].",
+        "[S1-3]",
+        "[S1, 2]",
+        "(see reasoning)",
+        "Please see above.",
+        "Svar: se ovan",
+        "Se resonemanget ovan.",
+        "Ibid.",
+        "se ovansta\u030aende",  # "å" as "a" + a combining ring
+        "…",
+        "-",
+        "   ",
+        "",
+    ],
+)
+def test_an_answer_that_only_points_elsewhere_or_says_nothing_is_unusable(text: str) -> None:
+    from permitnav.answering.answerer import unusable_answer
+
+    assert unusable_answer(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Ja [S1].",
+        "No [S2].",
+        "Nej.",
+        "Yes",
+        "90 procent [S1].",
+        "Två år [S2].",
+        "See above for the dates: the rule itself is in 6 kap. 2 § [S1].",  # a pointer inside text
+        "Se ovan nämnda krav i 6 kap. 2 § [S1].",
+        "As above, the salary must be at least 90 percent [S1].",
+        "4 år [S1].",  # a number is part of the answer, not of the marker
+        "90",
+        "Ja, 2 år (S1 och S2).",
+        "Svar: ja [S1].",
+    ],
+)
+def test_a_short_answer_is_still_an_answer(text: str) -> None:
+    """Length is not the test: a legal answer can be one word with its source."""
+    from permitnav.answering.answerer import unusable_answer
+
+    assert not unusable_answer(text)
+
+
+@pytest.mark.db
+def test_a_placeholder_answer_is_asked_for_again_and_never_shown(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    placeholder = json.dumps({"kind": "answered", "answer": "(se ovan)"})
+    replies = iter([placeholder, json.dumps({"kind": "answered", "answer": "Ja [S1]."})])
+    llm = ScriptedLLM(lambda request: next(replies))
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        "lönen", date(2026, 11, 20)
+    )
+    assert answer.kind == "answered" and answer.text == "Ja [S1]."  # a short answer is fine
+    first, second = llm.requests
+    assert second.messages[1] == {"role": "assistant", "content": placeholder}
+    assert "whole answer written out" in second.messages[2]["content"]  # says what was wrong
+    assert "JSON object described" not in second.messages[2]["content"]  # not the JSON re-ask
+
+
+@pytest.mark.db
+def test_a_second_placeholder_answer_is_a_controlled_failure(
+    conn: psycopg.Connection, stored: Retriever
+) -> None:
+    replies = iter(
+        [
+            json.dumps({"kind": "answered", "answer": "(se ovan)"}),
+            json.dumps({"kind": "answered", "answer": "[S1]"}),  # only a source marker
+        ]
+    )
+    llm = ScriptedLLM(lambda request: next(replies))
+    answer = Answerer(conn, stored, llm, AnswerConfig(model="m")).answer(
+        "lönen", date(2026, 11, 20)
+    )
+    assert answer.kind == "failed" and len(llm.requests) == 2  # no third call
+    assert answer.text == "The model's reply could not be read. Please try again."
+    assert "se ovan" not in answer.text and not answer.citations
+    assert answer.problem == "no answer in the answer field"  # for the log, never shown
