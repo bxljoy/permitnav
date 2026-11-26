@@ -1,0 +1,10 @@
+{
+  "about": "A second LLM smoke slice (CI, on merge to main and nightly), only for ordinary work-permit salary questions: two plain wordings in English and Swedish must be answered for the ordinary work permit, not asked back (\"which work permit?\"). The first wording got a question back in five of six answers on the live site before rule 5 of the answer prompt said that \"a work permit\" means the ordinary one. No failure is allowed (a failing question is asked a second time before it counts): without the rule the behaviour flips from hour to hour, and with the earlier prompt the question failed in only one run of three, so this is a sensitive but weak guard, not proof. Chosen 2026-11-26; its flakiness is to be judged over the nightly runs. Run with: permitnav smoke --file evals/golden.kinds.jsonl --smoke evals/smoke.kinds.json --queries evals/queries.kinds.json.",
+  "max_failures": 0,
+  "items": [
+    "kind-salary-plain-966-en",
+    "kind-salary-plain-966-sv",
+    "kind-salary-earn-967-en",
+    "kind-salary-earn-967-sv"
+  ]
+}

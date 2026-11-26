@@ -198,3 +198,5 @@ jobs:
       - run: uv run permitnav import-eval-corpus eval-corpus.txt.gz
       - name: Smoke slice (fails when more than one question fails twice)
         run: uv run permitnav smoke --queries evals/queries.dev.json
+      - name: Smoke slice for ordinary work-permit salary questions (no failure allowed)
+        run: uv run permitnav smoke --file evals/golden.kinds.jsonl --smoke evals/smoke.kinds.json --queries evals/queries.kinds.json

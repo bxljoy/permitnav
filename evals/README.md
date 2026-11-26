@@ -172,6 +172,8 @@ only if it fails again; one failing question is allowed. Run it locally with
 `permitnav smoke` (bge-m3 and translation live) or `permitnav smoke --queries
 evals/queries.dev.json`.
 
+A second slice, `evals/smoke.kinds.json`, asks four ordinary work-permit salary questions from `golden.kinds.jsonl` (two wordings, English and Swedish), replayed from `queries.kinds.json`: they must be answered, not asked back. It allows no failure: the behaviour it guards flips from hour to hour without rule 5 of the answer prompt, and a slice that tolerated one failure passed with the earlier prompt in three runs of three. A sensitive but weak guard; judge its flakiness over the nightly runs before widening it.
+
 When the golden set changes, re-record the queries (`permitnav eval --record-queries
 evals/queries.dev.json` records every checked dev question, including those the retrieval
 eval skips). When the answer prompt or model changes on purpose, check the slice still
