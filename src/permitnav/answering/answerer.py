@@ -174,6 +174,9 @@ class Answer:
     # The answer is in the other language than the question, even after asking again: shown
     # all the same (a right answer in the wrong language still helps), and logged.
     other_language: bool = False
+    # The reply was not valid JSON and its fields were read by name (_recovered_object): an
+    # ordinary answer, counted in logs and eval output so the recovery can be watched.
+    recovered: bool = False
 
 
 # Only the efforts that were measured (DESIGN.md, 2026-11-25). "medium" and "high" would also
@@ -485,6 +488,14 @@ def unusable_answer(text: str) -> bool:
 
 def parse_answer(completion: Completion, context: Context) -> Answer:
     data = _json_object(completion.text)
+    recovered = None
+    # No object, or one without the answer (after a slip in the JSON the first object that
+    # parses is one of the quotes). A reply cut off is never pieced together.
+    if (data is None or "answer" not in data) and (
+        completion.extra.get("finish_reason") != "length"
+    ):
+        recovered = _recovered_object(completion.text)
+        data = recovered or data
     raw_answer = data.get("answer") if data else None
     problem = ""
     if data is None or not isinstance(raw_answer, str) or not raw_answer.strip():
@@ -551,6 +562,7 @@ def parse_answer(completion: Completion, context: Context) -> Answer:
         dropped_markers=dropped,
         sources=context.sources,
         completion=completion,
+        recovered=recovered is not None,
     )
 
 
@@ -597,6 +609,81 @@ def _json_object(text: str) -> dict | None:
                     return value if isinstance(value, dict) else None
         start = text.find("{", start + 1)
     return None
+
+
+_KIND_FIELD = re.compile(r'"kind"\s*:\s*"([a-z_]+)"')
+_ANSWER_FIELD = re.compile(r'"answer"\s*:\s*"')
+# The end of the answer string and the start of the quotes, whatever stands between them: the
+# comma may be missing, or a stray bracket may stand in its place.
+_QUOTES_FIELD = re.compile(r'"[\s\]},]*"quotes"\s*:\s*')
+_OBJECT_END = re.compile(r"\s*}\s*(?:```)?\s*")
+# The start of another field inside what would be the answer: `", "name":`.
+_FIELD_START = re.compile(r'"\s*[,\]}]*\s*"[A-Za-z_]+"\s*:')
+
+
+def _recovered_object(text: str) -> dict | None:
+    """The reply's fields when it is the object asked for with a slip in its JSON, else None.
+
+    About 1 reply in 250 was unreadable twice (2026-11-27), each time for a small slip right
+    after the long "answer" string: no comma before "quotes", or a stray "]" there. A
+    quotation mark inside the answer that was not escaped is handled the same way (not seen
+    in the saved replies; the re-ask names it). The fields are read by their names, and only
+    when the reply is exactly one such object:
+
+    - one "answer" field, at most one "quotes" field after it, and the object's end after that;
+    - "kind" given once outside the answer (or the same each time), one of the known kinds;
+    - the answer is the text between `"answer": "` and the quotes field (or the object's
+      end), as written, and holds no start of another field;
+    - quotes, when given, must be a valid list by themselves.
+
+    Nothing is guessed: any other reply stays unreadable and is asked for again."""
+    starts = list(_ANSWER_FIELD.finditer(text))
+    if len(starts) != 1:
+        return None
+    start = starts[0]
+    ends = list(_QUOTES_FIELD.finditer(text, start.end() - 1))
+    quotes: object = []
+    if len(ends) > 1:
+        return None
+    if ends:
+        answer_end, after = ends[0].start(), ends[0].end()
+        try:
+            quotes, after = json.JSONDecoder(strict=False).raw_decode(text, after)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(quotes, list) or not _OBJECT_END.fullmatch(text, after):
+            return None
+    else:
+        answer_end = text.rfind('"', start.end())
+        if answer_end == -1 or not _OBJECT_END.fullmatch(text, answer_end + 1):
+            return None
+        after = answer_end
+    body = text[start.end() : answer_end]
+    if _FIELD_START.search(body):
+        return None
+    kinds = {m[1] for m in _KIND_FIELD.finditer(text[: start.start()] + text[after:])}
+    if len(kinds) != 1 or not kinds <= set(KINDS):
+        return None
+    try:
+        answer = json.loads(f'"{_escaped_quotes(body)}"', strict=False)
+    except json.JSONDecodeError:
+        return None
+    return {"kind": kinds.pop(), "answer": answer, "quotes": quotes}
+
+
+def _escaped_quotes(body: str) -> str:
+    """The inside of a JSON string with every quotation mark escaped (those already escaped
+    are kept as they are)."""
+    out, escaped = [], False
+    for ch in body:
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == '"':
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
 
 
 def _normalise(text: str) -> str:

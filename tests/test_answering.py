@@ -1221,3 +1221,78 @@ def test_an_answer_that_needed_the_other_re_ask_is_still_flagged(
     )
     assert answer.text == IN_ENGLISH and answer.other_language  # counted, not asked a third time
     assert len(llm.requests) == 2
+
+
+def test_a_reply_with_a_slip_in_its_json_is_read_by_its_fields() -> None:
+    # The shapes of the four replies that were unreadable twice on 2026-11-27.
+    from permitnav.answering.answerer import _recovered_object
+
+    quotes = '[{"source": "S1", "swedish": "högst två år", "translation": ""}]'
+    want = {
+        "kind": "answered",
+        "answer": "Högst två år [S1].\n\nDet avgörs i ditt ärende.",
+        "quotes": [{"source": "S1", "swedish": "högst två år", "translation": ""}],
+    }
+    body = '"answer": "Högst två år [S1].\\n\\nDet avgörs i ditt ärende."'
+    no_comma = f'```json\n{{\n  "kind": "answered",\n  {body}\n  "quotes": {quotes}\n}}\n```'
+    stray_bracket = f'{{"kind":"answered",{body}],"quotes":{quotes}}}'
+    # As JSON neither is the object asked for: the first object that parses is a quote.
+    for slip in (no_comma, stray_bracket):
+        assert "answer" not in (_json_object(slip) or {})
+    assert _recovered_object(no_comma) == want
+    assert _recovered_object(stray_bracket) == want
+    # A quotation mark inside the answer that was not escaped; one that was stays as it is.
+    inner = '{"kind": "not_settled", "answer": "Lagen säger "får" och \\"ska\\" [S1]."}'
+    assert _recovered_object(inner) == {
+        "kind": "not_settled",
+        "answer": 'Lagen säger "får" och "ska" [S1].',
+        "quotes": [],
+    }
+
+
+def test_nothing_is_guessed_when_recovering_a_reply() -> None:
+    from permitnav.answering.answerer import _recovered_object
+
+    assert _recovered_object("The salary must be at least 90 percent.") is None  # no fields
+    assert _recovered_object('{"answer": "Ja [S1]." "quotes": []}') is None  # no kind
+    assert _recovered_object('{"kind": "maybe", "answer": "Ja [S1]." "quotes": []}') is None
+    assert _recovered_object('{"kind": "answered", "answer": "Ja, om') is None  # no end
+    # Quotes that are not a valid list, or that never end: asked for again, so that the
+    # second reply can bring them (review, 2026-11-27).
+    broken = '{"kind": "answered", "answer": "Ja [S1]." "quotes": [{"source": "S1" "swedish"]}'
+    assert _recovered_object(broken) is None
+    assert (
+        _recovered_object('{"kind": "answered", "answer": "Ja." "quotes": [{"source": "S') is None
+    )
+    # Two objects (a draft, then a corrected one), or another field after the answer: the
+    # answer's end is not certain, and JSON must not end up in the text.
+    one = '{"kind": "answered", "answer": "A." "quotes": []}'
+    assert _recovered_object(one) is not None
+    assert _recovered_object(one + "\n\n" + one.replace("A.", "B.")) is None
+    assert _recovered_object('{"kind": "answered", "answer": "Ja "x".", "sure": "yes"}') is None
+    # "kind" said twice with different values (text before the object): not chosen between.
+    assert _recovered_object('The "kind": "follow_up" does not fit.\n' + one) is None
+    assert _recovered_object('Again, "kind": "answered".\n' + one) == {
+        "kind": "answered",
+        "answer": "A.",
+        "quotes": [],
+    }
+
+
+def test_a_recovered_reply_is_an_answer_and_a_cut_off_one_is_not() -> None:
+    from permitnav.answering.answerer import Context
+    from permitnav.llm.port import Completion
+
+    quote = '[{"source": "S1", "swedish": "x", "translation": ""}]'
+    text = f'{{"kind": "answered", "answer": "Ja, det går." "quotes": {quote}}}'
+    read = parse_answer(Completion(text=text, model="m"), Context(sources=[]))
+    assert (read.kind, read.text, read.problem) == ("answered", "Ja, det går.", "")
+    assert read.recovered  # counted in logs and eval output
+    valid = json.dumps({"kind": "answered", "answer": "Ja, det går."})
+    assert not parse_answer(Completion(text=valid, model="m"), Context(sources=[])).recovered
+    cut = Completion(text=text, model="m", extra={"finish_reason": "length"})
+    assert parse_answer(cut, Context(sources=[])).kind == "failed"
+    # A recovered answer still passes the same checks as any other.
+    pointer = '{"kind": "answered", "answer": "(se ovan)" "quotes": []}'
+    failed = parse_answer(Completion(text=pointer, model="m"), Context(sources=[]))
+    assert (failed.kind, failed.problem) == ("failed", "no answer in the answer field")
