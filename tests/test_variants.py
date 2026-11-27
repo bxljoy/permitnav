@@ -106,27 +106,34 @@ def test_a_group_keeps_its_best_cosine_score_when_the_reranker_put_another_first
 def test_the_page_to_show_is_asked_for_when_only_a_sibling_was_found() -> None:
     key = variant_key(EXT + "employees" + PREP)
     assert key is not None
+
+    def preferred(hits: list[Hit], question: str, use_named: bool = True) -> dict:
+        """The ids asked for directly under the group's path (they are also asked for under
+        each category directory: see the last test)."""
+        wanted = preferred_siblings(hits, question, use_named=use_named)
+        return {k: [u for u in ids if "/" not in u[len(EXT) :]] for k, ids in wanted.items()}
+
     found = [hit(EXT + "seasonal-workers" + PREP), hit("sfs:2005:716/6kap/2§"), hit(EXT + "x#y")]
     general = sorted(
         EXT + slug + PREP for slug in ("anstalld", "anstallning", "employees", "employment")
     )
     # No variant named: the general page's section, under each general page name.
-    assert preferred_siblings(found, "What must my employer prepare?") == {key: general}
+    assert preferred(found, "What must my employer prepare?") == {key: general}
     # The question names a variant that was not found: that one, and the general page in case
     # the named page has no such section (collapse_variants prefers the named one).
     artists = [EXT + slug + PREP for slug in ("artist", "artister", "artists")]
     asked = "What must the employer of an artist prepare?"
-    assert preferred_siblings(found, asked) == {key: artists + general}
-    assert preferred_siblings([*found, hit(EXT + "employees" + PREP)], asked) == {key: artists}
+    assert preferred(found, asked) == {key: artists + general}
+    assert preferred([*found, hit(EXT + "employees" + PREP)], asked) == {key: artists}
     # A variant named only to rule it out is not fetched.
     ruled_out = "An ordinary permit, not for an artist. What must my employer prepare?"
     with_general = [hit(EXT + "employees" + PREP), hit(EXT + "x#y")]
-    assert preferred_siblings(with_general, ruled_out, use_named=False) == {}
-    assert preferred_siblings(found, ruled_out, use_named=False) == {key: general}
+    assert preferred(with_general, ruled_out, use_named=False) == {}
+    assert preferred(found, ruled_out, use_named=False) == {key: general}
     # Nothing to look up when the page to show is already there, or nothing has variants.
-    assert preferred_siblings([*found, hit(EXT + "employees" + PREP)], "What to prepare?") == {}
-    assert preferred_siblings(found, "What must a seasonal worker's employer prepare?") == {}
-    assert preferred_siblings([hit("sfs:2005:716/6kap/2§")], "What to prepare?") == {}
+    assert preferred([*found, hit(EXT + "employees" + PREP)], "What to prepare?") == {}
+    assert preferred(found, "What must a seasonal worker's employer prepare?") == {}
+    assert preferred([hit("sfs:2005:716/6kap/2§")], "What to prepare?") == {}
 
 
 def test_a_looked_up_sibling_joins_its_group_and_is_the_one_shown() -> None:
@@ -149,3 +156,100 @@ def test_a_sibling_that_matches_clearly_worse_or_repeats_a_found_text_is_left_ou
     elsewhere = dataclasses.replace(hit("web:en/other/page#section"), text_hash="same text")
     copy = dataclasses.replace(hit(EXT + "employees" + PREP), text_hash="same text")
     assert with_siblings([seasonal, elsewhere], [copy]) == [seasonal, elsewhere]
+
+
+EXTEND_SV = "web:sv/du-vill-forlanga/arbeta/"
+WHEN = "#narkanjagansokaomforlangning"
+
+
+def test_a_group_spans_the_ordinary_and_the_temporary_work_directories() -> None:
+    # Migrationsverket files seasonal work under another directory than employees; the same
+    # section on both took two of the four page slots (the validity question, 2026-11-27).
+    employee = EXTEND_SV + "anstalld-eller-egen-foretagare/anstalld" + WHEN
+    seasonal = EXTEND_SV + "tillfalligt-arbete-i-sverige/sasongsarbetare" + WHEN
+    assert variant_key(employee) == variant_key(seasonal)
+    hits = [hit(seasonal), hit(employee), hit(EXTEND_SV + "anstalld-eller-egen-foretagare/x#y")]
+    out = [h.unit_id for h in collapse_variants(hits, "När måste jag ansöka om förlängning?")]
+    assert out == [employee, EXTEND_SV + "anstalld-eller-egen-foretagare/x#y"]
+    assert [h.unit_id for h in collapse_variants(hits[:2], "Jag är säsongsarbetare")] == [seasonal]
+    # A directory inside the temporary-work one, and the English names.
+    apply = "web:en/you-want-to-apply/work/"
+    nested = "temporary-work-in-sweden/traineeships-internships/"
+    assert variant_key(
+        apply + nested + "traineeships-internships-within-the-context-of-higher-education#x"
+    ) == variant_key(apply + "employee-or-self-employed/employees#x")
+    # The pages for a first application and for an extension stay apart.
+    assert variant_key(employee) != variant_key(
+        "web:sv/du-vill-ansoka/arbeta/anstalld-eller-egen-foretagare/anstalld" + WHEN
+    )
+
+
+def test_the_pages_to_show_are_asked_for_in_every_directory_they_could_be_in() -> None:
+    seasonal = EXTEND_SV + "tillfalligt-arbete-i-sverige/sasongsarbetare" + WHEN
+    employee = EXTEND_SV + "anstalld-eller-egen-foretagare/anstalld" + WHEN
+    wanted = preferred_siblings([hit(seasonal)], "När måste jag ansöka om förlängning?")
+    (ids,) = wanted.values()
+    directories = [
+        "",
+        "anstalld-eller-egen-foretagare/",
+        "tillfalligt-arbete-i-sverige/",
+        "tillfalligt-arbete-i-sverige/praktik/",
+        "anstallning/",
+        "tillfallig-anstallning/",
+    ]
+    assert ids == [
+        EXTEND_SV + directory + slug + WHEN
+        for slug in ("anstalld", "anstallning", "employees", "employment")
+        for directory in directories
+    ]
+    # A named variant in the other directory than the section that was found.
+    wanted = preferred_siblings([hit(employee)], "Jag är säsongsarbetare. När ansöker jag?")
+    (ids,) = wanted.values()
+    assert seasonal in ids and employee not in ids
+    # Pages directly under the group's path (the employers' extension pages) are still asked for.
+    wanted = preferred_siblings([hit(EXT + "seasonal-workers" + PREP)], "What must be prepared?")
+    (ids,) = wanted.values()
+    assert EXT + "employees" + PREP in ids
+
+
+def scored(unit: str, score: float) -> Hit:
+    return dataclasses.replace(hit(unit), score=score)
+
+
+def test_temporary_work_described_without_its_name_keeps_its_own_page() -> None:
+    # "Hired to pick wild berries this summer" names no variant (review, 2026-11-27): the
+    # seasonal page clearly matches better, and its section can be thirty times the employees'.
+    seasonal = EXTEND_SV + "tillfalligt-arbete-i-sverige/sasongsarbetare#krav"
+    employee = EXTEND_SV + "anstalld-eller-egen-foretagare/anstalld#krav"
+    question = "Jag ska plocka bär i sommar. Vilka krav gäller för förlängning?"
+    far = [scored(seasonal, 0.80), scored(employee, 0.80 - SIBLING_MARGIN - 0.01)]
+    assert [h.unit_id for h in collapse_variants(far, question)] == [seasonal]
+    # About as good a match: which of them ranked first is chance, and the general page wins.
+    near = [scored(seasonal, 0.80), scored(employee, 0.80 - SIBLING_MARGIN)]
+    assert [h.unit_id for h in collapse_variants(near, question)] == [employee]
+    # In one directory the general page wins whatever the scores, as before.
+    artist = EXTEND_SV + "anstalld-eller-egen-foretagare/artist#krav"
+    same = [scored(artist, 0.80), scored(employee, 0.60)]
+    assert [h.unit_id for h in collapse_variants(same, question)] == [employee]
+
+
+def test_a_variant_named_only_to_rule_it_out_is_not_the_one_shown() -> None:
+    seasonal = EXTEND_SV + "tillfalligt-arbete-i-sverige/sasongsarbetare" + WHEN
+    employee = EXTEND_SV + "anstalld-eller-egen-foretagare/anstalld" + WHEN
+    question = "Jag har ett vanligt arbetstillstånd, inte säsongsarbete. När ansöker jag?"
+    hits = [hit(employee), hit(seasonal)]
+    assert [h.unit_id for h in collapse_variants(hits, question)] == [seasonal]
+    assert [h.unit_id for h in collapse_variants(hits, question, use_named=False)] == [employee]
+
+
+def test_a_categorys_own_page_is_not_a_variant_of_the_pages_in_it() -> None:
+    above = "web:en/employers/you-want-to-employ/employing-someone-from-outside-the-eu-eea/"
+    assert variant_key(above + "employment#x") is None  # the list of pages
+    assert variant_key(above + "employment/employment#x") == variant_key(
+        above + "temporary-employment/seasonal-workers#x"
+    )
+
+
+def test_swedish_forms_of_a_variants_name_are_recognised() -> None:
+    for text in ("Säsongsarbetaren vill förlänga", "säsongsarbetarna", "Jag är säsongsanställd"):
+        assert named_variants(text) == {"seasonal-workers"}, text
