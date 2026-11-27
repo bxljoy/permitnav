@@ -384,6 +384,8 @@ def create_app(
             raise HTTPException(status_code=502, detail="the model's reply could not be read")
         if answer.other_language:  # shown all the same; counted here (no text, no question)
             log.warning("answer in another language than the question")
+        if answer.recovered:  # an ordinary answer; counted so the recovery can be watched
+            log.warning("answer read from a reply that was not valid JSON")
         return to_response(answer, as_of)
 
     # The chat UI (phase 6), when built: the page, its icon and /assets only, by GET, so

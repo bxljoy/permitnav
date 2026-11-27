@@ -1709,7 +1709,8 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
                             if r.item.id in verdicts
                             else {}
                         ),
-                        # For failed answers: what the model actually sent back.
+                        **({"recovered": True} if r.answer.recovered else {}),
+                        # For failed and recovered answers: what the model actually sent back.
                         **(
                             {
                                 "raw": r.answer.completion.text,
@@ -1723,7 +1724,7 @@ def cmd_eval_answers(args: argparse.Namespace) -> int:
                                     for e in r.answer.earlier
                                 ],
                             }
-                            if r.kind == "failed" and r.answer.completion
+                            if (r.kind == "failed" or r.answer.recovered) and r.answer.completion
                             else {}
                         ),
                     }
