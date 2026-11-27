@@ -26,6 +26,8 @@ import anyio
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from opentelemetry import context as otel_context
+from opentelemetry import trace
+from opentelemetry.trace import Span
 from pydantic import BaseModel, Field, StrictBool, StringConstraints, field_validator
 
 from permitnav import tracing
@@ -225,6 +227,23 @@ def _first_part(error: Exception) -> str:
 WEB_DIR = os.environ.get("PERMITNAV_WEB_DIR", "/app/web")  # the built chat UI (phase 6)
 
 
+class _RequestSpan:
+    """Keeps the HTTP request's own span (FastAPI's, the first row of a trace) where the
+    endpoint can reach it: by the time the endpoint runs, the current span is a child."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            scope.setdefault("state", {})["request_span"] = trace.get_current_span()
+        await self.app(scope, receive, send)
+
+
+def _request_span(http: Request) -> Span | None:
+    return getattr(http.state, "request_span", None)
+
+
 def create_app(
     service: Service | None = None,
     token: str | None = None,
@@ -265,6 +284,7 @@ def create_app(
             tracing.flush()  # send the last traces
 
     app = FastAPI(title="PermitNav", version="0.0.1", lifespan=lifespan)
+    app.add_middleware(_RequestSpan)
     quiet_access_log()
 
     def authorised(authorization: Annotated[str | None, Header()] = None) -> bool:
@@ -337,8 +357,10 @@ def create_app(
         return {"withdrawn": True}
 
     @app.post("/ask")
-    def ask(request: AskRequest, maintainer: bool = Depends(authorised)) -> AskResponse:
-        return _traced_ask(request, maintainer)
+    def ask(
+        request: AskRequest, http: Request, maintainer: bool = Depends(authorised)
+    ) -> AskResponse:
+        return _traced_ask(request, maintainer, top=_request_span(http))
 
     @app.post("/ask/stream")
     async def ask_stream(
@@ -354,6 +376,7 @@ def create_app(
         stages through a memory stream; if the client goes away, it stops at the next stage
         instead of paying for model calls nobody will read."""
         context = otel_context.get_current()  # the request's trace, carried into the worker
+        top = _request_span(http)
         gone = threading.Event()
 
         async def stream() -> AsyncIterator[str]:
@@ -367,7 +390,7 @@ def create_app(
             def work() -> tuple[str, dict[str, Any]] | None:
                 token = otel_context.attach(context)
                 try:
-                    response = _traced_ask(request, maintainer, progress)
+                    response = _traced_ask(request, maintainer, progress, top)
                     return ("answer", response.model_dump(mode="json"))
                 except HTTPException as error:
                     return ("error", {"status": error.status_code, "message": error.detail})
@@ -411,8 +434,14 @@ def create_app(
         return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
 
     def _traced_ask(
-        request: AskRequest, maintainer: bool, progress: Callable[[str], None] | None = None
+        request: AskRequest,
+        maintainer: bool,
+        progress: Callable[[str], None] | None = None,
+        top: Span | None = None,
     ) -> AskResponse:
+        """`top`: the HTTP request's own span, the first row of the trace. It gets the
+        conversation and user as the other spans do, and, for the maintainer's own question
+        only, the question and the answer, so a list of traces shows them."""
         as_of = request.as_of or date.today()
         # The maintainer's own question is recorded with its text; nobody else's is.
         with (
@@ -433,9 +462,24 @@ def create_app(
                 },
             ) as current,
         ):
-            response = _ask(request, as_of, progress, tracing.trace_id(current))
+            if top is not None:
+                tracing.label(top)
+                tracing.text(top, input=request.question)
+            try:
+                response = _ask(request, as_of, progress, tracing.trace_id(current))
+            except HTTPException as error:
+                if top is not None:
+                    # Our own fixed wording (never a provider's message): so a question that
+                    # got no answer does not look like one with an empty answer, also when
+                    # streamed, where the HTTP status stays 200.
+                    tracing.text(top, output={"error": error.status_code, "detail": error.detail})
+                    if top.is_recording():
+                        top.set_attribute("langfuse.observation.level", "ERROR")
+                raise
             response.recorded = maintainer
             current.set_attribute("permitnav.kind", response.kind)
+            if top is not None:
+                tracing.text(top, output=response.text)
             return response
 
     def _ask(

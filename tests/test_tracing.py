@@ -277,3 +277,13 @@ def test_the_trace_id_is_the_one_langfuse_knows_the_trace_by(spans) -> None:
         "GET", attributes={"http.request.method": "GET", "url.path": "/health"}
     ) as dropped:
         assert tracing.trace_id(dropped) is None
+
+
+def test_text_is_not_written_to_a_span_that_has_ended(spans, caplog) -> None:
+    tracing.set_content_mode("full")
+    with tracing.span("ask") as current:
+        pass
+    tracing.text(current, output="late")  # a worker finishing after its request's span
+    (span,) = spans.get_finished_spans()
+    assert "langfuse.observation.output" not in dict(span.attributes or {})
+    assert "ended span" not in caplog.text
