@@ -1704,3 +1704,45 @@ Eighteen nearby questions, none a golden item, four runs each (72 answers), twic
 The last row is the cost: with the schema about two more of 34 answers per run were "not settled" where an answer is expected (33 "not settled" in five runs against 20). The ranges overlap and the other two sets moved the other way in their three runs, so this is likely, not certain. With the fields in the order answer, kind, quotes (the label after the text): 29, 28, 26, in between and not separable in three runs.
 
 **Decision: off.** A second call for one question in eight costs time and a fraction of a cent; "not settled" where the sources answer is the failure a real user reported (the same ground on which the reasoning setting was left alone on 2026-11-25). The setting stays, like the other measured options, to be re-measured with `ANSWER_STRUCTURED=1` when the model changes. A mistyped value stops the start (it must not be read as "off" in a measurement), eval report headers and the generation span say when it is on, and there is no fallback to free text when it is on: a model whose endpoints cannot hold a reply to a schema fails every question. Not tried: why the schema makes the model more cautious, and a prompt change against plain-text first replies (it would need the full evals of an answer-prompt change).
+
+### Two-part questions: what the search loses, and what splitting would recover (research finding, 2026-11-27; not built)
+
+**Status: a documented finding, not a task.** Nothing below is implemented, the retrieval configuration is unchanged, and no model call was added to any request.
+
+**Why it was measured.** The validity question of 2026-11-26 ("how long is a work permit valid, and when must I apply for an extension?") lost its first part's page section to its second part. The fix of 2026-11-27 removed the duplicate that caused that case; the limit under it remains: the parts of a question share the eight sources, four of them page slots.
+
+**Method (search only; no answer model, no judge, no cost).**
+
+- Questions: the 31 Swedish single-question items of the dev, kinds and situational sets that have expected sources, without the identifier items (a named section is looked up by name, whatever else the question says). Swedish, so that no translation call was needed.
+- Pairs: every ordered pair of two different topics, shuffled with a fixed seed, the first 400; 381 of them have at least one part that finds an expected source when asked alone. A pair's question is the two questions one after the other.
+- Measure: for each part, the expected source groups it finds in its eight sources when asked alone, and whether each is still among the sources of the pair. A source a question does not find alone is not counted (it cannot be lost).
+- "Each part searched": the two single-question searches as deployed, interleaved (first of each, second of each, …) and cut at 8, 12 or 16.
+
+**Result.**
+
+| how the pair is searched | pairs that lose a source | sources lost | law sections lost | page sections lost |
+|---|---|---|---|---|
+| joined question, 8 sources (as deployed) | 236 of 381 (62%) | 39% | 197 of 465 | 81 of 246 |
+| joined question, 12 sources (first 150 pairs) | 61 of 144 (42%) | 26% | 49 of 174 | 20 of 93 |
+| each part searched, merged to 8 | 120 of 381 (31%) | 17% | 77 of 465 | 47 of 246 |
+| each part searched, merged to 12 | 25 of 381 (7%) | 4% | 0 of 465 | 25 of 246 |
+| each part searched, all 16 | 0 | 0% | 0 | 0 |
+
+- More room for the joined question helps little: the joined question ranks differently, it does not only run out of slots.
+- Split and merge to 12 is the promising point: 4% of the sources lost and no law section.
+- The first part loses something in 41% of pairs, the second in 46%: neither is favoured.
+
+**Limits.**
+
+- **An upper bound on the loss.** The pairs join unrelated questions. The parts of a real two-part question are usually about one situation and share sources.
+- **How often people ask two-part questions is unknown.** The site keeps no question text. One real case is known.
+- **Swedish only**, and only sources the single question already finds: it says nothing about sources that are missed either way (24 of 52 expected groups are not found by their own question).
+- **Source coverage is not answer quality.** This counts whether expected sources are among those given to the answer model. It does not show that answers get better: twelve sources from two searches are about half as much text again to read, the added ones can distract the model or pull in a neighbouring rule (as the second search did on 2026-11-24, which found more law and did not improve answers), and nothing here was answered or judged.
+
+**Decision (the maintainer's, 2026-11-27): record and wait.** No query splitting, no model call added to every question, no new golden questions, no paid evaluation, retrieval unchanged.
+
+**If it is taken up later.**
+
+- Split only when needed: a condition on the question, or as part of a query-analysis step that already runs (intake runs today only for follow-on questions and questions that rule something out), not a further model call on every request.
+- Measure answers end to end on a dedicated set of two-part questions reviewed by the maintainer, with the usual repeated runs and a check that single questions are not harmed, before deciding on the number of sources.
+- Revisit when real multi-part questions are seen, or when that evaluation set is ready.
