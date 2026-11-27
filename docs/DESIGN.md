@@ -1685,3 +1685,22 @@ Eighteen nearby questions, none a golden item, four runs each (72 answers), twic
 **From the code review (3 important, 2 smaller, all taken):** the first version could put JSON into the answer text (two objects in one reply, or another field after the answer), accepted an answer whose quotes list was broken where a second call would have brought the quotes, and took the first "kind" in the reply even from text before the object.
 
 **Checked.** The four saved replies are read as their kind with their full text and quotes; the one first reply that had the same slip is read too, which saves its second call. Tests use the same shapes.
+
+### Second calls, and holding the reply to a schema: measured, off (2026-11-27)
+
+**How often the answer needs a second call.** Every single golden question three times (dev, kinds, situational: 258 answers), recording each call: **30 answers (12%) took a second call.** In 25 the first reply was the answer as plain text with no JSON, often trailing off into blank lines, stray tags or a note to itself ("the quotes block should appear in the JSON. Final output below."); in 5 it was cut off by the length limit. None ended in an error and 2 were read by the recovery of the same day. So the second call always rescued the answer, at twice the cost and several seconds more for one question in eight.
+
+**Tried: structured output.** The model's endpoint accepts a JSON Schema for the reply (`response_format`, OpenRouter; `structured_outputs` is among the model's supported parameters). `CompletionRequest.response_schema`, sent with `provider.require_parameters` so that no endpoint ignoring the schema is used; `ANSWER_SCHEMA` is the object the prompt describes; `AnswerConfig.structured` / `ANSWER_STRUCTURED`.
+
+| | free text (as deployed) | schema |
+|---|---|---|
+| answers with a second call, of 258 | 30 | 0 |
+| unreadable or failed | 0 | 0 |
+| cost of the 258 answers | $0.57 | $0.49 |
+| judged correct, dev, two runs each | 88%, 85% | 85%, 88% |
+| right kind, all three sets, three runs | 213/258 | 212/258 |
+| dev questions that expect an answer: answered, of 34 per run | 28–31 over 11 runs (mean 28.9) | 25, 27, 30, 26, 27 (mean 27.0) |
+
+The last row is the cost: with the schema about two more of 34 answers per run were "not settled" where an answer is expected (33 "not settled" in five runs against 20). The ranges overlap and the other two sets moved the other way in their three runs, so this is likely, not certain. With the fields in the order answer, kind, quotes (the label after the text): 29, 28, 26, in between and not separable in three runs.
+
+**Decision: off.** A second call for one question in eight costs time and a fraction of a cent; "not settled" where the sources answer is the failure a real user reported (the same ground on which the reasoning setting was left alone on 2026-11-25). The setting stays, like the other measured options, to be re-measured with `ANSWER_STRUCTURED=1` when the model changes. A mistyped value stops the start (it must not be read as "off" in a measurement), eval report headers and the generation span say when it is on, and there is no fallback to free text when it is on: a model whose endpoints cannot hold a reply to a schema fails every question. Not tried: why the schema makes the model more cautious, and a prompt change against plain-text first replies (it would need the full evals of an answer-prompt change).

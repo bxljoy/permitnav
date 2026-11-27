@@ -20,6 +20,10 @@ class CompletionRequest:
     # thinking they may do before answering; it counts against max_tokens. None sends nothing
     # (the model's default); "none" asks for no thinking.
     reasoning_effort: str | None = None
+    # A JSON Schema the reply must follow (structured output): the provider then returns one
+    # JSON object of that shape and nothing else. None: free text. Only for models whose
+    # endpoint supports it; others reject the request.
+    response_schema: dict | None = None
     # No sampling parameters: current Claude models reject temperature/top_p.
 
 

@@ -294,6 +294,24 @@ def test_openrouter_request_shape_and_cost(monkeypatch) -> None:
     assert body["messages"][0] == {"role": "system", "content": "sys"}
     assert "temperature" not in body and "top_p" not in body  # current Claude models reject them
     assert "reasoning" not in body  # only sent when a request asks for it
+    assert "response_format" not in body and "provider" not in body  # only with a schema
+
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}
+    OpenRouterLLM("key").complete(
+        CompletionRequest(
+            model="anthropic/claude-haiku-5.5",
+            system="sys",
+            messages=[{"role": "user", "content": "q"}],
+            response_schema=schema,
+        )
+    )
+    assert sent[-1]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "reply", "strict": True, "schema": schema},
+    }
+    # Never an endpoint that would ignore the schema and send free text.
+    assert sent[-1]["provider"] == {"require_parameters": True}
+    sent.pop()
 
     OpenRouterLLM("key").complete(
         CompletionRequest(
@@ -960,6 +978,37 @@ def test_the_answer_models_reasoning_effort_comes_from_the_environment(
     monkeypatch.setenv("ANSWER_REASONING_EFFORT", "fast")
     with pytest.raises(ValueError, match="ANSWER_REASONING_EFFORT"):
         AnswerConfig(model="m")
+
+
+@pytest.mark.db
+def test_the_reply_is_held_to_a_schema_only_when_configured(
+    conn: psycopg.Connection, stored: Retriever, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from permitnav.answering.answerer import ANSWER_SCHEMA, KINDS
+
+    reply = json.dumps({"kind": "answered", "answer": "At least 90 percent [S1].", "quotes": []})
+
+    def schema_sent(config: AnswerConfig) -> dict | None:
+        llm = ScriptedLLM(reply)
+        Answerer(conn, stored, llm, config).answer(
+            "lönen medianlönen procent lönekravet", as_of=date(2026, 11, 20)
+        )
+        return llm.requests[-1].response_schema
+
+    # Off by default (measured 2026-11-27: DESIGN.md).
+    assert schema_sent(AnswerConfig(model="m", k=3)) is None
+    assert schema_sent(AnswerConfig(model="m", k=3, structured=True)) is ANSWER_SCHEMA
+    monkeypatch.setenv("ANSWER_STRUCTURED", " True ")
+    assert schema_sent(AnswerConfig(model="m", k=3)) is ANSWER_SCHEMA
+    monkeypatch.setenv("ANSWER_STRUCTURED", "0")
+    assert schema_sent(AnswerConfig(model="m", k=3)) is None
+    # A mistyped value is an error, not "off": a measurement must not run as free text unnoticed.
+    monkeypatch.setenv("ANSWER_STRUCTURED", "yes")
+    with pytest.raises(ValueError, match="ANSWER_STRUCTURED"):
+        AnswerConfig(model="m")
+    # The schema is the object the prompt describes: the same kinds, every field required.
+    assert ANSWER_SCHEMA["properties"]["kind"]["enum"] == list(KINDS)
+    assert ANSWER_SCHEMA["required"] == ["kind", "answer", "quotes"]
 
 
 def test_the_prompt_answers_for_the_ordinary_work_permit_and_keeps_its_limits() -> None:

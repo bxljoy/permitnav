@@ -188,7 +188,7 @@ class AnswerService:
 
 def build_service() -> AnswerService:
     """The production wiring, from the environment (see .env.example). Loads bge-m3."""
-    from permitnav.answering.answerer import answer_reasoning_effort
+    from permitnav.answering.answerer import answer_reasoning_effort, answer_structured
     from permitnav.cli import _reranker
     from permitnav.embedding.bge_m3 import BgeM3Embedder
     from permitnav.llm.openrouter import OpenRouterLLM
@@ -198,6 +198,7 @@ def build_service() -> AnswerService:
         raise RuntimeError("ANSWER_MODEL is not set; see .env.example")
     config = default_retrieval_config()
     answer_reasoning_effort()  # a mistyped setting stops the start, not every question
+    answer_structured()
     return AnswerService(
         model=model,
         embedder=BgeM3Embedder(),

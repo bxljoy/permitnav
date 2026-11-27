@@ -75,6 +75,8 @@ def _print_provenance(
         )
     if answer_model and answer_effort:
         answer_model = f"{answer_model} (reasoning effort {answer_effort})"
+    if answer_model and _answer_structured():
+        answer_model = f"{answer_model} (reply held to a schema)"
     models = {
         "answer": answer_model,
         "judge": judge,
@@ -88,10 +90,21 @@ def _print_provenance(
 
 def _answer_effort() -> str | None:
     """ANSWER_REASONING_EFFORT, or a one-line exit when it is mistyped (before any model loads)."""
-    from permitnav.answering.answerer import answer_reasoning_effort
+    from permitnav.answering.answerer import answer_reasoning_effort, answer_structured
 
     try:
+        answer_structured()  # checked with it: both settings change the answers
         return answer_reasoning_effort()
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+
+
+def _answer_structured() -> bool:
+    """ANSWER_STRUCTURED, or a one-line exit when it is mistyped."""
+    from permitnav.answering.answerer import answer_structured
+
+    try:
+        return answer_structured()
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
