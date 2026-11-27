@@ -490,6 +490,32 @@ def test_the_prompt_declines_any_topic_outside_the_service() -> None:
     assert "asylum" in rule.lower() and "any other topic" in rule.lower()
 
 
+def test_the_prompt_declines_a_person_with_a_removal_decision_and_says_who_is_still_answered() -> (
+    None
+):
+    from permitnav.answering.answerer import load_prompt
+
+    rule = next(line for line in load_prompt().splitlines() if "**Out of scope.**" in line)
+    # Declined (2026-11-27): the ordinary requirements would mislead a person in that position.
+    assert "a decision to deport, expel or remove them that is final or otherwise in force" in rule
+    assert "the one asking, or the one they ask about" in rule
+    assert "refused asylum and holds no permit today" in rule
+    # Still answered: without these a refused application or an extension would be declined.
+    assert "A person who holds a permit today is answered for that permit" in rule
+    assert "can still be appealed, or is under appeal, is in scope" in rule
+    assert "extending a work permit before it runs out is answered" in rule
+
+
+def test_intake_always_carries_a_removal_decision_into_a_follow_on_question() -> None:
+    from importlib import resources
+
+    text = (resources.files("permitnav.prompts") / "intake.md").read_text(encoding="utf-8")
+    assert (
+        "a decision to deport, expel or remove the person, or that they were refused asylum" in text
+    )
+    assert "is always one of the facts that matter: keep it in the rewritten question" in text
+
+
 @pytest.mark.db
 def test_the_behaviour_eval_compares_answer_kinds_with_the_golden_flags(
     conn: psycopg.Connection, stored: Retriever
