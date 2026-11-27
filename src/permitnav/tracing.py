@@ -84,6 +84,12 @@ def request(
         _request_full.reset(was_full)
 
 
+def label(current: Span) -> None:
+    """Put the request's conversation and user on a span that was started before `request`
+    (the HTTP request's own span)."""
+    set_attributes(current, **(_request_attributes.get() or {}))
+
+
 def trace_id(current: Span | None = None) -> str | None:
     """The id Langfuse knows the current trace by (32 hex characters), or None when the
     trace is not recorded (no exporter, or dropped by the sampler)."""
@@ -124,8 +130,6 @@ def keep_trace(name: str, attributes: Mapping[str, Any] | None = None) -> bool:
 
 def _questions_only():
     from opentelemetry.sdk.trace.sampling import (
-        ALWAYS_OFF,
-        ALWAYS_ON,
         Decision,
         ParentBased,
         Sampler,
@@ -142,9 +146,11 @@ def _questions_only():
         def get_description(self) -> str:
             return "RootByName(questions only)"
 
-    # a dropped root drops its children too (fastapi.endpoint, fastapi.serialization, …)
-    return ParentBased(root=RootByName(), remote_parent_sampled=ALWAYS_ON,
-                       remote_parent_not_sampled=ALWAYS_OFF)  # fmt: skip
+    # a dropped root drops its children too (fastapi.endpoint, fastapi.serialization, …).
+    # A caller's `traceparent` header decides nothing: a request that names a parent trace
+    # is judged as any other, or a health check or a scanner could ask to be traced.
+    return ParentBased(root=RootByName(), remote_parent_sampled=RootByName(),
+                       remote_parent_not_sampled=RootByName())  # fmt: skip
 
 
 def configure(service: str, content: str = "metadata") -> bool:
@@ -264,8 +270,9 @@ def set_attributes(current: Span, **attributes: Any) -> None:
 
 
 def text(current: Span, *, input: Any = None, output: Any = None) -> None:
-    """Record input and output texts, in full-content mode only."""
-    if content_mode() != "full":
+    """Record input and output texts, in full-content mode only (and only on a span that
+    is still open: a request's own span can end before a worker thread is done with it)."""
+    if content_mode() != "full" or not current.is_recording():
         return
     if input is not None:
         current.set_attribute("langfuse.observation.input", json.dumps(input, ensure_ascii=False))

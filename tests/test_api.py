@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -708,3 +709,61 @@ def test_shutting_down_lets_the_service_finish_its_online_evals() -> None:
     with client(service):
         assert not service.closed
     assert service.closed
+
+
+def test_the_first_row_of_the_maintainers_trace_shows_the_question_and_answer(spans) -> None:
+    """A list of traces shows the first span's input and output: the HTTP request's."""
+    with both() as c:
+        mine = {"question": "Min egen fråga?", "conversation": CONVERSATION}
+        c.post("/ask", json=mine, headers=MINE)
+        with c.stream("POST", "/ask/stream", json=mine, headers=MINE) as streamed:
+            streamed.read()
+        theirs = {"question": "Någon annans fråga?", "conversation": CONVERSATION}
+        c.post("/ask", json=theirs, headers=AUTH)
+        with c.stream("POST", "/ask/stream", json=theirs, headers=AUTH) as streamed:
+            streamed.read()
+    tops = [dict(s.attributes or {}) for s in spans.get_finished_spans() if s.parent is None]
+    assert len(tops) == 4
+    by_path = sorted(tops, key=lambda a: "langfuse.user.id" not in a)
+    for top in by_path[:2]:  # the maintainer's: plain and streamed
+        assert json.loads(str(top["langfuse.observation.input"])) == "Min egen fråga?"
+        assert json.loads(str(top["langfuse.observation.output"])) == "Svar [S1]."
+        assert top["langfuse.user.id"] == "maintainer"
+        assert top["langfuse.session.id"] == CONVERSATION
+    for top in by_path[2:]:  # anyone else's: the conversation, never a text
+        assert "langfuse.observation.input" not in top
+        assert "langfuse.observation.output" not in top
+        assert "langfuse.user.id" not in top
+        assert top["langfuse.session.id"] == CONVERSATION
+
+
+def test_a_maintainers_question_that_fails_shows_as_failed_on_the_first_row(spans) -> None:
+    from permitnav.llm.port import LLMError
+
+    service = FakeService(LLMError("OpenRouter HTTP 402: account acct_123 has no credit"))
+    with both(service) as c:
+        ask = {"question": "Min egen fråga?"}
+        assert c.post("/ask", json=ask, headers=MINE).status_code == 502
+        with c.stream("POST", "/ask/stream", json=ask, headers=MINE) as streamed:
+            assert streamed.status_code == 200 and "event: error" in streamed.read().decode()
+        assert c.post("/ask", json=ask, headers=AUTH).status_code == 502
+    tops = [dict(s.attributes or {}) for s in spans.get_finished_spans() if s.parent is None]
+    mine = [t for t in tops if "langfuse.observation.input" in t]
+    assert len(tops) == 3 and len(mine) == 2  # nothing on the other person's
+    for top in mine:
+        failed = {"error": 502, "detail": "model call failed"}
+        assert json.loads(str(top["langfuse.observation.output"])) == failed
+        assert top["langfuse.observation.level"] == "ERROR"
+    assert "acct_123" not in str(tops)  # the provider's message is never recorded
+
+
+def test_a_caller_cannot_choose_whether_or_under_which_parent_it_is_traced(spans) -> None:
+    parent = {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}
+    with client() as c:
+        assert c.get("/health", headers=parent).status_code == 200
+        assert c.get("/auth-check", headers={**AUTH, **parent}).status_code == 200
+    assert spans.get_finished_spans() == ()  # asking to be traced does not make it so
+    unsampled = {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00"}
+    with client() as c:
+        c.post("/ask", json={"question": "Lönekrav?"}, headers={**AUTH, **unsampled})
+    assert "ask" in [s.name for s in spans.get_finished_spans()]  # nor can it opt out

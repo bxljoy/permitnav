@@ -26,7 +26,13 @@
 		respond "{err.status_code} {err.status_text}" {err.status_code}
 	}
 	encode zstd gzip
-	reverse_proxy api:8000
+	reverse_proxy api:8000 {
+		# A caller must not choose the id its question is traced under, or join another
+		# trace: tracing starts at the API.
+		header_up -traceparent
+		header_up -tracestate
+		header_up -baggage
+	}
 	request_body {
 		# A question is at most 2,000 characters; with earlier questions (the UI sends the last
 		# 6) and JSON-escaped Swedish letters, a request stays well under this.
