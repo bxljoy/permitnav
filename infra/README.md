@@ -31,6 +31,11 @@ Then:
    ANSWER_MODEL=anthropic/claude-haiku-5.5
    LANGFUSE_PUBLIC_KEY=...
    LANGFUSE_SECRET_KEY=...
+   # optional (online evals, see below):
+   MAINTAINER_TOKEN=<another random token, 32 characters or more, for the maintainer only>
+   JUDGE_MODEL=google/gemini-3.5-flash-lite
+   JUDGE_REASONING_EFFORT=low
+   LIVE_JUDGE_SHARE=1
    ```
 3. **Start:** `sudo google_metadata_script_runner startup` (or reboot) builds and starts the
    containers.
@@ -96,6 +101,19 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
   (alert "PermitNav reached its daily spend cap", up to a day later; a day stays unreported
   until its error is logged). The cap does not cover a leaked OpenRouter key:
   that is what the credit limit on the server's key at OpenRouter is for.
+- **Online evals:** every question is counted per day (`sudo $C exec api permitnav stats`:
+  answer kinds, second model calls, the live judge's verdicts, ratings; counts only) and its
+  trace in Langfuse gets scores (`kind`, `second_call`, `faithful`, `helpful`). Two settings
+  in `.env`, both off unless set, applied with `sudo $C up -d`:
+  - `MAINTAINER_TOKEN`: sign in to the site with this token instead of `API_TOKEN` and your
+    questions are traced with their text (Langfuse: user "maintainer"). Nobody else's are.
+    Keep it to yourself: whoever holds it has their questions recorded. Before other people
+    get access, remember that these traces are your own data only as long as only you use it.
+  - `LIVE_JUDGE_SHARE` (0 to 1) with `JUDGE_MODEL`: the share of answers the eval judge checks
+    against their sources after they are sent. About $0.003 per judged answer (as much again
+    as the answer), counted towards the daily spend cap. It sends the question, answer and
+    sources to the judge's provider: fine for your own questions, to be decided again before
+    others use the site.
 - **If the access token or a key leaked:** put a new random `API_TOKEN` in `.env` and run
   `sudo $C up -d` (everyone signs in again with the new token). For the OpenRouter key:
   delete the key at OpenRouter, create a new server-only key with a credit limit, put it in

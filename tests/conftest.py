@@ -91,3 +91,6 @@ def _no_answer_settings_from_the_shell(monkeypatch: pytest.MonkeyPatch) -> None:
     on the shell's .env."""
     monkeypatch.delenv("ANSWER_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("ANSWER_STRUCTURED", raising=False)
+    # Nor may the developer's own tokens or live-judge setting reach a test's app.
+    monkeypatch.delenv("MAINTAINER_TOKEN", raising=False)
+    monkeypatch.delenv("LIVE_JUDGE_SHARE", raising=False)

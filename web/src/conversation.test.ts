@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { answered, historyFor, loadToken, loadTurns, MAX_HISTORY, saveToken, saveTurns, type Turn } from "./conversation";
+import { answered, conversationId, historyFor, loadToken, loadTurns, MAX_HISTORY, saveToken, saveTurns, type Turn } from "./conversation";
 
 function fakeStorage(): Storage {
   const data = new Map<string, string>();
@@ -67,5 +67,31 @@ describe("conversation memory", () => {
     };
     expect(loadTurns()).toEqual([]);
     expect(() => saveTurns([user("x")])).not.toThrow();
+  });
+
+  it("keeps one random id per conversation and makes a new one after a delete", () => {
+    (globalThis as { window?: unknown }).window = { localStorage: fakeStorage() };
+    const first = conversationId();
+    expect(first).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    saveTurns([user("q"), { role: "assistant", response: { text: "a", citations: [] } as never, at: "t" }]);
+    expect(conversationId()).toBe(first); // the same conversation, also after a reload
+    saveTurns([]); // deleted, or signed out
+    expect(conversationId()).not.toBe(first);
+  });
+
+  it("does not bring a deleted conversation's id back from another tab's memory", () => {
+    const shared = fakeStorage();
+    (globalThis as { window?: unknown }).window = { localStorage: shared };
+    const first = conversationId(); // this tab now also remembers it
+    shared.removeItem("permitnav.conversation.id"); // another tab deleted the conversation
+    expect(conversationId()).not.toBe(first);
+  });
+
+  it("still gives a conversation an id when storage is blocked", () => {
+    (globalThis as { window?: unknown }).window = { get localStorage(): Storage { throw new Error("blocked"); } };
+    const first = conversationId();
+    expect(conversationId()).toBe(first);
+    saveTurns([]);
+    expect(conversationId()).not.toBe(first);
   });
 });

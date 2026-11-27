@@ -4,6 +4,10 @@ Run with `uvicorn permitnav.api:app` (the `api` extra). Every request except `/h
 needs `Authorization: Bearer <API_TOKEN>`: until the public beta (phase 7) the service is for
 its author only, so other people's questions never reach the development LLM route (D15).
 Without API_TOKEN the app refuses to start, unless PERMITNAV_ALLOW_NO_AUTH=1 (local only).
+
+MAINTAINER_TOKEN, when set, is a second token that is accepted everywhere API_TOKEN is. A
+question sent with it is the maintainer's own: its trace records the texts and is labelled
+"maintainer" (permitnav.tracing). Every other question is traced as metadata only.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ import anyio
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from opentelemetry import context as otel_context
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import BaseModel, Field, StrictBool, StringConstraints, field_validator
 
 from permitnav import tracing
 from permitnav.agent.intake import MAX_HISTORY_ACCEPTED, MAX_QUESTION_CHARS
@@ -46,6 +50,7 @@ CREDITS = {
 log = logging.getLogger("permitnav.api")
 
 
+MIN_MAINTAINER_TOKEN_CHARS = 32
 SPEND_CAP_MESSAGE = "PermitNav has reached its limit for today. Try again tomorrow."
 
 
@@ -58,6 +63,10 @@ class Service(Protocol):
         progress: Callable[[str], None] | None = None,
     ) -> Answer: ...
     def source(self, version_id: int) -> dict[str, str] | None: ...
+    def record(
+        self, answer: Answer, question: str, history: list[str], trace_id: str | None
+    ) -> None: ...
+    def rate(self, trace_id: str | None, helpful: bool) -> bool: ...
     def save_feedback(self, case: FeedbackIn) -> None: ...
     def withdraw_feedback(self, code: str) -> bool: ...
     def healthy(self) -> bool: ...
@@ -68,6 +77,12 @@ Question = Annotated[
 ]
 
 
+ConversationId = Annotated[
+    str, StringConstraints(min_length=16, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+]
+TraceId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+
+
 class AskRequest(BaseModel):
     question: Question
     as_of: date | None = None  # the date the question is asked about (D8); default today
@@ -75,6 +90,17 @@ class AskRequest(BaseModel):
     # client keeps them; the server uses the last few for this answer only, never stores or
     # traces their text. A whole conversation may be sent; the list is only bounded.
     history: Annotated[list[Question], Field(max_length=MAX_HISTORY_ACCEPTED)] = []
+    # A random id the browser makes for a conversation and forgets when it is deleted. It
+    # groups the conversation's traces (Langfuse's Sessions); it is tied to no person, is
+    # never stored by the server, and a client may leave it out.
+    conversation: ConversationId | None = None
+
+
+class RatingIn(BaseModel):
+    """A click under an answer. No text: the trace it belongs to and yes or no."""
+
+    helpful: StrictBool
+    trace_id: TraceId | None = None  # absent when the answer was not traced
 
 
 class CitationOut(BaseModel):
@@ -155,6 +181,10 @@ class AskResponse(BaseModel):
     # and what the user has said about their situation, so they can see and correct it.
     understood_as: str | None = None
     situation: dict[str, str] = {}
+    # The answer's trace, when it was traced: what a rating is sent back with.
+    trace_id: str | None = None
+    # This question was traced with its text (the maintainer's own): the page says so.
+    recorded: bool = False
 
 
 def to_response(answer: Answer, as_of: date) -> AskResponse:
@@ -196,11 +226,14 @@ WEB_DIR = os.environ.get("PERMITNAV_WEB_DIR", "/app/web")  # the built chat UI (
 
 
 def create_app(
-    service: Service | None = None, token: str | None = None, web_dir: str | None = WEB_DIR
+    service: Service | None = None,
+    token: str | None = None,
+    web_dir: str | None = WEB_DIR,
+    maintainer_token: str | None = None,
 ) -> FastAPI:
     """The app. Tests pass a fake service and a token; production builds both from the
     environment at startup (loading bge-m3 takes a few seconds)."""
-    state: dict[str, Any] = {"service": service, "token": token}
+    state: dict[str, Any] = {"service": service, "token": token, "maintainer": maintainer_token}
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -208,26 +241,47 @@ def create_app(
             state["token"] = os.environ.get("API_TOKEN", "").strip() or None
         if state["token"] is None and os.environ.get("PERMITNAV_ALLOW_NO_AUTH") != "1":
             raise RuntimeError("API_TOKEN is not set (PERMITNAV_ALLOW_NO_AUTH=1 for local use)")
+        if state["maintainer"] is None:
+            state["maintainer"] = os.environ.get("MAINTAINER_TOKEN", "").strip() or None
+        if state["maintainer"] is not None:
+            # It decides whose text is recorded, so it must be a secret of its own.
+            if state["maintainer"] == state["token"]:
+                raise RuntimeError("MAINTAINER_TOKEN must differ from API_TOKEN")
+            if len(state["maintainer"]) < MIN_MAINTAINER_TOKEN_CHARS:
+                raise RuntimeError(
+                    f"MAINTAINER_TOKEN must be at least {MIN_MAINTAINER_TOKEN_CHARS} characters"
+                )
         tracing.configure("permitnav-api", content="metadata")  # always: users' questions
         if state["service"] is None:
             from permitnav.service import build_service
 
             state["service"] = build_service()
         yield
-        tracing.flush()  # send the last traces
+        try:
+            close = getattr(state["service"], "close", None)
+            if close is not None:
+                close()  # the last counts, verdicts and scores, before the traces (bounded)
+        finally:
+            tracing.flush()  # send the last traces
 
     app = FastAPI(title="PermitNav", version="0.0.1", lifespan=lifespan)
     quiet_access_log()
 
-    def authorised(authorization: Annotated[str | None, Header()] = None) -> None:
-        expected = state["token"]
-        if expected is None:
-            return  # local use without a token, explicitly allowed at startup
+    def authorised(authorization: Annotated[str | None, Header()] = None) -> bool:
+        """Lets the request through, and says whether it is the maintainer's own (sent with
+        MAINTAINER_TOKEN). Without tokens (local use, allowed at startup) nobody is."""
         scheme, _, given = (authorization or "").strip().partition(" ")
-        if scheme.lower() != "bearer" or not hmac.compare_digest(
-            given.strip().encode(), expected.encode()
-        ):
+        given = given.strip() if scheme.lower() == "bearer" else ""
+        maintainer = state["maintainer"]
+        # Both comparisons always run, so the time taken does not say which token was near.
+        is_maintainer = maintainer is not None and hmac.compare_digest(
+            given.encode(), maintainer.encode()
+        )
+        expected = state["token"]
+        is_user = expected is not None and hmac.compare_digest(given.encode(), expected.encode())
+        if expected is not None and not (is_user or is_maintainer):
             raise HTTPException(status_code=401, detail="missing or wrong token")
+        return is_maintainer
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -235,10 +289,24 @@ def create_app(
             raise HTTPException(status_code=503, detail="database unavailable")
         return {"status": "ok"}
 
-    @app.get("/auth-check", dependencies=[Depends(authorised)])
-    def auth_check() -> dict[str, bool]:
-        """Lets a client check a token without asking (and paying for) a question."""
-        return {"ok": True}
+    @app.get("/auth-check")
+    def auth_check(maintainer: bool = Depends(authorised)) -> dict[str, bool]:
+        """Lets a client check a token without asking (and paying for) a question.
+        `recorded`: questions sent with this token are traced with their text, which the
+        page says where the questions are typed."""
+        return {"ok": True, "recorded": maintainer}
+
+    @app.post("/rating", dependencies=[Depends(authorised)])
+    def rating(given: RatingIn) -> dict[str, bool]:
+        """A person's click under an answer: helpful or not. Counted per day, and put on
+        the answer's trace as a score. No text is sent or stored. `saved` is false when
+        the click could not be counted: the page then keeps its buttons."""
+        try:
+            saved = bool(state["service"].rate(given.trace_id, given.helpful))
+        except Exception as error:  # a rating is not worth an error page
+            log.error("rating not recorded: %s", type(error).__name__)
+            saved = False
+        return {"saved": saved}
 
     @app.post("/source", dependencies=[Depends(authorised)])
     def source(request: SourceRequest) -> SourceOut:
@@ -268,12 +336,14 @@ def create_app(
             raise HTTPException(status_code=404, detail="no such submission")
         return {"withdrawn": True}
 
-    @app.post("/ask", dependencies=[Depends(authorised)])
-    def ask(request: AskRequest) -> AskResponse:
-        return _traced_ask(request)
+    @app.post("/ask")
+    def ask(request: AskRequest, maintainer: bool = Depends(authorised)) -> AskResponse:
+        return _traced_ask(request, maintainer)
 
-    @app.post("/ask/stream", dependencies=[Depends(authorised)])
-    async def ask_stream(request: AskRequest, http: Request) -> StreamingResponse:
+    @app.post("/ask/stream")
+    async def ask_stream(
+        request: AskRequest, http: Request, maintainer: bool = Depends(authorised)
+    ) -> StreamingResponse:
         """The same answer as /ask, as server-sent events: `stage` events while it is being
         prepared ("understanding", "searching", "checking", "writing"), then one `answer`
         event with the AskResponse, or one `error` event with a message and the status /ask
@@ -297,7 +367,7 @@ def create_app(
             def work() -> tuple[str, dict[str, Any]] | None:
                 token = otel_context.attach(context)
                 try:
-                    response = _traced_ask(request, progress)
+                    response = _traced_ask(request, maintainer, progress)
                     return ("answer", response.model_dump(mode="json"))
                 except HTTPException as error:
                     return ("error", {"status": error.status_code, "message": error.detail})
@@ -341,35 +411,44 @@ def create_app(
         return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
 
     def _traced_ask(
-        request: AskRequest, progress: Callable[[str], None] | None = None
+        request: AskRequest, maintainer: bool, progress: Callable[[str], None] | None = None
     ) -> AskResponse:
         as_of = request.as_of or date.today()
-        with tracing.span(
-            "ask",
-            "span",
-            **{
-                "langfuse.trace.name": "ask",
-                "langfuse.environment": os.environ.get("PERMITNAV_ENV", "development"),
-                "permitnav.question_chars": len(request.question),
-                "permitnav.history_turns": len(request.history),  # how many, never what
-                "permitnav.streamed": progress is not None,
-            },
-        ) as current:
-            response = _ask(request.question, as_of, request.history, progress)
+        # The maintainer's own question is recorded with its text; nobody else's is.
+        with (
+            tracing.request(
+                full=maintainer,
+                session=request.conversation,
+                user="maintainer" if maintainer else None,
+            ),
+            tracing.span(
+                "ask",
+                "span",
+                **{
+                    "langfuse.trace.name": "ask",
+                    "langfuse.environment": os.environ.get("PERMITNAV_ENV", "development"),
+                    "permitnav.question_chars": len(request.question),
+                    "permitnav.history_turns": len(request.history),  # how many, never what
+                    "permitnav.streamed": progress is not None,
+                },
+            ) as current,
+        ):
+            response = _ask(request, as_of, progress, tracing.trace_id(current))
+            response.recorded = maintainer
             current.set_attribute("permitnav.kind", response.kind)
             return response
 
     def _ask(
-        question: str,
+        request: AskRequest,
         as_of: date,
-        history: list[str],
-        progress: Callable[[str], None] | None = None,
+        progress: Callable[[str], None] | None,
+        trace_id: str | None,
     ) -> AskResponse:
         from permitnav.llm.port import LLMError
         from permitnav.spend import SpendCapReached
 
         try:
-            answer = state["service"].answer(question, as_of, history, progress)
+            answer = state["service"].answer(request.question, as_of, request.history, progress)
         except SpendCapReached as reached:
             # Usually a leaked access token: an error in the log, a plain message to the person.
             log.error("question declined: %s", reached)
@@ -378,6 +457,10 @@ def create_app(
             # The provider's message can carry account or billing details: logged, not returned.
             log.error("model call failed: %s", _first_part(error))
             raise HTTPException(status_code=502, detail="model call failed") from error
+        try:  # counts, scores, perhaps the live judge: never worth losing the answer over
+            state["service"].record(answer, request.question, request.history, trace_id)
+        except Exception as error:
+            log.error("answer not recorded for online evals: %s", type(error).__name__)
         if answer.kind == "failed":  # unreadable, cut off or without an answer, even when re-asked
             # The reason, never the reply's text (it can repeat the question).
             log.error("answer failed: %s", answer.problem or "the reply could not be read")
@@ -386,7 +469,9 @@ def create_app(
             log.warning("answer in another language than the question")
         if answer.recovered:  # an ordinary answer; counted so the recovery can be watched
             log.warning("answer read from a reply that was not valid JSON")
-        return to_response(answer, as_of)
+        response = to_response(answer, as_of)
+        response.trace_id = trace_id
+        return response
 
     # The chat UI (phase 6), when built: the page, its icon and /assets only, by GET, so
     # every other path still gets the API's 404 or trailing-slash redirect. The page holds no

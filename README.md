@@ -95,8 +95,8 @@ What the negative results share: the system can be made to find more law, but ch
 - **Evaluation in CI, without models or keys:** every pull request runs the retrieval eval against a published corpus snapshot with recorded query embeddings, so it is deterministic and works for forks; it fails if recall or MRR drops. After each merge and nightly, a smoke slice of 12 stable golden questions runs with the real model to catch provider drift.
 - **Deployment:** one VM in Stockholm (Terraform), Docker Compose behind Caddy (HTTPS), only HTTPS reachable (port 80 redirects), SSH through Google's IAP tunnel, nightly backups the VM can add to but not delete.
 - **Deploy on merge, pull-based:** the server checks `main` every five minutes, re-verifies the commit's CI results, deploys, waits for the health check, and rolls back if it fails; GitHub holds no credentials for the server.
-- **Observability:** OpenTelemetry traces to Langfuse (EU) with tokens and cost per model call, metadata only in production (no question text leaves the request); uptime checks from six regions and email alerts for downtime, failed backups and failed deploys.
-- **Privacy:** EU hosting, no question text in traces or logs, a token-protected API until the beta; provider choices for real users' data are set out in decision D15.
+- **Observability:** OpenTelemetry traces to Langfuse (EU) with tokens and cost per model call, metadata only in production (the text of a question is recorded only for the maintainer's own, sent with a separate token); online evals as scores on those traces and counts per day (answer kinds, second model calls, a live faithfulness judge, a helpful/not helpful click), none of them holding text; uptime checks from six regions and email alerts for downtime, failed backups and failed deploys.
+- **Privacy:** EU hosting, no question text in traces or logs (except the maintainer's own questions, by a token of their own), a token-protected API until the beta; provider choices for real users' data are set out in decision D15.
 
 ## Repository
 
