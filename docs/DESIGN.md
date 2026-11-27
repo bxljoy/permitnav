@@ -1746,3 +1746,32 @@ The last row is the cost: with the schema about two more of 34 answers per run w
 - Split only when needed: a condition on the question, or as part of a query-analysis step that already runs (intake runs today only for follow-on questions and questions that rule something out), not a further model call on every request.
 - Measure answers end to end on a dedicated set of two-part questions reviewed by the maintainer, with the usual repeated runs and a check that single questions are not harmed, before deciding on the number of sources.
 - Revisit when real multi-part questions are seen, or when that evaluation set is ready.
+
+### A section that matches by meaning and not by words: how fusion demotes it (research finding, 2026-11-27; nothing changed)
+
+**Seen.** For "Hur länge gäller ett arbetstillstånd?", 6 kap. 2 a § utlänningslagen ("får inte ges för längre tid än två år") is not among the sources. The answers are right all the same, from Migrationsverket's page.
+
+**Cause.** In the law group the section is **first by meaning** (cosine 0.72), **49th of 50 by words**, and fifth after fusion, one place outside what is used.
+
+- The words do not meet: the question's lexemes are `läng`, `gäll`, `arbetstillstånd`; the section has `längr`, `tid`, `ges` (the Swedish stemmer keeps "länge" and "längre" apart) and shares only `arbetstillstånd`, which nearly every section has.
+- Reciprocal Rank Fusion flattens a clear lead: with 1 / (60 + rank), first place is worth 1/61 and fifth 1/65. First by meaning and 49th by words scores 0.0210; fifth by meaning and second by words 0.0235.
+
+Everyday wording against legal wording is the normal case here, so the same can happen to other sections.
+
+**Tried (retrieval eval without a model, six sets: dev, versions, interpretation, situational, kinds, and the spent hold-out as private development data; 176 expected source groups, 88 in the top eight as deployed).**
+
+| variant | in top 8 | gained | lost |
+|---|---|---|---|
+| as deployed (keyword weight 0.5, RRF constant 60) | 88 | | |
+| RRF constant 20 | 89 | 3 | 2 |
+| RRF constant 10 | 90 | 6 | 4 |
+| keyword weight 0.3 | 90 | 4 | 2 |
+| keyword weight 0.2 | 91 | 6 | 3 |
+| the group's best match by meaning kept within its first 2 | 90 | 5 | 3 |
+| … within its first 3 | 90 | 5 | 3 |
+| … within its first 3, law only | 91 | 5 | 2 |
+| … within its first 4 | 87 | 0 | 1 |
+
+Every variant that gains anything loses both languages of item 104 (5 kap. 18 § or 6 kap. 4 § falls from rank 6 to 9 or out), the item whose sources CI requires (`--must-find`). The net gains are one to three groups of 176: within what a different choice of questions would move.
+
+**Decision: nothing changed.** Eight sources are a fixed budget, and each of these changes moves which questions get their section, not how many. The fusion settings stay as measured in phase 2. What would help here is not another weighting but a keyword ranking that connects "länge" and "längre tid" (a different stemmer or compound handling), or more room for law when a question is plainly about one rule; neither was tried.
