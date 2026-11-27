@@ -1642,3 +1642,34 @@ Also: "säsongsarbetaren", "säsongsarbetarna", "säsongsanställd" are recognis
 **Measured.** Retrieval eval with recorded queries (no model), before → after: dev R@5 0.58 → 0.58, R@10 0.73 → 0.76, MRR 0.40 → 0.41; kinds R@10 0.86 → 0.89; versions and interpretation unchanged. The top eight sources changed for 9 of 82 questions; in each a seasonal, working-holiday, trainee or athletes' section gave way to the employees' one or to another section, none of those questions is about temporary work, no expected source was lost and one was gained (205-sv). The berry-picking items (962) are unchanged. The validity question: the "how long" section is now fourth, and the answer gives the two years in 5 of 5 and 3 of 3 runs for that wording (12 of 12 over the four wordings on the final code). Smoke slices: 12 of 12 and 4 of 4.
 
 **Not fixed, seen on the way.** 6 kap. 2 a § utlänningslagen, the section with the two years, was not among the sources for either Swedish wording (law rank 22 for the two-part one, 5 for the short one); the answers rest on Migrationsverket's page, and one said the limit "is given by Migrationsverket, not by the law text in the material". And a two-part question still shares four page slots between its parts: this fix removed a duplicate, it does not search each part.
+
+### Scope: a person with a removal decision in force (2026-11-27)
+
+**Measured first.** Each of the 16 out-of-scope dev questions five times: 69 of 80 declined. Refugee family reunification, answered in 4 of 6 Swedish runs on 2026-11-25, was declined 10 of 10. Of the 11 not declined, 10 were one item: "There is a final deportation decision against me. Can I still apply for a work permit?" (602), declined 0 of 10 and labelled "not settled" instead, with the ordinary work-permit requirements listed (the eleventh: 007-en, once). The search finds in-scope text for 602 (Migrationsverket's extension pages have a section "If the employee has a valid expulsion decision"), so the model read it as a work-permit question the sources leave open.
+
+**Decision (the maintainer's): the expectation stays "out of scope".** A person in that position is the highest-stakes case the site meets, and a list of the ordinary requirements reads as "you can apply" when what is open to them is decided under the rules on removal.
+
+**Change 1: rule 7 of `answer.md`.** A question is also out of scope when it is about what a person can do now and that person (the one asking, or the one asked about: a relative, someone an employer wants to hire) has a decision to deport, expel or remove them that is final or otherwise in force, or was refused asylum and holds no permit today; also when the decision came with a refused work-permit application, once it is final. Three things stay in scope: a person who holds a permit today (whatever was refused before); a refused work-permit application that can still be appealed or is under appeal; an employer's or holder's question about extending before the permit runs out. The rule's two triggers describe dev items 602 and 007, so the dev row below shows that the rule works on them, not that it generalises: the nearby questions are the evidence for that.
+
+**Change 2: `intake.md`.** An earlier statement that there is such a decision, or a refused asylum application, is always one of the facts kept in a rewritten follow-on question. Without it, "OK, but what salary would the job need?" after a declined question was answered for the ordinary permit.
+
+**From the code review (4 important, 3 smaller, all taken):** the first wording declined a permit holder who mentions an old asylum refusal; matched both "decline" and "answer" for a refused extension with a final expulsion decision; lost the decision in a follow-on; and covered only a person asking about themselves. Tests now hold the wording of both prompts.
+
+**Measured, final wording.** Answer-kind eval, three runs each side on dev, situational and kinds (single questions; 258 answers a side), and the multi-turn set (three runs before, four after):
+
+| expected kind | before | after |
+|---|---|---|
+| out of scope | 41/48 | 48/48 |
+| answered | 131/156 | 133/156 |
+| a question back | 19/30 | 22/30 |
+| not settled | 16/24 | 20/24 |
+| all single questions | 207/258 | 223/258 |
+| multi-turn (all expect an answer) | 40/42 | 55/56 |
+
+No question that expects another kind was declined, before or after. The rows other than "out of scope" move by items that flip between kinds from run to run; with three runs a side they show no harm, not a gain.
+
+Eighteen nearby questions, none a golden item, four runs each (72 answers), twice (after the review's changes, and with the final intake wording): the nine that should be declined (a removal decision in both languages, "Migrationsverket has decided that I must leave", a refused asylum seeker with a job, a refused extension after a lost appeal, a husband, an employer's new application, two follow-on questions after a stated decision) were declined 36 of 36 both times; the nine in-scope ones (working during an appeal, appealing a refusal, an employer extending in time for an employee with an old expulsion decision, losing a job, two permit holders with an old asylum refusal, a permit holder's follow-on) were never declined. Before the change the first four were declined 4 of 16.
+
+**A side effect caught by the repeated runs.** The intake sentence was first placed second in the list of rewriting rules ("One kind of fact always comes along…"). The follow-on set fell to 37 of 42: for 901-sv the rewrite changed from "Jag har ett arbetstillstånd… Kan min make…" to "Kan min make… när jag har ett arbetstillstånd…", the search then missed the family page's section, and the answer went from right in 3 of 3 runs to 0 of 3. Placed last but one and worded as one of "the facts that matter", the set is back at 55 of 56 and the decision is still carried (the two follow-on probes, 8 of 8). A sentence added to a prompt for one case can change the model's habits for all the others.
+
+**Seen on the way, not fixed.** 2 of 720 eval answers and 1 of 72 probe answers were "The model's reply could not be read": the reply and the second one asked for were both not the JSON object asked for (a fenced object that does not parse). Unrelated to this change.
