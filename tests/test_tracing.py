@@ -217,3 +217,63 @@ def test_health_checks_leave_no_trace_and_questions_do(spans) -> None:
              headers={"Authorization": f"Bearer {TOKEN}"})  # fmt: skip
     names = {s.name for s in spans.get_finished_spans()}
     assert {"POST /ask", "ask", "fastapi.endpoint"} <= names, names  # the whole request trace
+
+
+def test_one_request_can_record_its_texts_without_changing_the_mode_for_others(spans) -> None:
+    """The maintainer's own question (api: MAINTAINER_TOKEN) is traced in full; the process
+    stays in metadata mode, also for a request running at the same time on another thread."""
+    import threading
+
+    inside = threading.Event()
+    done = threading.Event()
+
+    def another_request() -> None:
+        inside.wait(2)
+        tracing.complete(ScriptedLLM("other reply"), request(), "other")
+        done.set()
+
+    other = threading.Thread(target=another_request)
+    other.start()
+    with tracing.request(full=True):
+        assert tracing.content_mode() == "full"
+        inside.set()
+        done.wait(2)
+        tracing.complete(ScriptedLLM("reply"), request(), "mine")
+    other.join()
+    assert tracing.content_mode() == "metadata"
+    tracing.complete(ScriptedLLM("reply"), request(), "after")
+    by_name = {s.name: dict(s.attributes or {}) for s in spans.get_finished_spans()}
+    assert QUESTION in str(by_name["mine"]["langfuse.observation.input"])
+    for name in ("other", "after"):
+        assert "langfuse.observation.input" not in by_name[name]
+        assert "langfuse.observation.output" not in by_name[name]
+
+
+def test_a_requests_conversation_and_user_are_on_every_span(spans) -> None:
+    mine = tracing.request(session="c0nversation-id-0001", user="maintainer")
+    with mine, tracing.span("ask"):
+        tracing.complete(ScriptedLLM("reply"), request(), "generate")
+    with tracing.span("ask"):  # the next request: nothing carried over
+        pass
+    first, second, later = (dict(s.attributes or {}) for s in spans.get_finished_spans())
+    for attributes in (first, second):
+        assert attributes["langfuse.session.id"] == "c0nversation-id-0001"
+        assert attributes["langfuse.user.id"] == "maintainer"
+    assert "langfuse.session.id" not in later and "langfuse.user.id" not in later
+    with tracing.request(), tracing.span("ask"):  # neither given: neither set
+        pass
+    assert "langfuse.session.id" not in dict(spans.get_finished_spans()[-1].attributes or {})
+
+
+def test_the_trace_id_is_the_one_langfuse_knows_the_trace_by(spans) -> None:
+    assert tracing.trace_id() is None  # outside any span
+    with tracing.span("ask") as current:
+        inside = tracing.trace_id()
+        assert inside == tracing.trace_id(current)
+    (span,) = spans.get_finished_spans()
+    assert inside == format(span.context.trace_id, "032x") and len(inside or "") == 32
+    # A request the sampler drops (a health check) has no trace to score.
+    with tracing.TRACER.start_as_current_span(
+        "GET", attributes={"http.request.method": "GET", "url.path": "/health"}
+    ) as dropped:
+        assert tracing.trace_id(dropped) is None

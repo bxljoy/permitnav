@@ -23,6 +23,8 @@ export interface AskResponse {
   notice: string;
   understood_as: string | null;
   situation: Record<string, string>;
+  trace_id?: string | null; // the answer's technical record, when there is one (for a rating)
+  recorded?: boolean; // this question was kept with its text (the maintainer's own)
 }
 
 export interface Source {
@@ -103,8 +105,20 @@ async function call<T>(
   return (await response.json()) as T;
 }
 
-export function checkToken(token: string): Promise<{ ok: boolean }> {
+/** `recorded`: questions sent with this token are kept with their text (the maintainer's own). */
+export function checkToken(token: string): Promise<{ ok: boolean; recorded?: boolean }> {
   return call(token, "/auth-check");
+}
+
+/** A click under an answer: helpful or not. Only the click is sent, never any text.
+ * Resolves with whether the server counted it. */
+export async function rate(token: string, traceId: string | null | undefined, helpful: boolean): Promise<boolean> {
+  const reply = await call<{ saved?: boolean }>(token, "/rating", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ helpful, trace_id: traceId ?? null }),
+  });
+  return reply.saved === true;
 }
 
 /** The exact wording an answer cited. A POST body, so which sources a person opens never
@@ -204,6 +218,7 @@ export async function askStream(
   question: string,
   asOf: string | null,
   history: string[],
+  conversation: string,
   onStage: (stage: Stage) => void,
   signal?: AbortSignal,
 ): Promise<AskResponse> {
@@ -212,7 +227,7 @@ export async function askStream(
     response = await fetch("/ask/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ question, as_of: asOf, history }),
+      body: JSON.stringify({ question, as_of: asOf, history, conversation }),
       signal,
     });
   } catch (e) {

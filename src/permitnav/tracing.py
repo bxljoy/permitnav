@@ -5,12 +5,19 @@ Spans: `ask` (an API request) > `answer` > `retrieve` (> `embed`, `translate`, `
 From the CLI, `answer` is the root. Model calls are Langfuse "generations" with model,
 token usage and cost, so a trace's cost is the question's cost.
 
-Two content modes, chosen in code, never by configuration, so no setting can make the
-service record what users write:
+Two content modes. No setting can make the service record what other people write:
 - `metadata` (the API, `permitnav ask`): lengths, timings, token counts, costs, the answer
   kind and the retrieved unit ids. Never the question, the answer, a translation, a prompt,
   a source's text or an error message. This is the privacy rule phase 6 builds on.
-- `full` (eval commands only, where every question is from the golden set): the texts too.
+- `full`: the texts too. For eval commands, where every question is from the golden set,
+  and for one API request at a time when it proved to be the maintainer's own (`request`,
+  called by the API only for a request sent with MAINTAINER_TOKEN). The process-wide mode
+  of the API stays `metadata`.
+
+A request can also carry a conversation id and a user label (`request`): every span of the
+trace then gets `langfuse.session.id` / `langfuse.user.id`, which is what Langfuse's
+Sessions and Users pages group by. The conversation id is a random value made by the
+browser; the only user label is "maintainer".
 
 Exporters, from the environment: Langfuse when LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY
 are set (LANGFUSE_HOST defaults to the EU region), a JSON-lines file when PERMITNAV_TRACE_FILE
@@ -30,6 +37,7 @@ import json
 import os
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -42,10 +50,47 @@ TRACER = trace.get_tracer("permitnav")
 LANGFUSE_EU = "https://cloud.langfuse.com"
 CONTENT_MODES = ("metadata", "full")
 _content = "metadata"
+# One request's own settings (`request`): they travel with the request into worker threads
+# that copy its context, and never reach another request.
+_request_full: ContextVar[bool] = ContextVar("permitnav_trace_full", default=False)
+_request_attributes: ContextVar[Mapping[str, str] | None] = ContextVar(
+    "permitnav_trace_attributes", default=None
+)
 
 
 def content_mode() -> str:
-    return _content
+    """The mode in force here: the process's, or "full" inside a request that asked for it."""
+    return "full" if _request_full.get() else _content
+
+
+@contextmanager
+def request(
+    *, full: bool = False, session: str | None = None, user: str | None = None
+) -> Iterator[None]:
+    """Settings for the spans started inside: `full` records the texts (only for the
+    maintainer's own request, see the module text); `session` and `user` are put on every
+    span as Langfuse's conversation and user."""
+    attributes = {}
+    if session:
+        attributes["langfuse.session.id"] = session
+    if user:
+        attributes["langfuse.user.id"] = user
+    was_full = _request_full.set(full)
+    was_attributes = _request_attributes.set(attributes)
+    try:
+        yield
+    finally:
+        _request_attributes.reset(was_attributes)
+        _request_full.reset(was_full)
+
+
+def trace_id(current: Span | None = None) -> str | None:
+    """The id Langfuse knows the current trace by (32 hex characters), or None when the
+    trace is not recorded (no exporter, or dropped by the sampler)."""
+    context = (current or trace.get_current_span()).get_span_context()
+    if not context.is_valid or not context.trace_flags.sampled:
+        return None
+    return format(context.trace_id, "032x")
 
 
 def set_content_mode(mode: str) -> None:
@@ -199,6 +244,7 @@ def span(name: str, kind: str = "span", **attributes: Any) -> Iterator[Span]:
         name, record_exception=False, set_status_on_exception=False
     ) as current:
         current.set_attribute("langfuse.observation.type", kind)
+        set_attributes(current, **(_request_attributes.get() or {}))
         set_attributes(current, **attributes)
         try:
             yield current
@@ -219,7 +265,7 @@ def set_attributes(current: Span, **attributes: Any) -> None:
 
 def text(current: Span, *, input: Any = None, output: Any = None) -> None:
     """Record input and output texts, in full-content mode only."""
-    if _content != "full":
+    if content_mode() != "full":
         return
     if input is not None:
         current.set_attribute("langfuse.observation.input", json.dumps(input, ensure_ascii=False))

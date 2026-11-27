@@ -25,7 +25,7 @@ from typing import Any
 
 import psycopg
 
-from permitnav import db, spend
+from permitnav import db, online, spend
 from permitnav.answering.answerer import BGE_M3_FLOOR, Answer, AnswerConfig, Answerer
 from permitnav.retrieval.retriever import RetrievalConfig, Retriever
 
@@ -81,6 +81,8 @@ class AnswerService:
     # Dollars of model spend per day after which questions are declined (permitnav.spend);
     # None: no cap. It counts what `llm` records, so `llm` must be a MeteredLLM to matter.
     spend_cap_usd: float | None = None
+    # Online evals (permitnav.online): counts, scores and the live judge. None: none of it.
+    online: Any = None
     _model_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self) -> None:
@@ -169,6 +171,21 @@ class AnswerService:
             conn.commit()
             return done
 
+    def record(
+        self, answer: Answer, question: str, history: list[str], trace_id: str | None
+    ) -> None:
+        """A question was answered: count it, score its trace, perhaps judge it."""
+        if self.online is not None:
+            self.online.answered(answer, question, history, trace_id)
+
+    def rate(self, trace_id: str | None, helpful: bool) -> bool:
+        """A person's click under an answer; whether it was counted."""
+        return self.online is not None and self.online.rated(trace_id, helpful)
+
+    def close(self) -> None:
+        if self.online is not None:
+            self.online.close()
+
     def healthy(self) -> bool:
         try:
             url = self.database_url or db.database_url()
@@ -199,12 +216,15 @@ def build_service() -> AnswerService:
     config = default_retrieval_config()
     answer_reasoning_effort()  # a mistyped setting stops the start, not every question
     answer_structured()
+    llm = spend.MeteredLLM(OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", "")))
+    cap = spend.cap_usd()  # a mistyped cap stops the start
     return AnswerService(
         model=model,
         embedder=BgeM3Embedder(),
-        llm=spend.MeteredLLM(OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""))),
+        llm=llm,
         config=config,
-        spend_cap_usd=spend.cap_usd(),  # a mistyped cap stops the start
+        spend_cap_usd=cap,
+        online=online.from_environment(llm, spend_cap_usd=cap),
         translate_model=os.environ.get("TRANSLATE_MODEL", "").strip() or model,
         reranker=_reranker(config.rerank),
     )

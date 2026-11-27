@@ -117,6 +117,31 @@ class Judge:
             tuple(completions),
         )
 
+    def faithfulness(self, item: CalibrationItem) -> Verdict:
+        """The faithfulness verdict alone (correctness: None). For an answer that has no
+        reference answer: a question asked on the live site (permitnav.online)."""
+        completions: list[Completion] = []
+        try:
+            data = self._ask(
+                self._faithfulness, _faithfulness_material(item), completions, "faithful"
+            )
+        except LLMError as error:
+            return Verdict(None, None, (), f"model call failed: {error}", tuple(completions))
+        if data is None:
+            return Verdict(
+                None, None, (), "the judge's reply could not be read", tuple(completions)
+            )
+        unsupported = data.get("unsupported") or []
+        if not isinstance(unsupported, list):
+            unsupported = [str(unsupported)]
+        return Verdict(
+            None,
+            data["faithful"],
+            tuple(str(u) for u in unsupported),
+            f"faithfulness: {data.get('reason', '')}",
+            tuple(completions),
+        )
+
     def _ask(
         self, system: str, material: str, completions: list[Completion], key: str
     ) -> dict | None:

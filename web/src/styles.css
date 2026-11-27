@@ -112,6 +112,8 @@ button:disabled { cursor: default; opacity: 0.55; }
 .situation dd { margin: 0; }
 .situation p { margin: 0; font-size: 0.82rem; }
 
+.rate { display: inline-flex; align-items: center; gap: 0.2rem; }
+.ai-notice.recorded { margin-top: 0.5rem; }
 .answer-foot { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; align-items: center; font-size: 0.8rem; color: var(--muted); }
 .answer-foot button { margin-left: auto; }
 

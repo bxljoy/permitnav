@@ -115,3 +115,39 @@ def test_a_question_is_declined_before_any_work_once_the_days_cap_is_reached(
         service.answer("Lönekrav?", date(2026, 11, 25))
     with psycopg.connect(fresh_database_url) as conn:
         assert spend.days(conn)[0].refused == 1  # counted although the question failed
+
+
+def test_online_evals_are_optional_and_reached_through_the_service() -> None:
+    from permitnav.answering.answerer import Answer
+
+    class Online:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def answered(self, answer, question, history, trace_id) -> None:
+            self.calls.append(("answered", answer.kind, question, history, trace_id))
+
+        def rated(self, trace_id, helpful) -> bool:
+            self.calls.append(("rated", trace_id, helpful))
+            return True
+
+        def close(self) -> None:
+            self.calls.append(("close",))
+
+    answer = Answer(kind="answered", text="x")
+    without = AnswerService(model="m", embedder=SlowEmbedder(), llm=None, config=RetrievalConfig())
+    without.record(answer, "q", [], "t")  # nothing configured: nothing happens
+    assert without.rate("t", True) is False  # not counted anywhere: not "saved"
+    without.close()
+    online = Online()
+    service = AnswerService(
+        model="m", embedder=SlowEmbedder(), llm=None, config=RetrievalConfig(), online=online
+    )
+    service.record(answer, "q", ["earlier"], "t")
+    assert service.rate(None, False) is True
+    service.close()
+    assert online.calls == [
+        ("answered", "answered", "q", ["earlier"], "t"),
+        ("rated", None, False),
+        ("close",),
+    ]

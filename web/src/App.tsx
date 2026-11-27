@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { ApiError, askStream, SAVE_UNSURE, checkToken, saveFeedback, source, withdrawFeedback, type AskResponse, type FeedbackCase, type Citation, type Source, type Stage } from "./api";
+import { ApiError, askStream, SAVE_UNSURE, checkToken, rate, saveFeedback, source, withdrawFeedback, type AskResponse, type FeedbackCase, type Citation, type Source, type Stage } from "./api";
 import { asPlainText, blocks, hasLead, KIND_LABEL, KIND_NOTE, locateQuote, readableDate, type Inline } from "./answer";
-import { historyFor, loadToken, loadTurns, saveToken, saveTurns, type Turn, type UserTurn } from "./conversation";
+import { conversationId, historyFor, loadToken, loadTurns, saveToken, saveTurns, type Turn, type UserTurn } from "./conversation";
 import {
   abandoned,
   addPending,
@@ -118,8 +118,13 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
   const end = useRef<HTMLDivElement>(null);
   const [reports, setReports] = useState<Reports>(() => loadReports()); // answers saved for review
   const alive = useRef(true);
+  const [recorded, setRecorded] = useState(false); // this token's questions are kept with their text
   useEffect(() => {
     alive.current = true;
+    checkToken(token).then(
+      (r) => alive.current && setRecorded(r.recorded === true),
+      () => {}, // a wrong token shows on the first question
+    );
     const onStorage = (e: StorageEvent) => {
       if (isReportsKey(e.key)) setReports(loadReports()); // another tab saved or withdrew
     };
@@ -187,8 +192,9 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
       const onStage = (stage: Stage) => {
         if (generation.current === mine) setPending((p) => (p ? { ...p, stages: [...p.stages, stage] } : p));
       };
-      const response = await askStream(token, question, date, history, onStage, controller.signal);
+      const response = await askStream(token, question, date, history, conversationId(), onStage, controller.signal);
       if (generation.current !== mine) return; // the conversation was deleted meanwhile
+      setRecorded(response.recorded === true); // also when the check at sign-in did not get through
       setTurns((t) => [...t, { role: "assistant", response, at: new Date().toISOString() }]);
     } catch (e) {
       if (generation.current !== mine) return;
@@ -204,6 +210,19 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
     } finally {
       if (generation.current === mine) setPending(null);
     }
+  }
+
+  /** A click under an answer. Kept with the answer only once the server has it. */
+  async function rateAnswer(answerAt: string, traceId: string | null | undefined, helpful: boolean) {
+    const mine = generation.current;
+    try {
+      if (!(await rate(token, traceId, helpful))) return; // not counted: the buttons stay
+    } catch (e) {
+      if (e instanceof ApiError && e.signedOut) onSignedOut(e.message);
+      return; // not saved: the buttons stay, to try again
+    }
+    if (generation.current !== mine) return;
+    setTurns((t) => t.map((turn) => (turn.role === "assistant" && turn.at === answerAt ? { ...turn, rated: helpful ? "helpful" : "not_helpful" } : turn)));
   }
 
   function deleteConversation() {
@@ -262,6 +281,11 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
           You are talking to an AI. PermitNav answers from Swedish law and Migrationsverket's pages and shows its sources.
           It is not legal advice; check with Migrationsverket before you act.
         </p>
+        {recorded && (
+          <p className="ai-notice recorded">
+            You are signed in with the maintainer's token: your questions and the answers are recorded in full, to improve PermitNav.
+          </p>
+        )}
         {turns.length === 0 && !pending && <Empty onPick={send} />}
         {turns.map((turn, i) =>
           turn.role === "user" ? (
@@ -273,6 +297,8 @@ function Chat({ token, onSignedOut }: { token: string; onSignedOut: (message: st
               at={turn.at}
               question={turns[i - 1]?.role === "user" ? (turns[i - 1] as UserTurn).text : ""}
               reported={reports[turn.at]}
+              rated={turn.rated}
+              onRate={(helpful) => rateAnswer(turn.at, turn.response.trace_id, helpful)}
               onReport={(feedback, code) => report(turn.at, feedback, code)}
               onWithdraw={(code) => withdraw(turn.at, code)}
               onDiscard={discard}
@@ -322,6 +348,8 @@ interface AnswerProps {
   at: string;
   question: string; // what was asked, for the feedback form
   reported?: string; // the withdrawal code, when this answer was saved for review
+  rated?: "helpful" | "not_helpful";
+  onRate: (helpful: boolean) => Promise<void>;
   onReport: (feedback: FeedbackCase, code: string) => Promise<void>;
   onWithdraw: (code: string) => Promise<void>;
   onDiscard: (code: string) => Promise<void>;
@@ -330,11 +358,12 @@ interface AnswerProps {
   active?: Citation;
 }
 
-function Answer({ response, at, question, reported, onReport, onWithdraw, onDiscard, onSignedOut, onOpen, active }: AnswerProps) {
+function Answer({ response, at, question, reported, rated, onRate, onReport, onWithdraw, onDiscard, onSignedOut, onOpen, active }: AnswerProps) {
   const [reporting, setReporting] = useState(false);
   const parsed = useMemo(() => blocks(response.text, response.citations), [response]);
   const byMarker = useMemo(() => new Map(response.citations.map((c) => [c.marker, c])), [response]);
   const [copied, setCopied] = useState(false);
+  const [rating, setRating] = useState(false); // a click is on its way
   const label = KIND_LABEL[response.kind];
   const situation = Object.entries(response.situation ?? {});
   const lead = hasLead(response.kind, parsed); // rule 9's conclusion, when it has that shape
@@ -423,6 +452,33 @@ function Answer({ response, at, question, reported, onReport, onWithdraw, onDisc
           <button type="button" className="quiet small" onClick={() => setReporting(true)}>
             Report a problem
           </button>
+        )}
+        {response.kind !== "failed" && (
+          <span className="rate" role="group" aria-label="Was this answer helpful?">
+            {rated ? (
+              <span>{rated === "helpful" ? "Marked helpful." : "Marked not helpful."} Only your click was saved.</span>
+            ) : (
+              <>
+                <span title="Saves only your click, with this answer's technical record. No question or answer text is saved.">Helpful?</span>
+                {[true, false].map((helpful) => (
+                  <button
+                    key={String(helpful)}
+                    type="button"
+                    className="quiet small"
+                    disabled={rating}
+                    title="Saves only your click. No question or answer text is saved."
+                    onClick={async () => {
+                      setRating(true);
+                      await onRate(helpful);
+                      setRating(false);
+                    }}
+                  >
+                    {helpful ? "Yes" : "No"}
+                  </button>
+                ))}
+              </>
+            )}
+          </span>
         )}
       </footer>
       {reporting && !reported && (

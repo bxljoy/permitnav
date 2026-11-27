@@ -17,6 +17,8 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
 class FakeService:
+    counts = True  # whether a rating is counted (False: the database was away)
+
     def __init__(self, answer: Answer | Exception | None = None, healthy: bool = True) -> None:
         self._answer = answer
         self._healthy = healthy
@@ -35,6 +37,13 @@ class FakeService:
 
     def healthy(self) -> bool:
         return self._healthy
+
+    def record(self, answer, question, history, trace_id) -> None:
+        self.recorded = [*getattr(self, "recorded", []), (answer.kind, question, trace_id)]
+
+    def rate(self, trace_id, helpful) -> bool:
+        self.ratings = [*getattr(self, "ratings", []), (trace_id, helpful)]
+        return self.counts
 
     def save_feedback(self, case) -> None:
         from permitnav.feedback import FeedbackRefused, identifiers_in
@@ -269,7 +278,7 @@ def test_a_token_can_be_checked_without_asking_a_question() -> None:
     with client(service) as c:
         assert c.get("/auth-check").status_code == 401
         assert c.get("/auth-check", headers={"Authorization": "Bearer nope"}).status_code == 401
-        assert c.get("/auth-check", headers=AUTH).json() == {"ok": True}
+        assert c.get("/auth-check", headers=AUTH).json() == {"ok": True, "recorded": False}
     assert service.asked == []  # no question, no model call
 
 
@@ -503,3 +512,199 @@ def test_a_reached_spend_cap_is_a_429_with_a_plain_message(caplog) -> None:
     assert response.json() == {"detail": SPEND_CAP_MESSAGE}
     assert got[-1] == ("error", {"status": 429, "message": SPEND_CAP_MESSAGE})
     assert "question declined" in caplog.text  # an error in the log: it usually means a leak
+
+
+MAINTAINER = "maintainer-token-of-at-least-32-characters"
+MINE = {"Authorization": f"Bearer {MAINTAINER}"}
+CONVERSATION = "c0nversation-id-0001"
+
+
+class ModeService(FakeService):
+    """Notes the trace content mode in force while the question is being answered."""
+
+    def answer(self, question, as_of, history, progress=None):
+        from permitnav import tracing
+
+        self.modes = [*getattr(self, "modes", []), tracing.content_mode()]
+        with tracing.span("answer") as current:
+            tracing.text(current, input=question)
+        return super().answer(question, as_of, history, progress)
+
+
+def both(service: FakeService | None = None) -> TestClient:
+    app = create_app(service or FakeService(), token=TOKEN, maintainer_token=MAINTAINER)
+    return TestClient(app)
+
+
+def test_the_maintainers_token_is_accepted_everywhere_the_ordinary_one_is() -> None:
+    with both() as c:
+        assert c.get("/auth-check", headers=MINE).json() == {"ok": True, "recorded": True}
+        assert c.get("/auth-check", headers=AUTH).json() == {"ok": True, "recorded": False}
+        assert c.post("/ask", json={"question": "Lönekrav?"}, headers=MINE).status_code == 200
+        assert c.post("/source", json={"version_id": 7}, headers=MINE).status_code == 200
+        wrong = {"Authorization": f"Bearer {MAINTAINER}x"}
+        assert c.get("/auth-check", headers=wrong).status_code == 401
+        assert c.get("/auth-check").status_code == 401
+
+
+def test_only_the_maintainers_own_question_is_traced_with_its_text(spans) -> None:
+    service = ModeService()
+    with both(service) as c:
+        c.post("/ask", json={"question": "Min egen fråga?"}, headers=MINE)
+        c.post("/ask", json={"question": "Någon annans fråga?"}, headers=AUTH)
+        with c.stream(
+            "POST", "/ask/stream", json={"question": "Min strömmade?"}, headers=MINE
+        ) as mine:
+            mine.read()
+        with c.stream(
+            "POST", "/ask/stream", json={"question": "Annans strömmade?"}, headers=AUTH
+        ) as theirs:
+            theirs.read()
+    assert service.modes == ["full", "metadata", "full", "metadata"]
+    recorded = str([dict(s.attributes or {}) for s in spans.get_finished_spans()])
+    assert "Min egen fråga?" in recorded and "Min strömmade?" in recorded
+    assert "annans" not in recorded.lower()
+    asks = [dict(s.attributes or {}) for s in spans.get_finished_spans() if s.name == "ask"]
+    assert [a.get("langfuse.user.id") for a in asks] == ["maintainer", None, "maintainer", None]
+
+
+def test_without_a_maintainer_token_nobody_is_recorded(spans, monkeypatch) -> None:
+    service = ModeService()
+    with client(service) as c:
+        assert c.get("/auth-check", headers=AUTH).json()["recorded"] is False
+        c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH)
+    assert service.modes == ["metadata"]
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    monkeypatch.setenv("PERMITNAV_ALLOW_NO_AUTH", "1")
+    with TestClient(create_app(ModeService(), token=None)) as c:  # local use without tokens
+        assert c.get("/auth-check").json() == {"ok": True, "recorded": False}
+
+
+@pytest.mark.parametrize("bad", [TOKEN, "short"])
+def test_the_maintainers_token_must_be_a_secret_of_its_own(bad: str) -> None:
+    app = create_app(FakeService(), token=TOKEN, maintainer_token=bad)
+    with pytest.raises(RuntimeError, match="MAINTAINER_TOKEN"), TestClient(app):
+        pass
+
+
+def test_the_maintainers_token_comes_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("MAINTAINER_TOKEN", f" {MAINTAINER} ")
+    with client() as c:
+        assert c.get("/auth-check", headers=MINE).json()["recorded"] is True
+    monkeypatch.setenv("MAINTAINER_TOKEN", "")
+    with client() as c:
+        assert c.get("/auth-check", headers=MINE).status_code == 401
+
+
+def test_a_conversations_questions_share_a_session(spans) -> None:
+    with client() as c:
+        for question in ("Lönekrav?", "Och för min make?"):
+            body = {"question": question, "conversation": CONVERSATION}
+            assert c.post("/ask", json=body, headers=AUTH).status_code == 200
+        c.post("/ask", json={"question": "Utan id?"}, headers=AUTH)  # an older page: still answered
+    asks = [dict(s.attributes or {}) for s in spans.get_finished_spans() if s.name == "ask"]
+    assert [a.get("langfuse.session.id") for a in asks] == [CONVERSATION, CONVERSATION, None]
+
+
+@pytest.mark.parametrize("conversation", ["short", "x" * 65, "with spaces in the id!", 7, ""])
+def test_a_conversation_id_cannot_carry_text(conversation) -> None:
+    with client() as c:
+        body = {"question": "Lönekrav?", "conversation": conversation}
+        assert c.post("/ask", json=body, headers=AUTH).status_code == 422
+
+
+def test_an_answer_names_its_trace_and_is_recorded_for_online_evals(spans) -> None:
+    service = FakeService()
+    with client(service) as c:
+        body = c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH).json()
+    (ask,) = [s for s in spans.get_finished_spans() if s.name == "ask"]
+    assert body["trace_id"] == format(ask.context.trace_id, "032x")
+    assert service.recorded == [("answered", "Lönekrav?", body["trace_id"])]
+
+
+def test_a_failed_answer_is_recorded_too(spans) -> None:
+    service = FakeService(Answer(kind="failed", text="", problem="not JSON"))
+    with client(service) as c:
+        assert c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH).status_code == 502
+    assert [kind for kind, _, _ in service.recorded] == ["failed"]
+
+
+def test_recording_can_never_cost_the_answer(caplog) -> None:
+    class Broken(FakeService):
+        def record(self, answer, question, history, trace_id) -> None:
+            raise RuntimeError(f"cannot record {question}")
+
+    with client(Broken()) as c:
+        reply = c.post("/ask", json={"question": "Hemlig fråga?"}, headers=AUTH)
+    assert reply.status_code == 200 and reply.json()["kind"] == "answered"
+    assert "RuntimeError" in caplog.text and "Hemlig" not in caplog.text
+
+
+def test_a_rating_is_a_click_and_the_trace_it_belongs_to() -> None:
+    service = FakeService()
+    trace = "0123456789abcdef0123456789abcdef"
+    with client(service) as c:
+        assert c.post("/rating", json={"helpful": True}).status_code == 401
+        saved = c.post("/rating", json={"helpful": True, "trace_id": trace}, headers=AUTH)
+        assert saved.status_code == 200 and saved.json() == {"saved": True}
+        assert c.post("/rating", json={"helpful": False}, headers=AUTH).status_code == 200
+        for bad in (
+            {"helpful": "yes"},
+            {"helpful": 1},
+            {},
+            {"helpful": True, "trace_id": "not a trace id"},
+            {"helpful": True, "trace_id": trace.upper()},
+            {"helpful": True, "trace_id": trace + "\nmore"},
+        ):
+            assert c.post("/rating", json=bad, headers=AUTH).status_code == 422, bad
+    assert service.ratings == [(trace, True), (None, False)]
+
+
+def test_a_rating_that_cannot_be_recorded_is_not_an_error_page(caplog) -> None:
+    class Broken(FakeService):
+        def rate(self, trace_id, helpful) -> bool:
+            raise RuntimeError("database away")
+
+    with client(Broken()) as c:
+        reply = c.post("/rating", json={"helpful": True}, headers=AUTH)
+    assert reply.status_code == 200 and reply.json() == {"saved": False}  # the buttons stay
+    assert "rating not recorded: RuntimeError" in caplog.text
+    uncounted = FakeService()
+    uncounted.counts = False  # the database was away: the service says so
+    with client(uncounted) as c:
+        reply = c.post("/rating", json={"helpful": True}, headers=AUTH)
+    assert reply.json() == {"saved": False}
+
+
+def test_an_answer_says_when_it_was_recorded_with_its_text() -> None:
+    with both() as c:
+        mine = c.post("/ask", json={"question": "Lönekrav?"}, headers=MINE).json()
+        theirs = c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH).json()
+    assert (mine["recorded"], theirs["recorded"]) == (True, False)
+
+
+def test_the_traces_are_flushed_even_when_closing_the_service_fails(monkeypatch) -> None:
+    from permitnav import tracing
+
+    class Failing(FakeService):
+        def close(self) -> None:
+            raise RuntimeError("stuck")
+
+    flushed: list[bool] = []
+    monkeypatch.setattr(tracing, "flush", lambda: flushed.append(True))
+    with pytest.raises(RuntimeError, match="stuck"), client(Failing()):
+        pass
+    assert flushed == [True]
+
+
+def test_shutting_down_lets_the_service_finish_its_online_evals() -> None:
+    class Closing(FakeService):
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    service = Closing()
+    with client(service):
+        assert not service.closed
+    assert service.closed

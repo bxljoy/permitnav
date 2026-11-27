@@ -887,6 +887,45 @@ def cmd_spend(args: argparse.Namespace) -> int:
     return 0
 
 
+def stats_report(counts: list, days: int) -> list[str]:
+    """The lines `permitnav stats` prints: per measure, each value's count and share."""
+    from permitnav import stats
+
+    summed = stats.totals(counts)
+    if not summed:
+        return [f"no questions counted in the last {days} days"]
+    span = sorted({c.day for c in counts})
+    lines = [f"last {days} days ({span[0]} to {span[-1]}, {len(span)} with questions)"]
+    for measure, values in stats.MEASURES.items():
+        of_measure = summed.get(measure)
+        if not of_measure:
+            continue
+        total = sum(of_measure.values())
+        parts = [
+            f"{value} {of_measure[value]} ({of_measure[value] / total:.0%})"
+            for value in values
+            if of_measure.get(value)
+        ]
+        lines.append(f"  {measure:<15} {total:>5}  " + ", ".join(parts))
+    return lines
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    """What happened to the questions asked on the site, summed over the last days: answer
+    kinds, second model calls, the live judge's verdicts, ratings (permitnav.stats). Counts
+    only; `--by-day` lists each day."""
+    from permitnav import stats
+
+    with db.connect() as conn:
+        counts = stats.since(conn, args.days)
+    for line in stats_report(counts, args.days):
+        print(line)
+    if args.by_day:
+        for count in counts:
+            print(f"  {count.day}  {count.measure}={count.value}  {count.n}")
+    return 0
+
+
 def cmd_feedback(args: argparse.Namespace) -> int:
     """The review queue of feedback people chose to save (phase 6, slice 3). A case goes
     into the golden set only rewritten into a generic question; then delete it here."""
@@ -2044,6 +2083,10 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--unreported", action="store_true", help="capped days not yet reported")
     sp.add_argument("--mark-reported", action="store_true", help="remember they were reported")
     sp.set_defaults(run=cmd_spend)
+    st = sub.add_parser("stats", help="counts of what happened to the site's questions")
+    st.add_argument("--days", type=_positive_int, default=30)
+    st.add_argument("--by-day", action="store_true", help="also list every day's counts")
+    st.set_defaults(run=cmd_stats)
     fb = sub.add_parser("feedback", help="the review queue of feedback people chose to save")
     fb.add_argument("action", choices=["list", "export", "delete"])
     fb.add_argument("ids", nargs="*", help="delete: the ids of reviewed cases")

@@ -15,6 +15,7 @@ export interface AssistantTurn {
   role: "assistant";
   response: AskResponse;
   at: string;
+  rated?: "helpful" | "not_helpful"; // the person's click under the answer, once made
 }
 
 export type Turn = UserTurn | AssistantTurn;
@@ -24,6 +25,38 @@ export const MAX_HISTORY = 6;
 
 const STORED_CONVERSATION = "permitnav.conversation.v1";
 const STORED_ACCESS = "permitnav.token";
+const STORED_ID = "permitnav.conversation.id";
+
+let idInMemory: string | null = null; // when storage is blocked: lasts until the tab closes
+
+/** A random id for this conversation, made on its first question and forgotten when the
+ * conversation is deleted. The server uses it only to show a conversation's questions
+ * together in its technical records; it is tied to no person and says nothing about one. */
+export function conversationId(): string {
+  const valid = (id: string | null): id is string => !!id && /^[A-Za-z0-9_-]{16,64}$/.test(id);
+  const store = storage();
+  // With storage, the stored id is the only one: when another tab has deleted the
+  // conversation, this tab must not bring the old id back from its own memory.
+  let id: string | null = idInMemory;
+  if (store) {
+    try {
+      id = store.getItem(STORED_ID);
+    } catch {
+      // unreadable: the one in memory
+    }
+  }
+  if (!valid(id)) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    id = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  idInMemory = id;
+  try {
+    store?.setItem(STORED_ID, id);
+  } catch {
+    // full or blocked: kept in memory
+  }
+  return id;
+}
 
 /** The user's earlier questions in this conversation, oldest first, at most MAX_HISTORY. */
 export function historyFor(turns: Turn[]): string[] {
@@ -61,8 +94,12 @@ export function answered(turns: Turn[]): Turn[] {
 
 export function saveTurns(turns: Turn[]): void {
   try {
+    if (!turns.length) idInMemory = null; // an empty conversation: the next one gets a new id
     if (turns.length) storage()?.setItem(STORED_CONVERSATION, JSON.stringify(turns));
-    else storage()?.removeItem(STORED_CONVERSATION);
+    else {
+      storage()?.removeItem(STORED_CONVERSATION);
+      storage()?.removeItem(STORED_ID);
+    }
   } catch {
     // full or blocked: keep the conversation in memory only
   }
