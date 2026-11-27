@@ -319,12 +319,13 @@ class Retriever:
                 cut = self.config.rerank_depth
                 hits = self._rerank(query, hits[:cut]) + hits[cut:]
             if self.config.collapse_variants:
-                missing = preferred_siblings(hits, query, use_named=not rules_out(query))
+                use_named = not rules_out(query)
+                missing = preferred_siblings(hits, query, use_named=use_named)
                 if missing:  # the general (or named) page's section, when it exists on the date
                     ids = [unit for units in missing.values() for unit in units]
                     found = self._search(vector, as_of, len(ids), None, units=ids, copies=True)
                     hits = with_siblings(hits, found)
-                hits = collapse_variants(hits, query)
+                hits = collapse_variants(hits, query, use_named=use_named)
             return hits[:depth]
 
         if self.config.mix == "none":
