@@ -52,6 +52,13 @@ class OpenRouterLLM:
         }
         if request.reasoning_effort:
             body["reasoning"] = {"effort": request.reasoning_effort}
+        if request.response_schema is not None:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "reply", "strict": True, "schema": request.response_schema},
+            }
+            # Only endpoints that honour the schema: one that ignored it would send free text.
+            body["provider"] = {"require_parameters": True}
         data = json.dumps(body).encode("utf-8")
         for attempt in range(self._retries + 1):
             req = urllib.request.Request(

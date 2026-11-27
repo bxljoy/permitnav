@@ -86,6 +86,8 @@ def fresh_database_url() -> Iterator[str]:
 
 
 @pytest.fixture(autouse=True)
-def _no_answer_reasoning_setting(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AnswerConfig reads ANSWER_REASONING_EFFORT: tests must not depend on the shell's .env."""
+def _no_answer_settings_from_the_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AnswerConfig reads ANSWER_REASONING_EFFORT and ANSWER_STRUCTURED: tests must not depend
+    on the shell's .env."""
     monkeypatch.delenv("ANSWER_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("ANSWER_STRUCTURED", raising=False)

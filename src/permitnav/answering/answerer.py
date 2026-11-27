@@ -2,7 +2,8 @@
 
 Plain RAG: retrieve, assemble sources, call the model, parse, check citations. A reply cut off
 at the token limit is retried with twice the tokens, up to MAX_TOKENS_CAP; an unreadable reply
-is asked for once more. So one answer takes one call, rarely up to four.
+is asked for once more. So one answer takes one call, for about one question in eight two
+(measured 2026-11-27: DESIGN.md), at most four.
 The prompt (prompts/answer.md) already allows one follow-up question, "not settled" and
 declining out-of-scope questions, so phase 5's agent is compared against a fair baseline (D21).
 
@@ -42,6 +43,30 @@ if TYPE_CHECKING:
     from permitnav.agent.second_search import SecondSearch, SecondSearcher
 
 KINDS = ("answered", "follow_up", "not_settled", "out_of_scope")
+# The reply's shape as a JSON Schema (the same object the prompt describes), for models that
+# can be held to one (AnswerConfig.structured).
+ANSWER_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "enum": list(KINDS)},
+        "answer": {"type": "string"},
+        "quotes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "swedish": {"type": "string"},
+                    "translation": {"type": "string"},
+                },
+                "required": ["source", "swedish", "translation"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["kind", "answer", "quotes"],
+    "additionalProperties": False,
+}
 log = logging.getLogger("permitnav.answer")
 MARKER = re.compile(r"\[(S\d+)\]")
 # "[S1, S2]", "[S1–S3]", "[S1; S4]": groups the model sometimes writes instead of [S1][S2]
@@ -57,7 +82,8 @@ ANSWER_LANGUAGE = {
     None: "the language of the question",
 }
 # Sent once when a reply cannot be read (no JSON, or broken JSON such as unescaped quotes);
-# about 1-3% of replies, depending on the prompt (phase 2).
+# about 1-3% of replies in phase 2; 10% on 2026-11-27, nearly all the answer as plain text
+# with no JSON (DESIGN.md, "Second calls").
 REASK = (
     "That reply could not be used: it was not the JSON object described in the instructions "
     "(no JSON, invalid JSON such as an unescaped quote inside a string, or no non-empty "
@@ -194,6 +220,18 @@ def answer_reasoning_effort() -> str | None:
     return value
 
 
+def answer_structured() -> bool:
+    """ANSWER_STRUCTURED from the environment: "1" or "true" holds the reply to ANSWER_SCHEMA;
+    unset, empty, "0" or "false": free text. Anything else is an error, so that a mistyped
+    value is not taken for "off" in a measurement."""
+    value = os.environ.get("ANSWER_STRUCTURED", "").strip().lower()
+    if value in ("", "0", "false"):
+        return False
+    if value in ("1", "true"):
+        return True
+    raise ValueError(f"ANSWER_STRUCTURED must be 1, true, 0 or false: {value!r}")
+
+
 @dataclass(frozen=True)
 class AnswerConfig:
     model: str
@@ -205,6 +243,12 @@ class AnswerConfig:
     # How much hidden thinking the answer model does before it writes (REASONING_EFFORTS);
     # None leaves the model's default. From ANSWER_REASONING_EFFORT unless given.
     reasoning_effort: str | None = field(default_factory=lambda: answer_reasoning_effort())
+    # Hold the reply to ANSWER_SCHEMA (structured output). Off: measured on 2026-11-27, it
+    # ends the second calls (12% of answers) but gave "not settled" more often where an answer
+    # is expected (DESIGN.md). From ANSWER_STRUCTURED unless given, to re-measure with one
+    # setting when the model changes. When on there is no fallback to free text: a model
+    # whose endpoints cannot hold a reply to a schema fails every question.
+    structured: bool = field(default_factory=lambda: answer_structured())
 
 
 class Answerer:
@@ -346,6 +390,7 @@ class Answerer:
                     messages=messages,
                     max_tokens=max_tokens,
                     reasoning_effort=self.config.reasoning_effort,
+                    response_schema=ANSWER_SCHEMA if self.config.structured else None,
                 ),
                 "generate",
             )
