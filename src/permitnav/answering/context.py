@@ -34,6 +34,7 @@ import psycopg
 from psycopg import sql
 
 from permitnav.corpus.chunking import estimate_tokens
+from permitnav.parsing import ruling_parts
 from permitnav.parsing.references import cited_units, ordered_section_refs, section_refs
 from permitnav.retrieval.retriever import APPLIES_ON, Hit
 
@@ -59,6 +60,11 @@ class Source:
     url: str
     text: str
     dates: str  # human-readable validity, e.g. "applies from 2026-06-01"
+    # What the model reads in place of `text`, when that differs: a ruling's passage with
+    # editorial notes saying which part of the ruling it is (parsing.ruling_parts). `text`
+    # stays the source's own words: quotations are checked against it, and it is what a
+    # judge and the citations are given.
+    shown: str | None = None
 
 
 @dataclass
@@ -75,12 +81,14 @@ class Context:
                 f"[{s.marker}] {s.heading}\n"
                 f"type: {s.authority} | {s.role} | {s.dates}\n"
                 f"id: {s.unit_id}\n"
-                f"{s.text}"
+                f"{s.shown or s.text}"
             )
         return "\n\n---\n\n".join(blocks)
 
 
-def build_context(conn: psycopg.Connection, hits: list[Hit], as_of: date) -> Context:
+def build_context(
+    conn: psycopg.Connection, hits: list[Hit], as_of: date, ruling_notes: bool = False
+) -> Context:
     """Sources for the model. Transitional provisions must apply on `as_of` themselves; the
     older wordings they point to are, by definition, ones that ended, but never withdrawn
     or not-yet-dated ones."""
@@ -90,13 +98,13 @@ def build_context(conn: psycopg.Connection, hits: list[Hit], as_of: date) -> Con
     named_left = MAX_NAMED
     hit_versions = {hit.version_id for hit in hits}  # a reference never takes a hit's place
 
-    def add(unit_id, version_id, role, authority, heading, url, text, dates) -> None:
+    def add(unit_id, version_id, role, authority, heading, url, text, dates, shown=None) -> None:
         if version_id in seen_versions:
             return
         seen_versions.add(version_id)
         marker = f"S{len(context.sources) + 1}"
         context.sources.append(
-            Source(marker, unit_id, version_id, role, authority, heading, url, text, dates)
+            Source(marker, unit_id, version_id, role, authority, heading, url, text, dates, shown)
         )
 
     for hit in hits:
@@ -113,6 +121,10 @@ def build_context(conn: psycopg.Connection, hits: list[Hit], as_of: date) -> Con
             hit.url,
             text,
             _dates(hit.authority, hit.valid_from, hit.valid_to, _stockholm_date(hit.fetched_at)),
+            # A ruling's passage, with the part of the ruling it comes from noted (when on).
+            ruling_parts.labelled(full[0], text)
+            if ruling_notes and full and hit.authority == "ruling"
+            else None,
         )
         for provision in _provisions(conn, hit, as_of):
             add(*provision)

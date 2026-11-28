@@ -87,10 +87,11 @@ def fresh_database_url() -> Iterator[str]:
 
 @pytest.fixture(autouse=True)
 def _no_answer_settings_from_the_shell(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AnswerConfig reads ANSWER_REASONING_EFFORT and ANSWER_STRUCTURED: tests must not depend
-    on the shell's .env."""
+    """AnswerConfig reads ANSWER_REASONING_EFFORT, ANSWER_STRUCTURED and ANSWER_RULING_NOTES:
+    tests must not depend on the shell's .env."""
     monkeypatch.delenv("ANSWER_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("ANSWER_STRUCTURED", raising=False)
+    monkeypatch.delenv("ANSWER_RULING_NOTES", raising=False)
     # Nor may the developer's own tokens or live-judge setting reach a test's app.
     monkeypatch.delenv("MAINTAINER_TOKEN", raising=False)
     monkeypatch.delenv("LIVE_JUDGE_SHARE", raising=False)

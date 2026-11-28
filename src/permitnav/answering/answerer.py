@@ -33,6 +33,7 @@ from permitnav import tracing
 from permitnav.answering.context import Context, Source, build_context
 from permitnav.llm.port import LLM, Completion, CompletionRequest, LLMError
 from permitnav.negation import rules_out
+from permitnav.parsing import ruling_parts
 from permitnav.parsing.references import named_units
 from permitnav.prompting import load_prompt
 from permitnav.retrieval.retriever import Hit, Retriever
@@ -239,6 +240,19 @@ def answer_structured() -> bool:
     raise ValueError(f"ANSWER_STRUCTURED must be 1, true, 0 or false: {value!r}")
 
 
+def answer_ruling_notes() -> bool:
+    """ANSWER_RULING_NOTES from the environment: "1" or "true" shows the model a ruling's
+    passage with editorial notes on which part of the ruling it is (parsing.ruling_parts);
+    unset, empty, "0" or "false": every passage as it is stored. Anything else is an error,
+    so that a mistyped value is not taken for "off" in a measurement."""
+    value = os.environ.get("ANSWER_RULING_NOTES", "").strip().lower()
+    if value in ("", "0", "false"):
+        return False
+    if value in ("1", "true"):
+        return True
+    raise ValueError(f"ANSWER_RULING_NOTES must be 1, true, 0 or false: {value!r}")
+
+
 @dataclass(frozen=True)
 class AnswerConfig:
     model: str
@@ -256,6 +270,10 @@ class AnswerConfig:
     # setting when the model changes. When on there is no fallback to free text: a model
     # whose endpoints cannot hold a reply to a schema fails every question.
     structured: bool = field(default_factory=lambda: answer_structured())
+    # Show a ruling's passage with editorial notes on which part of the ruling it is. Off:
+    # built and measured on 2026-11-28, not yet switched on (DESIGN.md). From
+    # ANSWER_RULING_NOTES unless given.
+    ruling_notes: bool = field(default_factory=lambda: answer_ruling_notes())
 
 
 class Answerer:
@@ -377,7 +395,7 @@ class Answerer:
         if self._second_search is not None:
             report("checking")
             hits, search = self._second_search.expand(question, as_of, hits, search_with)
-        context = build_context(self._conn, hits, as_of)
+        context = build_context(self._conn, hits, as_of, ruling_notes=self.config.ruling_notes)
         report("writing")
         # Told, not left to the model: with an English prompt and mixed sources it answered
         # more than half of the Swedish dev questions in English (phase 2). Only when the
@@ -555,6 +573,13 @@ def unusable_answer(text: str) -> bool:
     return " ".join(pointer) in PLACEHOLDERS
 
 
+def _own_words(translation: str) -> str:
+    """A quotation's translation without editorial notes; none at all when a piece of a
+    note is left in it."""
+    cleaned = ruling_parts.without_notes(translation)
+    return "" if ruling_parts.mentions_a_note(cleaned) else cleaned
+
+
 def parse_answer(completion: Completion, context: Context) -> Answer:
     data = _json_object(completion.text)
     recovered = None
@@ -566,11 +591,22 @@ def parse_answer(completion: Completion, context: Context) -> Answer:
         recovered = _recovered_object(completion.text)
         data = recovered or data
     raw_answer = data.get("answer") if data else None
+    # Only where the model was shown a note is one looked for: with none shown (always so
+    # with ANSWER_RULING_NOTES off) a reply is read exactly as before the notes.
+    noted = any(s.shown for s in context.sources)
+    if noted and isinstance(raw_answer, str):
+        # An editorial note on a ruling's passage is ours, not the ruling's: never in an
+        # answer, and a reply that is nothing but a note is no answer.
+        raw_answer = ruling_parts.without_notes(raw_answer)
     problem = ""
     if data is None or not isinstance(raw_answer, str) or not raw_answer.strip():
         problem = "not the JSON object asked for"
     elif unusable_answer(raw_answer):
         problem = "no answer in the answer field"  # only a pointer or source markers
+    elif noted and ruling_parts.mentions_a_note(raw_answer):
+        # A note copied in part or reworded: where it ends cannot be told, so nothing is
+        # cut out of the answer and the reply is asked for again.
+        problem = "a piece of an editorial note in the answer"
     if problem:
         # Never shown as an answer: asked for once more, then this message (see _answer).
         return Answer(
@@ -596,6 +632,8 @@ def parse_answer(completion: Completion, context: Context) -> Answer:
         if not isinstance(quote, dict):
             continue
         source, swedish = quote.get("source"), quote.get("swedish")
+        if noted and isinstance(swedish, str) and ruling_parts.OPEN in swedish:
+            swedish = None  # a quotation with an editorial note in it is not the source's words
         if not isinstance(source, str) or source not in given:
             dropped_quotes += 1  # for a source the model was not given
             continue
@@ -626,7 +664,13 @@ def parse_answer(completion: Completion, context: Context) -> Answer:
                 authority=source.authority,
                 dates=source.dates,
                 quote=swedish,
-                translation=translation if isinstance(translation, str) else "",
+                translation=(
+                    ""
+                    if not isinstance(translation, str)
+                    else _own_words(translation)
+                    if noted
+                    else translation
+                ),
                 version_id=source.version_id,
             )
         )

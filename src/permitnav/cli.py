@@ -77,6 +77,8 @@ def _print_provenance(
         answer_model = f"{answer_model} (reasoning effort {answer_effort})"
     if answer_model and _answer_structured():
         answer_model = f"{answer_model} (reply held to a schema)"
+    if answer_model and _answer_ruling_notes():
+        answer_model = f"{answer_model} (ruling passages with notes)"
     models = {
         "answer": answer_model,
         "judge": judge,
@@ -90,10 +92,15 @@ def _print_provenance(
 
 def _answer_effort() -> str | None:
     """ANSWER_REASONING_EFFORT, or a one-line exit when it is mistyped (before any model loads)."""
-    from permitnav.answering.answerer import answer_reasoning_effort, answer_structured
+    from permitnav.answering.answerer import (
+        answer_reasoning_effort,
+        answer_ruling_notes,
+        answer_structured,
+    )
 
     try:
-        answer_structured()  # checked with it: both settings change the answers
+        answer_structured()  # checked with it: these settings change the answers
+        answer_ruling_notes()
         return answer_reasoning_effort()
     except ValueError as error:
         raise SystemExit(str(error)) from error
@@ -105,6 +112,16 @@ def _answer_structured() -> bool:
 
     try:
         return answer_structured()
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+
+
+def _answer_ruling_notes() -> bool:
+    """ANSWER_RULING_NOTES, or a one-line exit when it is mistyped."""
+    from permitnav.answering.answerer import answer_ruling_notes
+
+    try:
+        return answer_ruling_notes()
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
@@ -988,6 +1005,60 @@ def cmd_shadow(args: argparse.Namespace) -> int:
         print(f"wrote {args.out}")
     else:
         print("\n".join(lines))
+    return 0
+
+
+def cmd_ruling_parts(args: argparse.Namespace) -> int:
+    """How the rulings in the corpus divide into parts (parsing.ruling_parts): how many are
+    labelled and in which shapes. With --check, fails if any ruling or passage breaks the
+    rules the labels must keep (the ruling's own text untouched, notes only ours)."""
+    from collections import Counter
+
+    from permitnav.parsing import ruling_parts
+
+    shapes: Counter[str] = Counter()
+    wrong: list[str] = []
+    rulings = labelled = passages = 0
+    with db.connect() as conn:
+        found = conn.execute(
+            "SELECT DISTINCT ON (u.id) u.id, u.heading, v.id, v.text FROM unit u"
+            " JOIN unit_version v ON v.unit_id = u.id WHERE u.source_type = 'ruling'"
+            " ORDER BY u.id, v.id DESC"
+        ).fetchall()
+        for unit_id, heading, version_id, text in found:
+            chunks = conn.execute(
+                # The passages retrieval serves (the "structure" chunks), not every chunking.
+                "SELECT text FROM chunk WHERE version_id = %s AND strategy = 'structure'"
+                " ORDER BY ordinal",
+                (version_id,),
+            ).fetchall()
+            # A passage as the model is given it: without the heading line (context._body).
+            bodies = [
+                c.split("\n\n", 1)[1] if c.startswith(heading) and "\n\n" in c else c
+                for (c,) in chunks
+            ]
+            made = ruling_parts.parts(text)
+            rulings += 1
+            labelled += made is not None
+            passages += sum(ruling_parts.labelled(text, b) is not None for b in bodies)
+            shapes[" > ".join(p.kind for p in made) if made else "(not labelled)"] += 1
+            wrong += [f"{unit_id}: {p}" for p in ruling_parts.problems(text, [text, *bodies])]
+    print(f"{rulings} rulings, {labelled} with parts, {passages} passages labelled")
+    for shape, n in shapes.most_common():
+        print(f"  {n:3}  {shape}")
+    for line in wrong:
+        print(f"PROBLEM {line}")
+    if args.check:
+        # A parser that has stopped recognising the reports labels almost nothing.
+        too_few = rulings and labelled < ruling_parts.MIN_SHARE * rulings
+        if wrong or not rulings or too_few:
+            print(
+                "no rulings in the corpus"
+                if not rulings
+                else f"{len(wrong)} problems; {labelled} of {rulings} rulings with parts"
+                f" (at least {ruling_parts.MIN_SHARE:.0%} expected)"
+            )
+            return 1
     return 0
 
 
@@ -2223,6 +2294,9 @@ def main(argv: list[str] | None = None) -> int:
     sh.add_argument("--out", help="report: write it to this file (it holds your own questions)")
     sh.add_argument("--yes", action="store_true", help="clear: really remove every row")
     sh.set_defaults(run=cmd_shadow)
+    rp = sub.add_parser("ruling-parts", help="how the corpus's rulings divide into parts")
+    rp.add_argument("--check", action="store_true", help="fail if a label rule is broken")
+    rp.set_defaults(run=cmd_ruling_parts)
     fb = sub.add_parser("feedback", help="the review queue of feedback people chose to save")
     fb.add_argument("action", choices=["list", "export", "delete"])
     fb.add_argument("ids", nargs="*", help="delete: the ids of reviewed cases")

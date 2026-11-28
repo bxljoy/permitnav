@@ -43,7 +43,11 @@ def answer_version(model: str, translate_model: str | None = None) -> str:
     """Everything set outside the code that shapes an answer: the answer model, the model
     that translates the question for the search, the answer settings as the service reads
     them (so two spellings of one setting are one version), and the prompts."""
-    from permitnav.answering.answerer import answer_reasoning_effort, answer_structured
+    from permitnav.answering.answerer import (
+        answer_reasoning_effort,
+        answer_ruling_notes,
+        answer_structured,
+    )
 
     return _name(
         model,
@@ -53,6 +57,8 @@ def answer_version(model: str, translate_model: str | None = None) -> str:
         prompt_hash("answer.md"),
         prompt_hash("intake.md"),
         prompt_hash("translate.md"),
+        # Only when on, so that the name of every version without the notes stays what it was.
+        *(["ruling notes"] if answer_ruling_notes() else []),
     )
 
 

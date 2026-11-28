@@ -213,7 +213,11 @@ class AnswerService:
 
 def build_service() -> AnswerService:
     """The production wiring, from the environment (see .env.example). Loads bge-m3."""
-    from permitnav.answering.answerer import answer_reasoning_effort, answer_structured
+    from permitnav.answering.answerer import (
+        answer_reasoning_effort,
+        answer_ruling_notes,
+        answer_structured,
+    )
     from permitnav.cli import _reranker
     from permitnav.embedding.bge_m3 import BgeM3Embedder
     from permitnav.llm.openrouter import OpenRouterLLM
@@ -224,6 +228,7 @@ def build_service() -> AnswerService:
     config = default_retrieval_config()
     answer_reasoning_effort()  # a mistyped setting stops the start, not every question
     answer_structured()
+    answer_ruling_notes()
     llm = spend.MeteredLLM(OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", "")))
     cap = spend.cap_usd()  # a mistyped cap stops the start
     return AnswerService(
