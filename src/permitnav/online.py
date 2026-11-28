@@ -53,10 +53,10 @@ from typing import Any
 
 import psycopg
 
-from permitnav import db, spend, stats, tracing
+from permitnav import db, shadow, spend, stats, tracing
 from permitnav.agent.intake import MAX_HISTORY
 from permitnav.answering.answerer import MARKER, Answer
-from permitnav.evals.judge import CalibrationItem, Judge
+from permitnav.evals.judge import CalibrationItem, Judge, Verdict
 from permitnav.llm.port import LLM
 from permitnav.retrieval.translate import language_of
 from permitnav.scores import Scores
@@ -68,6 +68,9 @@ JUDGED_KINDS = ("answered", "not_settled")  # the kinds that state something abo
 MAX_JUDGES_WAITING = 8  # more answers than this waiting for the judge: the next is skipped
 CONNECT_TIMEOUT_S = 3  # for the counts: a database that does not answer is given up on
 STOP_WAIT_S = 4.0  # at shutdown: how long a judge call under way is waited for
+# A reasoning model's thinking counts against the token limit (cli._judge); the same limit
+# is given to a shadow judge, whatever its own settings.
+REASONING_TOKENS, PLAIN_TOKENS = 8000, 2000
 
 
 def _yes_no(value: object) -> str:
@@ -135,9 +138,45 @@ def live_judge(llm: LLM) -> Judge | None:
     if settings is None:
         return None
     model, effort = settings
-    if effort:  # a reasoning model: its thinking counts against the token limit (cli._judge)
-        return Judge(llm, model, max_tokens=8000, reasoning_effort=effort)
-    return Judge(llm, model)
+    return Judge(llm, model, max_tokens=token_limit(effort), reasoning_effort=effort)
+
+
+def token_limit(effort: str | None) -> int:
+    """The live judge's token limit, set by whether it is a reasoning model."""
+    return REASONING_TOKENS if effort else PLAIN_TOKENS
+
+
+def shadow_judge(llm: LLM, release: str | None = None) -> shadow.Shadow | None:
+    """The shadow judge (permitnav.shadow), when SHADOW_JUDGE_MODEL asks for one: a second
+    judge on the same metered client, with the deployed judge's prompt and token limit. It
+    needs a deployed judge to be read against."""
+    from permitnav import versions
+
+    wanted = shadow.settings()
+    if wanted is None:
+        return None
+    deployed = judge_settings()
+    if deployed is None:
+        raise ValueError("SHADOW_JUDGE_MODEL is set but there is no live judge (LIVE_JUDGE_SHARE)")
+    if wanted.effort and not deployed[1]:
+        # Its thinking would have to fit the plain limit and every reply would come back
+        # empty; and the two judges are to have the same limit.
+        raise ValueError(
+            "SHADOW_JUDGE_REASONING_EFFORT needs JUDGE_REASONING_EFFORT: both judges get the"
+            " deployed judge's token limit"
+        )
+    limit = token_limit(deployed[1])
+    return shadow.Shadow(
+        judge=Judge(llm, wanted.model, max_tokens=limit, reasoning_effort=wanted.effort),
+        model=wanted.model,
+        effort=wanted.effort,
+        version=versions.judge_version(wanted.model, wanted.effort),
+        deployed=(*deployed, versions.judge_version(*deployed)),
+        token_limit=limit,
+        limit=wanted.limit,
+        budget_usd=wanted.budget_usd,
+        release=release,
+    )
 
 
 @dataclass
@@ -152,6 +191,8 @@ class Online:
     # judge's scores; None: not recorded.
     release: str | None = None
     judge_version: str | None = None
+    # A second judge read against the first on the maintainer's own questions; None: off.
+    shadow: shadow.Shadow | None = None
     _pool: ThreadPoolExecutor = field(
         default_factory=lambda: ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-judge"),
         repr=False,
@@ -162,6 +203,13 @@ class Online:
     )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _waiting: int = 0  # answers handed to the judge and not finished
+    # The shadow judge has a thread of its own, so it never holds up the deployed judge's
+    # queue; it reads one answer at a time and an answer that arrives meanwhile is skipped.
+    _shadow_pool: ThreadPoolExecutor = field(
+        default_factory=lambda: ThreadPoolExecutor(max_workers=1, thread_name_prefix="shadow"),
+        repr=False,
+    )
+    _shadowing: bool = False
     _judging: bool = False  # a judge call is under way
 
     def answered(
@@ -261,7 +309,7 @@ class Online:
         """Wait until no answer is with the judge or waiting for it (tests, scripts).
         False on a timeout."""
         deadline = time.monotonic() + timeout_s
-        while self._waiting > 0:
+        while self._waiting > 0 or self._shadowing:
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.01)
@@ -272,8 +320,9 @@ class Online:
         still waiting for the judge are dropped, and counted nowhere), then send the scores.
         Bounded, so the traces can still be flushed before the process is stopped."""
         self._pool.shutdown(wait=False, cancel_futures=True)
+        self._shadow_pool.shutdown(wait=False, cancel_futures=True)
         deadline = time.monotonic() + wait_s
-        while self._judging and time.monotonic() < deadline:
+        while (self._judging or self._shadowing) and time.monotonic() < deadline:
             time.sleep(0.02)
         self._counts.shutdown(wait=True)  # each bounded by the connect timeout
         if self.scores is not None:
@@ -304,6 +353,7 @@ class Online:
         completed judgement gives a `faithful` verdict."""
         self._judging = True
         status, faithful = "failed", None
+        judged: tuple[Verdict, float] | None = None  # the verdict, and how long it took
         try:
             if self.judge is None:
                 return
@@ -314,7 +364,9 @@ class Online:
                 status = "capped"
                 return
             with tracing.span("live_judge", "evaluator") as current:
+                started = time.monotonic()
                 verdict = self.judge.faithfulness(item)
+                judged = (verdict, time.monotonic() - started)
                 faithful = verdict.faithful
                 status = "failed" if faithful is None else "completed"
                 tracing.set_attributes(
@@ -350,6 +402,58 @@ class Online:
                 self._judging = False
                 with self._lock:
                     self._waiting -= 1
+                # After everything of the deployed judge's is recorded and its place in
+                # the queue is free again.
+                if judged is not None and status == "completed":
+                    self._hand_to_shadow(item, trace_id, *judged)
+
+    def _hand_to_shadow(
+        self, item: CalibrationItem, trace_id: str | None, verdict: Verdict, latency_s: float
+    ) -> None:
+        """Pass a judged answer to the shadow judge's own thread, unless there is none or
+        it is busy: then this answer is simply not in the sample."""
+        if self.shadow is None:
+            return
+        with self._lock:
+            busy = self._shadowing
+            self._shadowing = True
+        if busy:
+            self._shadow_skipped("busy")
+            return
+        try:
+            self._shadow_pool.submit(
+                contextvars.copy_context().run, self._shadow, item, trace_id, verdict, latency_s
+            )
+        except Exception as error:  # shutting down
+            self._shadowing = False
+            log.info("shadow judge skipped: %s", type(error).__name__)
+
+    def _shadow(
+        self, item: CalibrationItem, trace_id: str | None, verdict: Verdict, latency_s: float
+    ) -> None:
+        """The shadow judge on the same answer, if there is one. It can change nothing
+        above: the deployed judge's verdict, scores and counts are written already, and
+        whatever goes wrong here is logged by its type and dropped."""
+        try:
+            if self.shadow is None:
+                return
+            at_cap = self._at_cap()
+            if at_cap is not False:
+                self._shadow_skipped("spend_cap" if at_cap else "spend_unreadable")
+                return
+            self.shadow.compare(item, trace_id, verdict, latency_s, self._connect)
+        except Exception as error:
+            log.error("shadow judge failed: %s", type(error).__name__)
+        finally:
+            self._shadowing = False
+
+    def _shadow_skipped(self, reason: str) -> None:
+        """Count an answer the shadow was not asked about; a count lost is only logged."""
+        try:
+            with self._connect() as conn:
+                shadow.skipped(conn, reason)
+        except Exception as error:
+            log.error("shadow skip not counted: %s", type(error).__name__)
 
     def _at_cap(self) -> bool | None:
         """Whether the day's spend has reached the cap; None when that cannot be read (the
@@ -383,12 +487,14 @@ def from_environment(
     from permitnav import scores, versions
 
     settings = judge_settings()
+    release = versions.release()
     return Online(
         database_url=database_url,
         scores=scores.from_environment(),
         judge=live_judge(llm),
         judge_share=judge_share(),
         spend_cap_usd=spend_cap_usd,
-        release=versions.release(),
+        release=release,
         judge_version=versions.judge_version(*settings) if settings else None,
+        shadow=shadow_judge(llm, release),
     )
