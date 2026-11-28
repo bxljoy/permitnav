@@ -95,6 +95,10 @@ jobs:
           echo "$EVAL_CORPUS_SHA256  eval-corpus.txt.gz" | sha256sum -c -
       - run: uv run permitnav migrate
       - run: uv run permitnav import-eval-corpus eval-corpus.txt.gz
+      # The notes that say which part of a ruling a passage is: every ruling and passage in
+      # the corpus must keep the rules (the ruling's text untouched, no note but ours).
+      - name: Ruling parts over every ruling in the corpus
+        run: uv run permitnav ruling-parts --check
       - name: Retrieval eval with recorded queries (fails below the minimums)
         run: >-
           uv run permitnav eval --queries evals/queries.dev.json
