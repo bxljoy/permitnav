@@ -1930,3 +1930,36 @@ In the 114 pairs with the same prompt, the judged correctness still differed in 
 - The faithfulness judges can call a correct answer unsupported when they do not see what the answer model saw (next paragraph).
 
 **The judges do not see the notes.** They are given the ruling's own text, as before. An answer that rightly says "this excerpt holds only the parties' arguments" can then be called unsupported by a judge that cannot see why (observed on dev item 204). Whether the judges should read the same annotated passages is a separate decision, to be tested offline first. Faithfulness (is each claim in a source shown) also remains a different question from whether the answer has the law right: this change is about the second.
+
+### Labelling faithfulness by hand: the rules a reviewer applies (the maintainer's decisions, 2026-11-28)
+
+A second and third read of 24 answers, claim by claim against every source shown, found errors of substance that a first read had labelled faithful. The rules below are what a person applies when labelling an answer faithful or not. They add to the policy on uncertainty above and change no prompt, no judge and no code.
+
+**What is judged.** Every factual claim in the answer, including who said it, must be stated by a source the answer model was shown, or follow directly from one. One unsupported claim makes the answer not faithful. Whether the answer is right is another question (correctness) and is not labelled here.
+
+**What is exempt.**
+
+- A statement of uncertainty, or that the sources lack something, when that is true of the sources.
+- An accurate, incidental statement of legal hierarchy (a statute stands above an authority's guidance) or of a court's institutional role. The exemption ends where the statement creates a materially misleading implication about a requirement that applies. "The law does not name these insurances; where the guidance and the law differ, the law applies" is not exempt when the law requires insurance cover in general words and no source says the guidance departs from it.
+- General advice (contact the authority, check your decision).
+
+**What is not exempt, and is not loose wording.**
+
+- *A false statement about the sources.* "That paragraph is not in my sources" when it is. The judge's prompt exempts every statement about the sources; that is a known limit of the judge, and a label is never changed to fit the prompt.
+- *Attribution.* A lower court's reasoning, a party's submission or an authority's decision given as the holding of another court. Naming the wrong author of a ruling counts.
+- *Legal modality.* "May be refused" written as a requirement; "need not be revoked" written as "does not apply". May, must, must not and need not are different rules.
+- *A transferred condition.* A consequence a source ties to one situation (leaving the country after a job ends or a permit runs out) applied to another (a refused extension), even when the consequence is likely true there too.
+- *A list that leaves out the item that matters.* Saying a situation is "not among the grounds" after listing some of the grounds, when a ground left out reaches it. The supplied sources then contradict the claim.
+- *A forecast stated as certain.* What a case officer "will assess", when no source says so. "This is decided in your case" is a deferral and is fine.
+
+**Loose wording is accepted** only when the legal meaning, the attribution and the conditions that apply are all unchanged. A claim limited to one condition ("cannot be refused on that basis if it is met", of a condition the law says leads to a grant) was accepted on that ground.
+
+**How a label is recorded.**
+
+- The claim the label rests on is quoted word for word from the answer, with the smallest source excerpt that shows the problem and the kind of error (false statement about the sources, attribution, modality, transferred condition, omission, forecast, other).
+- Every further unsupported claim in the same answer is recorded apart from the one the label rests on, so a judge's verdict can be checked for the right reason and not only the right outcome.
+- No judge's verdict or output is used to set a label. A claim a judge flags that the labels do not list is read by a person before anything changes.
+- An answer is never edited and relabelled in place. An edited copy is a separate, synthetic fixture: the original is kept, each change and its reason is recorded with a hash of the text before and after, every remaining claim is read again, and edited fixtures are reported apart from natural answers. Planted fixtures are likewise synthetic and reported apart.
+- A natural sample is not altered to balance its classes. More faithful examples come from further unedited, human-confirmed answers.
+
+**What a judge is measured on.** Beside false positives and false negatives: which claim the judge quoted. A verdict of "not faithful" that quotes a supported claim and misses the labelled one is a right outcome for a wrong reason and is counted as such. Misses are sorted by cause: the sources as shown did not let the judge see the error (context), the judge's prompt exempts it (rubric), or other.
