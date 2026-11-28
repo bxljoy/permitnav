@@ -94,5 +94,12 @@ def _no_answer_settings_from_the_shell(monkeypatch: pytest.MonkeyPatch) -> None:
     # Nor may the developer's own tokens or live-judge setting reach a test's app.
     monkeypatch.delenv("MAINTAINER_TOKEN", raising=False)
     monkeypatch.delenv("LIVE_JUDGE_SHARE", raising=False)
+    for name in (
+        "SHADOW_JUDGE_MODEL",
+        "SHADOW_JUDGE_REASONING_EFFORT",
+        "SHADOW_JUDGE_LIMIT",
+        "SHADOW_JUDGE_BUDGET_USD",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("PERMITNAV_VERSION", raising=False)
     monkeypatch.setattr(tracing, "_versions", {})  # an app under test sets them at start

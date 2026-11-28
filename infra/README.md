@@ -119,6 +119,21 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
     as the answer), counted towards the daily spend cap. It sends the question, answer and
     sources to the judge's provider: fine for your own questions, to be decided again before
     others use the site.
+  - **A shadow judge, to try another judge before switching to it** (off unless set):
+    `SHADOW_JUDGE_MODEL` (with `SHADOW_JUDGE_REASONING_EFFORT`, `SHADOW_JUDGE_LIMIT`, default
+    100 answers, and `SHADOW_JUDGE_BUDGET_USD`, default 1). After the deployed judge has
+    judged one of *your* answers (asked with `MAINTAINER_TOKEN`; nobody else's is ever
+    shadowed), the second judge is asked about the same answer and sources. It sends no
+    score, changes no count and nothing on the site; both verdicts go to the `judge_shadow`
+    table (no text) and a `shadow_judge` step on the trace. It stops by itself at the limit
+    or the budget, and at the daily spend cap. About $0.004 an answer.
+    - How far it has come: `sudo $C exec api permitnav shadow status` (places taken, budget held,
+      and how many answers were left out and why)
+    - The review, with your questions and answers read from Langfuse (read it within
+      Langfuse's 30 days): `sudo $C exec -T api permitnav shadow report > shadow-review.md`.
+      The file holds your own questions; keep it out of the repository.
+    - When the review is over: remove the three or four `SHADOW_JUDGE_*` lines, `sudo $C up -d`,
+      then `sudo $C exec api permitnav shadow clear --yes` (removes every row).
 - **If the access token or a key leaked:** put a new random `API_TOKEN` in `.env` and run
   `sudo $C up -d` (everyone signs in again with the new token). For the OpenRouter key:
   delete the key at OpenRouter, create a new server-only key with a credit limit, put it in

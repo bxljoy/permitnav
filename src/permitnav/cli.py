@@ -941,6 +941,56 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_shadow(args: argparse.Namespace) -> int:
+    """The shadow judge's comparison (permitnav.shadow): `status` (how far it has come),
+    `report` (the review, with the maintainer's own questions read from Langfuse) and
+    `clear` (remove every row when the review is over)."""
+    from permitnav import shadow, shadow_report
+
+    wanted = shadow.settings()
+    with db.connect() as conn:
+        if args.action == "clear":
+            if not args.yes:
+                print("this removes every shadow row and cannot be undone; add --yes")
+                return 1
+            print(f"removed {shadow.clear(conn)} shadow rows")
+            if wanted:
+                print("SHADOW_JUDGE_MODEL is still set: a new sample starts with the next answer")
+            return 0
+        found = shadow.rows(conn)
+        sampled, charged = shadow.used(conn)
+        skips = shadow.skips(conn)
+    limit = wanted.limit if wanted else None
+    budget = wanted.budget_usd if wanted else None
+    if args.action == "status":
+        state = f"on ({wanted.model})" if wanted else "off (SHADOW_JUDGE_MODEL is not set)"
+        print(f"shadow judge: {state}")
+        print(f"places taken: {sampled}" + (f" of {limit}" if limit else ""))
+        print(f"held against the budget: ${charged:.4f}" + (f" of ${budget:.2f}" if budget else ""))
+        print(f"rows: {len(found)}")
+        for reason, n in sorted(skips.items()):
+            print(f"not asked ({reason}): {n}")
+        return 0
+    read = None if args.no_text else shadow_report.langfuse_reader()
+    if read is None and not args.no_text:
+        print("no Langfuse keys in the environment: numbers only", file=sys.stderr)
+    lines = shadow_report.report(
+        found,
+        limit=limit,
+        budget_usd=budget,
+        agreements=args.agreements,
+        seed=args.seed,
+        read=read,
+        skips=skips,
+    )
+    if args.out:
+        Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"wrote {args.out}")
+    else:
+        print("\n".join(lines))
+    return 0
+
+
 def cmd_feedback(args: argparse.Namespace) -> int:
     """The review queue of feedback people chose to save (phase 6, slice 3). A case goes
     into the golden set only rewritten into a generic question; then delete it here."""
@@ -2160,6 +2210,19 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--days", type=_positive_int, default=30)
     st.add_argument("--by-day", action="store_true", help="also list every day's counts")
     st.set_defaults(run=cmd_stats)
+    sh = sub.add_parser("shadow", help="the shadow judge's comparison: status, report, clear")
+    sh.add_argument("action", choices=["status", "report", "clear"])
+    sh.add_argument(
+        "--agreements",
+        type=_positive_int,
+        default=10,
+        help="report: how many of the answers both judges call faithful to show",
+    )
+    sh.add_argument("--seed", type=int, default=0, help="report: for that random choice")
+    sh.add_argument("--no-text", action="store_true", help="report: numbers and trace ids only")
+    sh.add_argument("--out", help="report: write it to this file (it holds your own questions)")
+    sh.add_argument("--yes", action="store_true", help="clear: really remove every row")
+    sh.set_defaults(run=cmd_shadow)
     fb = sub.add_parser("feedback", help="the review queue of feedback people chose to save")
     fb.add_argument("action", choices=["list", "export", "delete"])
     fb.add_argument("ids", nargs="*", help="delete: the ids of reviewed cases")
