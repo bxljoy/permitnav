@@ -1798,3 +1798,25 @@ Every variant that gains anything loses both languages of item 104 (5 kap. 18 §
 **Before other people get access:** (1) the live judge sends each judged question, answer and sources to a second model provider; decide whether to switch it off for others' questions or to cover it in the privacy terms. (2) The maintainer's full-text traces are personal data only while the maintainer is the only one asking with that token; Hobby cannot expire them, so they are deleted by hand (Langfuse's delete API) if that is wanted. (3) Anyone holding the access token can post ratings for any trace id; with accounts, a rating should be tied to the session that got the answer.
 
 **The loop this closes:** a score or a rating flags a case → the maintainer reads it (own questions, or a report) → it is rewritten as a generic golden item → the offline suite and CI gate cover it from then on.
+
+### The live judge measured on faithfulness alone: a labelled benchmark of 40 answers (2026-11-28)
+
+**Why.** The judge was calibrated (D19) on 30 real answers of which 28 were faithful, 12 seeded errors and 2 known cases: agreement of 90 to 93% that the faithful majority alone produces. That says little about the one thing the live judge is used for, catching an answer that states what its sources do not.
+
+**The set** (`evals/judge/faithfulness/`). 40 answers with the sources the answer model was shown: 18 real (13 generated fresh for the ICT salary, berry picking, switch-in-Sweden and 6 kap. 2 b § questions, 5 from the D19 sample) and 22 real answers with one planted change of a known kind: an invented requirement (5), an unsupported detail (4), a rule applied to a category it does not cover (5), a wrong conclusion (4), a condition left out (4; these stay faithful and test for false alarms). The maintainer labelled each answer for source grounding without knowing which were edited, on a separate page from any correctness label; all 18 planted claims were marked. Five labels were corrected after review (cases 07, 16, 24, 29, 39; each carries a `revised` line). 21 not faithful, 19 faithful.
+
+**Labelling policy: uncertainty against misstating the sources (the maintainer's decision, 2026-11-28; the judge's prompt is not changed by it).** A statement that expresses uncertainty or says the sources lack something ("the sources do not settle this", "I cannot tell from the sources") is normally exempt when a person labels faithfulness. A statement that the supplied sources directly contradict is not exempt because it is phrased as a statement about the sources: saying the sources leave open a classification that the question and the sources already establish is labelled not faithful. The judge's prompt today exempts every statement about the sources, so the judge and the labels differ on that second kind until the prompt is reviewed; the difference is counted as a known gap in the calibration, not as a labelling error. Case 39 is the standing example.
+
+**Result** (three runs each, the same prompt, sources and 8,000-token limit; "positive" is an answer that is not faithful; majority of three):
+
+| Judge | Accuracy | Precision | Recall | F1 | Unstable cases | Planted claim quoted |
+|---|---|---|---|---|---|---|
+| Gemini 3.5 Flash-Lite, effort low (deployed) | 32/40 | 100% | 13/21 | 0.76 | 7 | 30 of 34 flagged runs |
+| Gemini 3.5 Flash-Lite, effort medium | 37/40 | 91% | 20/21 | 0.93 | 3 | 54 of 54 |
+| Gemini 3.8 Flash, effort low | 38/40 | 100% | 19/21 | 0.95 | 1 | 54 of 54 |
+
+The deployed judge raised no false alarm by majority and missed 8 of 21, five of them in every run (cases 23, 26, 28, 34, 35: a "får ges" where the source says "får inte ges", a refusal ground reversed, a requirement added inside a list, a processing time, a fee). Those are inside the narrow meaning of faithful, so they are the judge's misses, not a limit of scope. So a live `faithful = False` is worth reading and a `faithful = True` is weak evidence. Both alternatives flag all 18 planted claims in every run. Case 39 is missed by all three: the prompt exempts every statement about the sources. The real-answer side rests on three unfaithful answers and decides nothing by itself.
+
+**What is kept.** The cases, labels, every run's verdicts and the run settings (`runs.json`: models, efforts, prompt hash, tokens, cost). `permitnav judge-faithfulness` recomputes every figure from the stored verdicts with no model call; `--run NAME --model … --reasoning-effort …` asks another judge (paid) and stores it. A test holds the stored verdicts to the figures above. Each stored run is tied to the hash of the prompt it was made with, for good: a later change to the judge's prompt does not break the suite or the old runs; a new run is recorded with its own prompt hash, and the report says so wherever the runs compared did not all use one prompt, or not the current one. Model cost of the whole calibration: about $1.50.
+
+**Not changed.** The judge's prompt and the production judge. The stronger setting is first to be read against the deployed one on real answers, in a shadow comparison.

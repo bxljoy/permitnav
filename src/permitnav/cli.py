@@ -1906,6 +1906,64 @@ def cmd_judge_sample(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_judge_faithfulness(args: argparse.Namespace) -> int:
+    """The faithfulness benchmark (evals/judge/faithfulness): every stored configuration
+    against the labels, from the stored predictions and with no model call; with --run, ask
+    a judge about the 40 answers first (paid) and store what it said under that name."""
+    from permitnav.evals import faithfulness
+
+    directory = Path(args.directory)
+    cases, labels = faithfulness.load_cases(directory), faithfulness.load_labels(directory)
+    if args.run_as:
+        if not faithfulness.NAME.fullmatch(args.run_as):
+            print("--run takes a short name: letters, digits, dots and dashes")
+            return 1
+        if args.run_as in faithfulness.configurations(directory) and not args.replace:
+            print(f"{args.run_as} is stored already; --replace to run it again")
+            return 1
+        from datetime import date
+
+        from permitnav.evals.judge import Judge
+        from permitnav.evals.provenance import prompt_hash
+        from permitnav.llm.openrouter import OpenRouterLLM
+
+        shared = faithfulness.shared_settings(directory)
+        current = prompt_hash(shared["prompt"])
+        if shared["prompt_hash"] != current:  # allowed: this is how a new prompt is tried
+            print(
+                f"note: the judge prompt ({current}) is not the one the first runs used"
+                f" ({shared['prompt_hash']}); this run is recorded with its own prompt"
+            )
+        _, model, effort = _judge(args.model, args.reasoning_effort)  # settings as configured
+        # The stored runs' token limit, whatever the model: the comparison holds it equal.
+        llm = OpenRouterLLM(os.environ.get("OPENROUTER_API_KEY", ""), retries=5)
+        judge = Judge(llm, model, max_tokens=shared["max_tokens"], reasoning_effort=effort)
+        print(f"asking {model} (reasoning effort {effort or 'default'}), {args.runs} runs…")
+        predictions = faithfulness.run(judge, cases, args.runs)
+        faithfulness.save_predictions(args.run_as, predictions, directory)
+        faithfulness.record_run(
+            args.run_as,
+            model,
+            effort,
+            predictions,
+            date.today().isoformat(),
+            current,
+            shared["max_tokens"],
+            directory,
+        )
+    names = [args.run_as] if args.run_as else faithfulness.configurations(directory)
+    results = [
+        faithfulness.evaluate(name, cases, labels, faithfulness.load_predictions(name, directory))
+        for name in names
+    ]
+    from permitnav.evals.provenance import prompt_hash as hash_of
+
+    used = {n: h for n, h in faithfulness.prompt_hashes(directory).items() if n in names}
+    notes = faithfulness.prompt_notes(used, hash_of("judge_faithfulness.md"))
+    print("\n".join(faithfulness.report(results, cases, labels, notes)))
+    return 0
+
+
 def cmd_judge_calibrate(args: argparse.Namespace) -> int:
     """Run the judge on the calibration answers and compare with the hand labels (D19)."""
     import json
@@ -2225,6 +2283,22 @@ def main(argv: list[str] | None = None) -> int:
     jc.add_argument("--verbose", "-v", action="store_true", help="show each disagreement")
     jc.add_argument("--out", help="write the judge's verdicts as JSON lines")
     jc.set_defaults(run=cmd_judge_calibrate)
+    jf = sub.add_parser(
+        "judge-faithfulness",
+        help="the judge's faithfulness benchmark: stored runs against the labels (no model call)",
+    )
+    jf.add_argument("--directory", default="evals/judge/faithfulness")
+    jf.add_argument(
+        "--run",
+        dest="run_as",
+        metavar="NAME",
+        help="ask a judge about the 40 answers (paid) and store its verdicts under this name",
+    )
+    jf.add_argument("--model", help="with --run: judge model (default: JUDGE_MODEL)")
+    jf.add_argument("--reasoning-effort", choices=["low", "medium", "high"], help="with --run")
+    jf.add_argument("--runs", type=_positive_int, default=3, help="with --run")
+    jf.add_argument("--replace", action="store_true", help="with --run: overwrite a stored name")
+    jf.set_defaults(run=cmd_judge_faithfulness)
     for eval_parser in (ev, sm, ea, js, jc):
         eval_parser.add_argument(
             "--trace",
