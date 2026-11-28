@@ -33,7 +33,7 @@ Then:
    LANGFUSE_SECRET_KEY=...
    # optional (online evals, see below):
    MAINTAINER_TOKEN=<another random token, 32 characters or more, for the maintainer only>
-   JUDGE_MODEL=google/gemini-3.5-flash-lite
+   JUDGE_MODEL=google/gemini-3.8-flash
    JUDGE_REASONING_EFFORT=low
    LIVE_JUDGE_SHARE=1
    ```
@@ -115,8 +115,8 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
     Keep it to yourself: whoever holds it has their questions recorded. Before other people
     get access, remember that these traces are your own data only as long as only you use it.
   - `LIVE_JUDGE_SHARE` (0 to 1) with `JUDGE_MODEL`: the share of answers the eval judge checks
-    against their sources after they are sent. About $0.003 per judged answer (as much again
-    as the answer), counted towards the daily spend cap. It sends the question, answer and
+    against their sources after they are sent. About $0.004 per judged answer with
+    Gemini 3.8 Flash at low effort (more than the answer itself), counted towards the daily spend cap. It sends the question, answer and
     sources to the judge's provider: fine for your own questions, to be decided again before
     others use the site.
   - **A shadow judge, to try another judge before switching to it** (off unless set):

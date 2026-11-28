@@ -1872,6 +1872,20 @@ The deployed judge raised no false alarm by majority and missed 8 of 21, five of
 
 **Afterwards.** Unset the settings and `permitnav shadow clear --yes` removes every row. Nothing else was added to remove.
 
+### The production faithfulness judge is Gemini 3.8 Flash at low effort (2026-11-28)
+
+**Decision (the maintainer's).** The live judge on the site changed from `google/gemini-3.5-flash-lite` to `google/gemini-3.8-flash`, both at low reasoning effort, on 2026-11-28. It was decided apart from the editorial notes on rulings (below, off) and apart from what the judge is shown: the judge's prompt and its material (question, answer, the sources' own text) are unchanged.
+
+**On what grounds.** On the labelled benchmark the deployed judge missed 8 of 21 unfaithful answers by majority and Gemini 3.8 Flash flagged all 18 planted claims in every run (above). As the shadow judge it read 33 of the maintainer's own answers next to the deployed one: 33 of 33 completed, every reply readable at the first call (153 of 153 with the benchmark's 120), median 2.1 s against 1.9 s, $0.0041 against $0.0026 per judged answer.
+
+**What it touches.** Only observability: the verdict goes to the `faithful` and `judge_status` scores in Langfuse and to the daily counts in Postgres, after the answer has been sent. Nothing in the answer, in retries, in a warning or in the web page reads it.
+
+**Rates before and after are not one series.** The judge version is part of what is recorded: `judge_version` in the daily counts and `permitnav.judge_version` on the trace (`d5d8b67de25b` before, `fc037a6d4b3a` from the switch). The new judge is stricter, so the share of `faithful = yes` is expected to fall with no change in the answers; a rate is to be read per judge version. 2026-11-28 holds both versions.
+
+**Not changed.** The offline eval judge (`JUDGE_MODEL` in a developer's `.env`, as in `.env.example`) stays Gemini 3.5 Flash-Lite: it also grades correctness, and its calibration is for that model. The shadow settings were removed from the server (it would have compared the judge with itself); the 33 rows in `judge_shadow` are kept.
+
+**Back.** On the server, set `JUDGE_MODEL=google/gemini-3.5-flash-lite` in `/opt/permitnav/.env` (the file from before is `.env.before-judge-switch`) and `docker compose up -d`; the judge version goes back to the old name by itself.
+
 ### Which part of a ruling a passage is: editorial notes for the answer model (2026-11-28; built, off by default)
 
 **The failure.** In the shadow review two answers to one question gave the lower court's reasoning in MIG 2024:12 as the Migration Court of Appeal's, and one of them reversed the holding. A reported ruling is one text with several voices: the headnote, the account of the application and Migrationsverket's decision, the lower court's judgment and reasoning, the parties' claims on appeal, then the Migration Court of Appeal's own text, its assessment and its holding, and sometimes a dissent. Passages are cut by length, every passage is headed "MIG … (Migrationsöverdomstolen)", and the first passage of MIG 2024:12 holds the lower court's reasoning at length, which is the opposite of what the higher court held.
