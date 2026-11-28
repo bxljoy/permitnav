@@ -34,16 +34,23 @@ TIMEOUT_S = 10
 Value = bool | str | float
 
 
-def body(trace_id: str, name: str, value: Value, environment: str) -> dict[str, Any]:
+def body(
+    trace_id: str,
+    name: str,
+    value: Value,
+    environment: str,
+    metadata: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Langfuse's score object. The id is fixed per trace and name, so sending the same
-    score twice (a retry, a second click) replaces it instead of adding one."""
+    score twice (a retry, a second click) replaces it instead of adding one. `metadata`:
+    names made by the code (a judge's version), never text."""
     if isinstance(value, bool):
         data_type, sent = "BOOLEAN", 1 if value else 0
     elif isinstance(value, str):
         data_type, sent = "CATEGORICAL", value
     else:
         data_type, sent = "NUMERIC", value
-    return {
+    score: dict[str, Any] = {
         "id": f"{trace_id}-{name}",
         "traceId": trace_id,
         "name": name,
@@ -51,6 +58,9 @@ def body(trace_id: str, name: str, value: Value, environment: str) -> dict[str, 
         "dataType": data_type,
         "environment": environment,
     }
+    if metadata:
+        score["metadata"] = dict(metadata)
+    return score
 
 
 class Scores:
@@ -73,12 +83,18 @@ class Scores:
         self._thread: threading.Thread | None = None
         self.dropped = 0
 
-    def add(self, trace_id: str | None, name: str, value: Value) -> None:
+    def add(
+        self,
+        trace_id: str | None,
+        name: str,
+        value: Value,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
         """Queue a score for a trace; nothing happens for a trace that was not recorded."""
         if not trace_id:
             return
         try:
-            self._waiting.put_nowait(body(trace_id, name, value, self._environment))
+            self._waiting.put_nowait(body(trace_id, name, value, self._environment, metadata))
         except queue.Full:
             self._drop("the queue is full")
             return

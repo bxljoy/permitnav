@@ -46,5 +46,11 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"
 
+# The commit this image was built from (CI passes it): named on traces and in the daily
+# counts, so a change in a quality rate can be set against a change of code. Last, so a
+# new commit rebuilds nothing above.
+ARG PERMITNAV_VERSION=unknown
+ENV PERMITNAV_VERSION=$PERMITNAV_VERSION
+
 # Migrations are idempotent; then serve. One worker: bge-m3 takes ~2–3 GB of memory.
 CMD ["sh", "-c", "permitnav migrate && exec uvicorn permitnav.api:app --host 0.0.0.0 --port 8000 --workers 1"]

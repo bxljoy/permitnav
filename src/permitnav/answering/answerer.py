@@ -184,6 +184,9 @@ class Answer:
     text: str
     citations: list[Citation] = field(default_factory=list)
     dropped_markers: list[str] = field(default_factory=list)  # cited but not a given source
+    # Quotes the reply offered that were left out: for a source it was not given, or not
+    # word for word in that source's text.
+    dropped_quotes: int = 0
     sources: list[Source] = field(default_factory=list)  # everything the model was shown
     completion: Completion | None = None
     # The other calls made for the same answer: a reply cut off or unreadable and then asked
@@ -200,6 +203,10 @@ class Answer:
     # The answer is in the other language than the question, even after asking again: shown
     # all the same (a right answer in the wrong language still helps), and logged.
     other_language: bool = False
+    # Whether the answer is in the question's language: "match", "mismatch", or "unknown"
+    # when that cannot be told (the question is not in one language, the answer is too short
+    # or mixed, or there is no answer). Unknown is not a match.
+    language: str = "unknown"
     # The reply was not valid JSON and its fields were read by name (_recovered_object): an
     # ordinary answer, counted in logs and eval output so the recovery can be watched.
     recovered: bool = False
@@ -336,6 +343,11 @@ class Answerer:
                     "permitnav.sources": len(answer.sources),
                     "permitnav.model_calls": sum(c is not None for c in calls),
                     "permitnav.cited_units": [c.unit_id for c in answer.citations],
+                    # Counts, never the markers' text: what the reply got wrong about its
+                    # sources before it was cleaned, and the language check's verdict.
+                    "permitnav.citations_invalid": len(answer.dropped_markers),
+                    "permitnav.quotes_dropped": answer.dropped_quotes,
+                    "permitnav.language_match": answer.language,
                 },
             )
             tracing.text(current, output=answer.text)
@@ -462,6 +474,7 @@ class Answerer:
                     earlier.append(second)
         if answer.kind != "failed":  # also after a re-ask for an unreadable reply
             answer.other_language = wrong_language(answer.text, only_language)
+            answer.language = language_verdict(answer.text, only_language)
         if cut_off and answer.kind == "failed":
             answer.text = "The reply was too long and was cut off. Please ask a narrower question."
         answer.earlier = earlier
@@ -492,6 +505,17 @@ def single_language(question: str) -> str | None:
     if english >= 2 and swedish == 0:
         return "en"
     return None
+
+
+def language_verdict(text: str, asked_in: str | None) -> str:
+    """ "match", "mismatch" or "unknown": the same two checks that decide whether an answer
+    is asked for again (`wrong_language`, `clear_language`), with what neither can tell
+    kept apart from a match."""
+    if asked_in is None:
+        return "unknown"
+    if wrong_language(text, asked_in):
+        return "mismatch"
+    return "match" if clear_language(text) == asked_in else "unknown"
 
 
 def wrong_language(text: str, asked_in: str | None) -> bool:
@@ -566,19 +590,25 @@ def parse_answer(completion: Completion, context: Context) -> Answer:
     for marker in dropped:  # remove citations that point to no source the model was given
         text = text.replace(f"[{marker}]", "")
     quotes: dict[str, dict] = {}  # the first exact quote per source
+    dropped_quotes = 0
     raw_quotes = data.get("quotes")
     for quote in raw_quotes if isinstance(raw_quotes, list) else []:
         if not isinstance(quote, dict):
             continue
         source, swedish = quote.get("source"), quote.get("swedish")
-        if not isinstance(source, str) or source not in given or source in quotes:
+        if not isinstance(source, str) or source not in given:
+            dropped_quotes += 1  # for a source the model was not given
             continue
+        if source in quotes:
+            continue  # a second quote for a source: one is shown, nothing is wrong
         if (
             isinstance(swedish, str)
             and swedish
             and _normalise(swedish) in _normalise(given[source].text)
         ):
             quotes[source] = quote
+        else:
+            dropped_quotes += 1  # not word for word in the source
 
     cited = list(dict.fromkeys(m for m in MARKER.findall(text) if m in given))
     citations = []
@@ -605,6 +635,7 @@ def parse_answer(completion: Completion, context: Context) -> Answer:
         text=re.sub(r"[ \t]+([.,;:])", r"\1", text),
         citations=citations,
         dropped_markers=dropped,
+        dropped_quotes=dropped_quotes,
         sources=context.sources,
         completion=completion,
         recovered=recovered is not None,

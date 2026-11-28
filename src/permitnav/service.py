@@ -173,10 +173,18 @@ class AnswerService:
 
     def record(
         self, answer: Answer, question: str, history: list[str], trace_id: str | None
-    ) -> None:
-        """A question was answered: count it, score its trace, perhaps judge it."""
+    ) -> str | None:
+        """A question was answered: count it, score its trace, perhaps judge it. Returns
+        what became of the live judge for it so far (permitnav.online), None without
+        online evals."""
+        if self.online is None:
+            return None
+        return self.online.answered(answer, question, history, trace_id)
+
+    def record_failure(self, trace_id: str | None) -> None:
+        """A question got no answer because the model call failed."""
         if self.online is not None:
-            self.online.answered(answer, question, history, trace_id)
+            self.online.errored(trace_id)
 
     def rate(self, trace_id: str | None, helpful: bool) -> bool:
         """A person's click under an answer; whether it was counted."""

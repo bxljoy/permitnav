@@ -103,7 +103,12 @@ C="docker compose -f docker-compose.yml -f deploy/compose.prod.yml"
   that is what the credit limit on the server's key at OpenRouter is for.
 - **Online evals:** every question is counted per day (`sudo $C exec api permitnav stats`:
   answer kinds, second model calls, the live judge's verdicts, ratings; counts only) and its
-  trace in Langfuse gets scores (`kind`, `second_call`, `faithful`, `helpful`). Two settings
+  trace in Langfuse gets quality scores (`output_valid`, `citation_id_valid`, `language_match`,
+  `second_call`, `judge_status`, `faithful`, `helpful`), the tag `kind:<answer kind>`, and the
+  release (commit) and answer-configuration version it ran on. `faithful` means only that
+  every claim is in a source the model was shown, not that the answer is right; an answer
+  the judge did not judge has no `faithful` score at all (`judge_status` and the `judge`
+  count say why). Two settings
   in `.env`, both off unless set, applied with `sudo $C up -d`:
   - `MAINTAINER_TOKEN`: sign in to the site with this token instead of `API_TOKEN` and your
     questions are traced with their text (Langfuse: user "maintainer"). Nobody else's are.

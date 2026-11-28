@@ -33,9 +33,14 @@ class Sent:
 
     def __init__(self) -> None:
         self.scores: list[tuple[str | None, str, object]] = []
+        self.metadata: dict[str, dict | None] = {}
 
-    def add(self, trace_id, name, value) -> None:
+    def named(self, name: str) -> list[object]:
+        return [value for _, n, value in self.scores if n == name]
+
+    def add(self, trace_id, name, value, metadata=None) -> None:
         self.scores.append((trace_id, name, value))
+        self.metadata[name] = metadata
 
     def flush(self, timeout_s: float = 5.0) -> bool:
         return True
@@ -53,18 +58,27 @@ def totals(url: str) -> dict[str, dict[str, int]]:
 
 
 def test_the_facts_counted_for_a_question() -> None:
-    plain = online.facts(answer(), QUESTION, [])
+    plain = online.facts(answer(language="match"), QUESTION, [])
     assert plain == {
         "kind": "answered",
         "language": "sv",
         "follow_on": "no",
         "second_call": "no",
         "recovered": "no",
-        "other_language": "no",
+        "output": "valid",
+        "citation_generated": "valid",
+        "citation_final": "valid",
+        "language_match": "yes",
     }
     again = Completion(text="", model="m", input_tokens=1, output_tokens=1, cost_usd=0.0)
     harder = online.facts(
-        answer("not_settled", earlier=[again], recovered=True, other_language=True),
+        answer(
+            "not_settled",
+            earlier=[again],
+            recovered=True,
+            language="mismatch",
+            dropped_markers=["S9"],
+        ),
         "What is the salary requirement, and can I change employer with my permit?",
         ["an earlier question"],
     )
@@ -74,34 +88,85 @@ def test_the_facts_counted_for_a_question() -> None:
         "follow_on": "yes",
         "second_call": "yes",
         "recovered": "yes",
-        "other_language": "yes",
+        "output": "valid",
+        "citation_generated": "invalid",  # the reply cited a source it was not given
+        "citation_final": "valid",  # and the answer shown no longer does
+        "language_match": "no",
     }
     assert online.facts(answer(), "12345", [])["language"] == "unknown"
+    # An answer whose language cannot be told is unknown, never a match.
+    assert online.facts(answer(), QUESTION, [])["language_match"] == "unknown"
     for counted in (plain, harder):  # every value is one the table accepts
-        assert all(v in stats.MEASURES[m] for m, v in counted.items())
+        assert all(stats.known(m, v) for m, v in counted.items())
+
+
+def test_a_failed_reply_is_an_invalid_output_and_nothing_is_said_of_its_citations() -> None:
+    failed = online.facts(Answer(kind="failed", text="could not be read"), QUESTION, [])
+    assert failed["output"] == "invalid"
+    assert not {"citation_generated", "citation_final", "language_match"} & failed.keys()
+
+
+def test_the_check_on_the_answer_as_shown() -> None:
+    assert online.cites_only_its_sources(answer())
+    assert online.cites_only_its_sources(Answer(kind="answered", text="No markers."))
+    stray = Answer(kind="answered", text="Yes [S1] and [S7].", sources=[SOURCE])
+    assert not online.cites_only_its_sources(stray)
+    assert online.facts(stray, QUESTION, [])["citation_final"] == "invalid"
 
 
 @pytest.mark.db
 def test_a_question_is_counted_and_scored_without_any_text(fresh_database_url: str) -> None:
     sent = Sent()
-    live = Online(database_url=fresh_database_url, scores=sent)  # type: ignore[arg-type]
-    live.answered(answer(), QUESTION, [], TRACE)
+    live = Online(
+        database_url=fresh_database_url,
+        scores=sent,  # type: ignore[arg-type]
+        release="0ab9798c1d2e",
+    )
+    live.answered(answer(language="match"), QUESTION, [], TRACE)
     assert live.rated(TRACE, False) is True
     assert live.rated(None, True) is True  # an answer without a trace: counted all the same
     finish(live)
-    assert sent.scores == [
-        (TRACE, "kind", "answered"),
+    assert sent.scores == [  # quality signals only: the kind is a tag on the trace, not a score
+        (TRACE, "output_valid", True),
         (TRACE, "second_call", False),
+        (TRACE, "citation_id_valid", True),
+        (TRACE, "language_match", True),
         (TRACE, "helpful", False),
         (None, "helpful", True),
     ]
     counted = totals(fresh_database_url)
     assert counted["kind"] == {"answered": 1}
+    assert counted["output"] == {"valid": 1}
+    assert counted["judge"] == {"off": 1}  # no judge configured: said, not left blank
+    assert counted["release"] == {"0ab9798c1d2e": 1}
     assert counted["rating"] == {"helpful": 1, "not_helpful": 1}
-    assert "faithful" not in counted  # no judge configured
+    assert "faithful" not in counted and "judge_version" not in counted
     with psycopg.connect(fresh_database_url) as conn:
         stored = str(conn.execute("SELECT * FROM daily_count").fetchall())
     assert "byta" not in stored and "SVARSTEXT" not in stored and TRACE not in stored
+
+
+def test_what_cannot_be_told_gets_no_score() -> None:
+    sent = Sent()
+    live = Online(scores=sent)  # type: ignore[arg-type]
+    live._count = lambda counted: True  # type: ignore[method-assign]
+    live.answered(answer(language="unknown", dropped_markers=["S9"]), QUESTION, [], TRACE)
+    live.answered(Answer(kind="failed", text="x"), QUESTION, [], TRACE)
+    finish(live)
+    assert sent.named("language_match") == []  # unknown is not a pass, and not a fail
+    assert sent.named("citation_id_valid") == [False]  # of the answer; none for the failed reply
+    assert sent.named("output_valid") == [True, False]
+    assert sent.named("faithful") == [] and sent.named("judge_status") == []
+
+
+@pytest.mark.db
+def test_a_model_call_that_fails_is_counted_as_an_error(fresh_database_url: str) -> None:
+    sent = Sent()
+    live = Online(database_url=fresh_database_url, scores=sent, release="0ab9798c1d2e")  # type: ignore[arg-type]
+    live.errored(TRACE)
+    finish(live)
+    assert sent.scores == [(TRACE, "output_valid", False)]
+    assert totals(fresh_database_url) == {"output": {"error": 1}, "release": {"0ab9798c1d2e": 1}}
 
 
 @pytest.mark.db
@@ -113,22 +178,32 @@ def test_the_live_judge_reads_the_answer_and_its_sources(fresh_database_url: str
         scores=sent,  # type: ignore[arg-type]
         judge=Judge(llm, "judge-model"),
         judge_share=1.0,
+        judge_version="abcdef012345",
     )
     with tracing.span("ask") as root:
-        live.answered(answer(), QUESTION, ["Jag har arbetstillstånd."], tracing.trace_id(root))
+        status = live.answered(
+            answer(), QUESTION, ["Jag har arbetstillstånd."], tracing.trace_id(root)
+        )
         trace_id = tracing.trace_id(root)
     finish(live)
+    assert status == "queued"
     (request,) = llm.requests  # faithfulness only: there is no reference answer to compare with
     material = request.messages[0]["content"]
     assert QUESTION in material and "SVARSTEXT" in material and "LAGTEXT" in material
     assert "Jag har arbetstillstånd." in material  # a follow-on is judged with what came before
     assert "Reference answer" not in material
     assert (trace_id, "faithful", False) in sent.scores
-    assert totals(fresh_database_url)["faithful"] == {"no": 1}
+    assert (trace_id, "judge_status", "completed") in sent.scores
+    assert sent.metadata["faithful"] == {"judge_version": "abcdef012345"}  # which judge said so
+    counted = totals(fresh_database_url)
+    assert counted["faithful"] == {"no": 1} and counted["judge"] == {"completed": 1}
+    assert counted["judge_version"] == {"abcdef012345": 1}
     judged = {s.name: s for s in spans.get_finished_spans()}
     assert format(judged["live_judge"].context.trace_id, "032x") == trace_id  # the same trace
     attributes = dict(judged["live_judge"].attributes or {})
     assert attributes["permitnav.faithful"] == "no"
+    assert attributes["permitnav.judge_status"] == "completed"
+    assert attributes["permitnav.judge_version"] == "abcdef012345"
     assert attributes["permitnav.unsupported_claims"] == 1
     for span in spans.get_finished_spans():  # metadata only: not the claim, nor any text
         assert "two years" not in str(dict(span.attributes or {}))
@@ -191,9 +266,7 @@ def test_no_judge_once_the_days_spend_cap_is_reached(fresh_database_url: str) ->
 
 
 @pytest.mark.db
-def test_a_judge_that_fails_is_counted_as_unread_and_scores_nothing(
-    fresh_database_url: str, caplog
-) -> None:
+def test_a_judge_that_fails_gives_no_verdict_either_way(fresh_database_url: str, caplog) -> None:
     def fail(_):
         raise LLMError("OpenRouter HTTP 402: account acct_123 has no credit")
 
@@ -207,18 +280,67 @@ def test_a_judge_that_fails_is_counted_as_unread_and_scores_nothing(
     with tracing.request(full=True):  # even in full mode, an error text is not recorded
         live.answered(answer(), QUESTION, [], TRACE)
     finish(live)
-    assert totals(fresh_database_url)["faithful"] == {"unread": 1}
-    assert [name for _, name, _ in sent.scores] == ["kind", "second_call"]
+    counted = totals(fresh_database_url)
+    assert counted["judge"] == {"failed": 1}
+    assert "faithful" not in counted  # neither faithful nor unfaithful
+    assert sent.named("faithful") == [] and sent.named("judge_status") == ["failed"]
     assert "acct_123" not in caplog.text
+
+
+@pytest.mark.db
+def test_every_way_an_answer_can_go_unjudged_is_told_apart(fresh_database_url: str) -> None:
+    from permitnav import spend
+
+    sent = Sent()
+    picks = iter([0.9, 0.0])
+    live = Online(
+        database_url=fresh_database_url,
+        scores=sent,  # type: ignore[arg-type]
+        judge=Judge(ScriptedLLM(FAITHFUL), "j"),
+        judge_share=0.5,
+        spend_cap_usd=5.0,
+        pick=lambda: next(picks),
+    )
+    assert live.answered(answer("follow_up"), QUESTION, [], TRACE) == "ineligible"
+    assert live.answered(answer(), QUESTION, [], TRACE) == "not_sampled"
+    with psycopg.connect(fresh_database_url) as conn:
+        spend.record(conn, 5.0)  # the day's cap is reached before the judge gets to it
+    assert live.answered(answer(), QUESTION, [], TRACE) == "queued"
+    assert live.settle(5)
+    live._waiting = online.MAX_JUDGES_WAITING  # as if that many answers were waiting
+    live.pick = lambda: 0.0
+    assert live.answered(answer(), QUESTION, [], TRACE) == "queue_full"
+    live._waiting = 0
+    finish(live)
+    off = Online(database_url=fresh_database_url)
+    assert off.answered(answer(), QUESTION, [], TRACE) == "off"
+    finish(off)
+    counted = totals(fresh_database_url)
+    assert counted["judge"] == {
+        "ineligible": 1,
+        "not_sampled": 1,
+        "capped": 1,
+        "queue_full": 1,
+        "off": 1,
+    }
+    assert "faithful" not in counted  # none of them is a verdict
+    # A score only where the answer was chosen for the judge and got no verdict.
+    assert sorted(map(str, sent.named("judge_status"))) == ["capped", "queue_full"]
+    assert sent.named("faithful") == []
 
 
 def test_a_database_that_is_away_does_not_stop_anything(caplog) -> None:
     sent = Sent()
     live = Online(database_url="postgresql://nobody@127.0.0.1:1/none", scores=sent)  # type: ignore[arg-type]
-    live.answered(answer(), QUESTION, [], TRACE)
+    live.answered(answer(language="match"), QUESTION, [], TRACE)
     assert live.rated(TRACE, True) is False  # not counted: the page is told, and no score
     finish(live)
-    assert [name for _, name, _ in sent.scores] == ["kind", "second_call"]
+    assert [name for _, name, _ in sent.scores] == [
+        "output_valid",
+        "second_call",
+        "citation_id_valid",
+        "language_match",
+    ]
     assert "daily counts not written" in caplog.text and "byta" not in caplog.text
 
 
@@ -322,3 +444,46 @@ def test_the_live_judge_is_the_configured_eval_judge(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("JUDGE_REASONING_EFFORT", "extreme")
     with pytest.raises(ValueError, match="JUDGE_REASONING_EFFORT"):
         online.live_judge(llm)
+
+
+def test_a_database_that_cannot_be_read_is_not_called_the_spend_cap() -> None:
+    sent = Sent()
+    llm = ScriptedLLM(FAITHFUL)
+    live = Online(
+        database_url="postgresql://nobody@127.0.0.1:1/none",
+        scores=sent,  # type: ignore[arg-type]
+        judge=Judge(llm, "j"),
+        judge_share=1.0,
+        spend_cap_usd=5.0,
+    )
+    live.answered(answer(), QUESTION, [], TRACE)
+    finish(live)
+    assert llm.requests == []  # nothing is spent when the day's total cannot be read
+    assert sent.named("judge_status") == ["failed"] and sent.named("faithful") == []
+
+
+def test_the_judges_slot_is_given_back_when_an_answer_cannot_be_recorded() -> None:
+    live = Online(judge=Judge(ScriptedLLM(FAITHFUL), "j"), judge_share=1.0)
+    live.close()  # the service is stopping: nothing more can be queued
+    for _ in range(online.MAX_JUDGES_WAITING + 2):
+        with pytest.raises(RuntimeError):
+            live.answered(answer(), QUESTION, [], TRACE)
+    assert live._waiting == 0
+
+
+@pytest.mark.db
+def test_the_judges_version_is_counted_only_for_answers_it_read(fresh_database_url: str) -> None:
+    picks = iter([0.9, 0.9, 0.0])
+    live = Online(
+        database_url=fresh_database_url,
+        judge=Judge(ScriptedLLM(FAITHFUL), "j"),
+        judge_share=0.5,
+        judge_version="abcdef012345",
+        pick=lambda: next(picks),
+    )
+    for _ in range(3):
+        live.answered(answer(), QUESTION, [], TRACE)
+    finish(live)
+    counted = totals(fresh_database_url)
+    assert counted["judge"] == {"completed": 1, "not_sampled": 2}
+    assert counted["judge_version"] == {"abcdef012345": 1}

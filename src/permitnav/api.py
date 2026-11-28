@@ -67,7 +67,8 @@ class Service(Protocol):
     def source(self, version_id: int) -> dict[str, str] | None: ...
     def record(
         self, answer: Answer, question: str, history: list[str], trace_id: str | None
-    ) -> None: ...
+    ) -> str | None: ...
+    def record_failure(self, trace_id: str | None) -> None: ...
     def rate(self, trace_id: str | None, helpful: bool) -> bool: ...
     def save_feedback(self, case: FeedbackIn) -> None: ...
     def withdraw_feedback(self, code: str) -> bool: ...
@@ -271,6 +272,14 @@ def create_app(
                     f"MAINTAINER_TOKEN must be at least {MIN_MAINTAINER_TOKEN_CHARS} characters"
                 )
         tracing.configure("permitnav-api", content="metadata")  # always: users' questions
+        from permitnav import versions
+
+        model = os.environ.get("ANSWER_MODEL", "").strip()
+        translate = os.environ.get("TRANSLATE_MODEL", "").strip() or model  # as build_service
+        tracing.set_versions(
+            release=versions.release(),
+            version=versions.answer_version(model, translate) if model else None,
+        )
         if state["service"] is None:
             from permitnav.service import build_service
 
@@ -465,8 +474,18 @@ def create_app(
             if top is not None:
                 tracing.label(top)
                 tracing.text(top, input=request.question)
+
+            def describe(kind: str, judge: str | None = None) -> None:
+                """What the question came to, as a tag to filter traces by (a description,
+                not a score), and what became of the live judge for it."""
+                for one in (current, top):
+                    if one is not None:
+                        tracing.tag(one, f"kind:{kind}")
+                if judge:
+                    current.set_attribute("permitnav.judge", judge)
+
             try:
-                response = _ask(request, as_of, progress, tracing.trace_id(current))
+                response = _ask(request, as_of, progress, tracing.trace_id(current), describe)
             except HTTPException as error:
                 if top is not None:
                     # Our own fixed wording (never a provider's message): so a question that
@@ -487,6 +506,7 @@ def create_app(
         as_of: date,
         progress: Callable[[str], None] | None,
         trace_id: str | None,
+        describe: Callable[..., None],
     ) -> AskResponse:
         from permitnav.llm.port import LLMError
         from permitnav.spend import SpendCapReached
@@ -496,15 +516,35 @@ def create_app(
         except SpendCapReached as reached:
             # Usually a leaked access token: an error in the log, a plain message to the person.
             log.error("question declined: %s", reached)
+            describe("declined")
             raise HTTPException(status_code=429, detail=SPEND_CAP_MESSAGE) from reached
         except LLMError as error:
             # The provider's message can carry account or billing details: logged, not returned.
             log.error("model call failed: %s", _first_part(error))
+            describe("error")
+            try:
+                state["service"].record_failure(trace_id)
+            except Exception as failure:
+                log.error("failure not recorded for online evals: %s", type(failure).__name__)
             raise HTTPException(status_code=502, detail="model call failed") from error
+        except (ClientGone, anyio.BrokenResourceError, anyio.ClosedResourceError):
+            raise  # the person left: not a failure of the answer
+        except Exception as error:
+            # Anything else (the database, the search): the person gets an error page, and
+            # the question is counted as one without an answer, or an outage would show as
+            # a day of nothing but valid outputs.
+            describe("error")
+            try:
+                state["service"].record_failure(trace_id)
+            except Exception as failure:
+                log.error("failure not recorded for online evals: %s", type(failure).__name__)
+            raise error
+        judge = None
         try:  # counts, scores, perhaps the live judge: never worth losing the answer over
-            state["service"].record(answer, request.question, request.history, trace_id)
+            judge = state["service"].record(answer, request.question, request.history, trace_id)
         except Exception as error:
             log.error("answer not recorded for online evals: %s", type(error).__name__)
+        describe(answer.kind, judge if isinstance(judge, str) else None)
         if answer.kind == "failed":  # unreadable, cut off or without an answer, even when re-asked
             # The reason, never the reply's text (it can repeat the question).
             log.error("answer failed: %s", answer.problem or "the reply could not be read")

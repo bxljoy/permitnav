@@ -18,7 +18,10 @@ services:
       retries: 15
 
   api:
-    build: .
+    build:
+      context: .
+      args:   # the commit, when the caller exports it (infra/startup.sh); CI passes its own
+        PERMITNAV_VERSION: ${PERMITNAV_VERSION:-unknown}
     # Production runs the image CI built (deploy/update.sh sets PERMITNAV_IMAGE to its
     # digest); without it, this is the image built from this checkout.
     image: ${PERMITNAV_IMAGE:-permitnav-api}

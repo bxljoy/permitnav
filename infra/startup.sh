@@ -136,6 +136,9 @@ if [ -f "$APP/.env" ]; then
   # VM), build from the checkout.
   build=--build
   grep -q '^PERMITNAV_IMAGE=.' .env && build=
+  # A build from the checkout names its commit, as CI's images do (traces, daily counts).
+  PERMITNAV_VERSION=$(git -C "$APP" rev-parse HEAD 2>/dev/null || echo unknown)
+  export PERMITNAV_VERSION
   flock /run/permitnav-deploy.lock \
     docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d $build
   docker image prune -f  # each rebuild leaves the previous ~3.3 GB image behind
