@@ -90,3 +90,10 @@ def test_no_sender_without_the_langfuse_keys(monkeypatch: pytest.MonkeyPatch) ->
     made = scores.from_environment()
     assert made is not None and made._url == "https://cloud.langfuse.com/api/public/scores"
     assert made._environment == "production"
+
+
+def test_a_score_can_name_the_version_that_made_it() -> None:
+    made = scores.body(TRACE, "faithful", True, "production", {"judge_version": "abcdef012345"})
+    assert made["metadata"] == {"judge_version": "abcdef012345"}
+    assert "metadata" not in scores.body(TRACE, "faithful", True, "production")
+    assert "comment" not in made  # nothing here takes free text

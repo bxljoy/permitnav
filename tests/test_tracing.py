@@ -287,3 +287,21 @@ def test_text_is_not_written_to_a_span_that_has_ended(spans, caplog) -> None:
     (span,) = spans.get_finished_spans()
     assert "langfuse.observation.output" not in dict(span.attributes or {})
     assert "ended span" not in caplog.text
+
+
+def test_every_span_names_the_versions_that_made_it(spans) -> None:
+    tracing.set_versions(release="0ab9798c1d2e", version="abcdef012345")
+    try:
+        with tracing.span("ask") as current:
+            tracing.complete(ScriptedLLM("reply"), request(), "generate")
+            tracing.tag(current, "kind:answered")
+    finally:
+        tracing.set_versions()
+    with tracing.span("later"):
+        pass
+    generate, ask, later = (dict(s.attributes or {}) for s in spans.get_finished_spans())
+    for attributes in (generate, ask):  # Langfuse reads release and version per span
+        assert attributes["langfuse.release"] == "0ab9798c1d2e"
+        assert attributes["langfuse.version"] == "abcdef012345"
+    assert list(ask["langfuse.trace.tags"]) == ["kind:answered"]  # a label, not a score
+    assert "langfuse.release" not in later and "langfuse.trace.tags" not in generate

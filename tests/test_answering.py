@@ -1345,3 +1345,31 @@ def test_a_recovered_reply_is_an_answer_and_a_cut_off_one_is_not() -> None:
     pointer = '{"kind": "answered", "answer": "(se ovan)" "quotes": []}'
     failed = parse_answer(Completion(text=pointer, model="m"), Context(sources=[]))
     assert (failed.kind, failed.problem) == ("failed", "no answer in the answer field")
+
+
+def test_the_language_verdict_keeps_what_cannot_be_told_apart_from_a_match() -> None:
+    from permitnav.answering.answerer import language_verdict
+
+    swedish = "Ja, du kan byta arbetsgivare om du har haft arbetstillstånd i minst två år."
+    english = "Yes, you can change employer if you have held a work permit for two years."
+    assert language_verdict(swedish, "sv") == "match"
+    assert language_verdict(english, "sv") == "mismatch"
+    assert language_verdict(english, "en") == "match"
+    assert language_verdict("Ja [S1].", "sv") == "unknown"  # too short to tell: not a match
+    assert language_verdict(swedish, None) == "unknown"  # the question was not in one language
+
+
+def test_quotes_left_out_are_counted_not_kept() -> None:
+    ctx = context_with("Lönen ska vara minst 90 procent av medianlönen.")
+    exact = {"source": "S1", "swedish": "minst 90 procent av medianlönen", "translation": "x"}
+    again = {"source": "S1", "swedish": "Lönen ska vara", "translation": "a second, also exact"}
+    invented = {"source": "S1", "swedish": "minst 80 procent", "translation": "x"}
+    elsewhere = {"source": "S9", "swedish": "minst 90 procent", "translation": "x"}
+    answer = parse_answer(
+        reply({"kind": "answered", "answer": "Yes [S1].", "quotes": [exact, again]}), ctx
+    )
+    assert answer.dropped_quotes == 0  # a second quote for a source is not an error
+    answer = parse_answer(
+        reply({"kind": "answered", "answer": "Yes [S1].", "quotes": [invented, elsewhere]}), ctx
+    )
+    assert answer.dropped_quotes == 2  # not in the source's words; for a source not given

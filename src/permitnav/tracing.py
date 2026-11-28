@@ -85,9 +85,11 @@ def request(
 
 
 def label(current: Span) -> None:
-    """Put the request's conversation and user on a span that was started before `request`
-    (the HTTP request's own span)."""
-    set_attributes(current, **(_request_attributes.get() or {}))
+    """Put the versions and the request's conversation and user on a span that was started
+    before `request` (the HTTP request's own span)."""
+    if current.is_recording():
+        set_attributes(current, **_versions)
+        set_attributes(current, **(_request_attributes.get() or {}))
 
 
 def trace_id(current: Span | None = None) -> str | None:
@@ -107,6 +109,26 @@ def set_content_mode(mode: str) -> None:
 
 
 _provider: Any = None
+# Put on every span of the process: which deployment and answer configuration made it
+# (`set_versions`). Langfuse reads release and version per span, not per trace.
+_versions: dict[str, str] = {}
+
+
+def set_versions(release: str | None = None, version: str | None = None) -> None:
+    """`release`: the deployed commit; `version`: the answer configuration
+    (permitnav.versions). Names made by the code, never text from a person."""
+    _versions.clear()
+    if release:
+        _versions["langfuse.release"] = release
+    if version:
+        _versions["langfuse.version"] = version
+
+
+def tag(current: Span, *tags: str) -> None:
+    """Descriptive labels for a trace (its answer kind), as Langfuse tags: something to
+    filter by, not a score. On an open span only."""
+    if tags and current.is_recording():
+        current.set_attribute("langfuse.trace.tags", list(tags))
 
 
 QUESTION_PATHS = ("/ask", "/ask/stream")
@@ -250,6 +272,7 @@ def span(name: str, kind: str = "span", **attributes: Any) -> Iterator[Span]:
         name, record_exception=False, set_status_on_exception=False
     ) as current:
         current.set_attribute("langfuse.observation.type", kind)
+        set_attributes(current, **_versions)
         set_attributes(current, **(_request_attributes.get() or {}))
         set_attributes(current, **attributes)
         try:

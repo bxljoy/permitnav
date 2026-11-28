@@ -1799,6 +1799,41 @@ Every variant that gains anything loses both languages of item 104 (5 kap. 18 §
 
 **The loop this closes:** a score or a rating flags a case → the maintainer reads it (own questions, or a report) → it is rewritten as a generic golden item → the offline suite and CI gate cover it from then on.
 
+### Online evals, second pass: quality scores apart from descriptions, the judge's fate, versions (2026-11-28)
+
+**Why.** The first pass sent `kind` as a score beside quality scores, left a missing `faithful` ambiguous (not eligible, not sampled, at the cap, queue full, failed), recorded nothing about citations that were removed, counted a question of undetectable language as a language match, and put no version on anything, so a rate could not be set against a change of code, prompt or judge.
+
+**What "faithful" means, and does not.** Faithfulness is kept narrow (the maintainer's decision, 2026-11-28): every factual claim in the answer is stated by a source the answer model was shown. It is not a measure of legal correctness. An answer can be faithful and wrong: it can apply a real rule to a permit category the rule does not cover (ordinary work-permit rules to an ICT permit, the ordinary permit to berry picking), leave out a condition or an exception, or reach the wrong conclusion from sources it quotes accurately. Those are questions of applicability, completeness and correctness; they are measured against reference answers by the offline evals and the golden set, and no production score claims them. A high share of "faithful" must never be reported as "the answers are right". The calibration known case for item 104 is the standing example: faithful, and incorrect.
+
+**Scores are quality signals; descriptions are tags and attributes.** Each score costs a Langfuse unit, so:
+
+| What | Where | When |
+|---|---|---|
+| `output_valid` | score (boolean) | every question; false for a reply unusable even when re-asked, and for a failed model call |
+| `second_call` | score (boolean) | every answered question |
+| `citation_id_valid` | score (boolean) | every answer; false when the reply as generated cited a source it was not given |
+| `language_match` | score (boolean) | only when it can be told; an undetectable language gets no score |
+| `judge_status` | score (categorical) | only for an answer chosen for the judge: `completed`, `failed`, `capped`, `queue_full` |
+| `faithful` | score (boolean) | only with a completed judgement |
+| `helpful` | score (boolean) | on a click |
+| answer kind | tag `kind:<kind>` on the trace's first row and the `ask` span | every question (also `kind:error`, `kind:declined`) |
+| why the judge was not asked (`off`, `ineligible`, `not_sampled`) | attribute `permitnav.judge` on `ask`, and the daily count | every question |
+| counts: invalid markers in the generated reply, quotes left out, the language verdict | attributes on the `answer` span | every question |
+| release (commit), answer configuration | `langfuse.release`, `langfuse.version` on every span | every question |
+| judge version | attribute on `live_judge`, metadata on `faithful` and `judge_status` | when judged |
+
+About six scores for a judged answer (three before), some sixteen units a question with its spans. Old `kind` scores stay as they are; none is sent from this version on. Nothing was rewritten.
+
+**Citations: two different facts.** `citation_generated` is about the model: did its reply cite a marker for a source it was not given (the marker is removed before the answer is shown, and counted). `citation_final` is about the cleaning: does the answer as shown cite only sources it was given (expected to be always valid; a failure would be a bug in the cleaning, not in the model). Quotes left out because they were for a source not given, or not word for word in the source, are counted on the trace. Only counts are kept, never the markers or the text.
+
+**Language.** `language_match` is yes, no or unknown, from the same two checks that decide whether an answer is asked for again (`wrong_language`, `clear_language`). Unknown (the question is not in one language, the answer is too short or mixed) is not a match and gets no score; `other_language` in the daily counts is no longer written.
+
+**The judge's fate.** Every answer gets exactly one `judge` count: `completed`, `failed`, `capped` (the day's spend cap), `queue_full`, `not_sampled`, `ineligible` (a kind that states nothing to check) or `off`. `faithful` is counted and scored only for `completed`: a missing evaluation is never counted as faithful or unfaithful, and the faithful rate's denominator is the completed judgements. Answers still waiting for the judge when the service stops are dropped and counted nowhere: the one gap.
+
+**Versions.** `release` is the commit the image was built from (`PERMITNAV_VERSION`, a build argument set by CI); the answer configuration is a hash of the answer model, its settings and the answer, intake and translate prompts; the judge version is a hash of the judge model, its reasoning effort and the faithfulness prompt (`versions.py`). The daily counts get `release` and `judge_version` as measures whose value must be a short hex name, so the vocabulary still admits no text.
+
+**Reading the rates.** Each measure has its own denominator; a rate is only comparable within one judge version and one sampling share; `faithful` covers only the kinds judged (`answered`, `not_settled`) and only completed judgements; with the judge's known leniency its level is an upper bound and its direction is the signal.
+
 ### The live judge measured on faithfulness alone: a labelled benchmark of 40 answers (2026-11-28)
 
 **Why.** The judge was calibrated (D19) on 30 real answers of which 28 were faithful, 12 seeded errors and 2 known cases: agreement of 90 to 93% that the faithful majority alone produces. That says little about the one thing the live judge is used for, catching an answer that states what its sources do not.

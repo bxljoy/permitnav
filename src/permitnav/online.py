@@ -2,8 +2,10 @@
 
 A question from a person has no reference answer, so nothing here says whether an answer was
 right; that stays with the golden sets. What can be told without one:
-- facts the pipeline already knows (the answer's kind, whether the model had to be asked a
-  second time, the question's language): counted for every question;
+- facts the pipeline already knows, checked in code with no further model call: whether
+  there was a usable answer, whether the reply cited only sources it was given, whether
+  the answer is in the question's language, whether the model had to be asked a second
+  time: for every question;
 - whether the answer stays within the sources it was shown: the eval judge's faithfulness
   check, run after the answer has gone out, on a share of the answers (LIVE_JUDGE_SHARE);
 - whether the person found it helpful: a click under the answer.
@@ -11,6 +13,20 @@ right; that stays with the golden sets. What can be told without one:
 Each goes to two places, neither of which gets any text: a score on the question's trace in
 Langfuse (permitnav.scores), to find and filter single cases, and a count per day in
 Postgres (permitnav.stats), because Langfuse's free plan shows only the last 30 days.
+
+Scores are quality signals only (each costs a Langfuse unit): `output_valid`,
+`citation_id_valid`, `language_match`, `second_call`, `faithful`, `judge_status`,
+`helpful`. What merely describes a question (its answer kind, the versions that produced
+it) is a tag or an attribute on the trace.
+
+"Faithful" is narrow on purpose: every factual claim in the answer is stated by a source the
+answer model was shown. An answer can be faithful and wrong: it can apply a real rule to a
+permit it does not cover, or leave out a condition. Those are questions of correctness,
+measured against reference answers by the offline evals, not here.
+
+An answer the judge was not asked about, or could not judge, has no `faithful` verdict at
+all: it is never counted as faithful or as unfaithful. `judge_status` and the `judge` count
+say what happened instead.
 
 None of it can delay or fail an answer: the counts and the judge run on background threads,
 and every error here is logged by its type and dropped. Stopping the service waits a few
@@ -39,7 +55,7 @@ import psycopg
 
 from permitnav import db, spend, stats, tracing
 from permitnav.agent.intake import MAX_HISTORY
-from permitnav.answering.answerer import Answer
+from permitnav.answering.answerer import MARKER, Answer
 from permitnav.evals.judge import CalibrationItem, Judge
 from permitnav.llm.port import LLM
 from permitnav.retrieval.translate import language_of
@@ -47,6 +63,7 @@ from permitnav.scores import Scores
 
 log = logging.getLogger("permitnav.online")
 
+LANGUAGE_MATCH = {"match": "yes", "mismatch": "no", "unknown": "unknown"}
 JUDGED_KINDS = ("answered", "not_settled")  # the kinds that state something about the rules
 MAX_JUDGES_WAITING = 8  # more answers than this waiting for the judge: the next is skipped
 CONNECT_TIMEOUT_S = 3  # for the counts: a database that does not answer is given up on
@@ -57,17 +74,28 @@ def _yes_no(value: object) -> str:
     return "yes" if value else "no"
 
 
+def cites_only_its_sources(answer: Answer) -> bool:
+    """A check on the cleaning: the answer as shown names no source it was not given."""
+    given = {source.marker for source in answer.sources}
+    return all(marker in given for marker in MARKER.findall(answer.text))
+
+
 def facts(answer: Answer, question: str, history: list[str]) -> dict[str, str]:
     """What is counted for every question (the vocabulary of permitnav.stats)."""
     language = language_of(question)
-    return {
+    counted = {
         "kind": answer.kind,
         "language": language if language in ("sv", "en") else "unknown",
         "follow_on": _yes_no(history),
         "second_call": _yes_no(answer.earlier),
         "recovered": _yes_no(answer.recovered),
-        "other_language": _yes_no(answer.other_language),
+        "output": "invalid" if answer.kind == "failed" else "valid",
     }
+    if answer.kind != "failed":  # there is an answer to say these of
+        counted["citation_generated"] = "invalid" if answer.dropped_markers else "valid"
+        counted["citation_final"] = "valid" if cites_only_its_sources(answer) else "invalid"
+        counted["language_match"] = LANGUAGE_MATCH.get(answer.language, "unknown")
+    return counted
 
 
 def judge_share() -> float:
@@ -86,10 +114,9 @@ def judge_share() -> float:
     return share
 
 
-def live_judge(llm: LLM) -> Judge | None:
-    """The eval judge (JUDGE_MODEL, JUDGE_REASONING_EFFORT) on the given client, when
-    LIVE_JUDGE_SHARE asks for one. The client is the service's metered one, so the judge's
-    calls count towards the daily spend cap."""
+def judge_settings() -> tuple[str, str | None] | None:
+    """The live judge's model and reasoning effort (JUDGE_MODEL, JUDGE_REASONING_EFFORT),
+    when LIVE_JUDGE_SHARE asks for a judge; None when it does not."""
     if judge_share() == 0:
         return None
     model = os.environ.get("JUDGE_MODEL", "").strip()
@@ -98,6 +125,16 @@ def live_judge(llm: LLM) -> Judge | None:
     effort = os.environ.get("JUDGE_REASONING_EFFORT", "").strip() or None
     if effort and effort not in ("low", "medium", "high"):
         raise ValueError(f"JUDGE_REASONING_EFFORT must be low, medium or high, not {effort!r}")
+    return model, effort
+
+
+def live_judge(llm: LLM) -> Judge | None:
+    """The eval judge on the given client, when LIVE_JUDGE_SHARE asks for one. The client is
+    the service's metered one, so the judge's calls count towards the daily spend cap."""
+    settings = judge_settings()
+    if settings is None:
+        return None
+    model, effort = settings
     if effort:  # a reasoning model: its thinking counts against the token limit (cli._judge)
         return Judge(llm, model, max_tokens=8000, reasoning_effort=effort)
     return Judge(llm, model)
@@ -111,6 +148,10 @@ class Online:
     judge_share: float = 0.0
     spend_cap_usd: float | None = None  # at the cap, the judge stops too
     pick: Callable[[], float] = random.random
+    # Version names (permitnav.versions) counted with each question and sent with the
+    # judge's scores; None: not recorded.
+    release: str | None = None
+    judge_version: str | None = None
     _pool: ThreadPoolExecutor = field(
         default_factory=lambda: ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-judge"),
         repr=False,
@@ -125,43 +166,87 @@ class Online:
 
     def answered(
         self, answer: Answer, question: str, history: list[str], trace_id: str | None
-    ) -> None:
+    ) -> str:
         """Count a finished question, score its trace, and perhaps hand it to the judge.
-        Called inside the question's trace, so the judge's call becomes part of it."""
+        Called inside the question's trace, so the judge's call becomes part of it.
+        Returns what became of the judge for this answer so far: "queued", or why it was
+        not asked ("off", "ineligible", "not_sampled", "queue_full")."""
         counted = facts(answer, question, history)
-        self._counts.submit(self._count, counted)  # not on the answer's way out
-        if self.scores is not None:
-            self.scores.add(trace_id, "kind", answer.kind)
-            self.scores.add(trace_id, "second_call", bool(answer.earlier))
-        if self._to_judge(answer):
-            item = CalibrationItem(
-                id=trace_id or "",
-                question=question,
-                language=counted["language"],
-                expected_kind="",
-                reference_answer="",
-                kind=answer.kind,
-                answer=answer.text,
-                sources=[
-                    {
-                        "marker": s.marker,
-                        "role": s.role,
-                        "heading": s.heading,
-                        "dates": s.dates,
-                        "text": s.text,
-                    }
-                    for s in answer.sources
-                ],
-                # What the answer was built from: the last few earlier questions (intake),
-                # not everything a client sent along.
-                turns=[h for h in history if h.strip()][-MAX_HISTORY:],
-            )
-            try:
-                # A copy of this request's context: its trace, and its trace settings.
-                self._pool.submit(contextvars.copy_context().run, self._judge, item, trace_id)
-            except RuntimeError:  # shutting down
+        status = self._judge_status(answer)
+        handed_over = False
+        try:
+            self._record(answer, counted, status, trace_id)
+            if status == "queued":
+                self._hand_to_judge(answer, question, history, counted["language"], trace_id)
+                handed_over = True
+        finally:
+            if status == "queued" and not handed_over:  # the judge's slot is given back
                 with self._lock:
                     self._waiting -= 1
+        return status
+
+    def _record(
+        self, answer: Answer, counted: dict[str, str], status: str, trace_id: str | None
+    ) -> None:
+        if status != "queued":
+            counted["judge"] = status
+        if self.release:
+            counted["release"] = self.release
+        self._counts.submit(self._count, counted)  # not on the answer's way out
+        if self.scores is not None:
+            self.scores.add(trace_id, "output_valid", answer.kind != "failed")
+            self.scores.add(trace_id, "second_call", bool(answer.earlier))
+            if "citation_generated" in counted:
+                self.scores.add(
+                    trace_id, "citation_id_valid", counted["citation_generated"] == "valid"
+                )
+            if counted.get("language_match") in ("yes", "no"):  # unknown: no score
+                self.scores.add(trace_id, "language_match", counted["language_match"] == "yes")
+            if status == "queue_full":  # chosen for the judge, and not judged
+                self.scores.add(trace_id, "judge_status", status, self._judge_metadata())
+
+    def _hand_to_judge(
+        self,
+        answer: Answer,
+        question: str,
+        history: list[str],
+        language: str,
+        trace_id: str | None,
+    ) -> None:
+        """Queue the answer for the judge; raises when the service is shutting down."""
+        item = CalibrationItem(
+            id=trace_id or "",
+            question=question,
+            language=language,
+            expected_kind="",
+            reference_answer="",
+            kind=answer.kind,
+            answer=answer.text,
+            sources=[
+                {
+                    "marker": s.marker,
+                    "role": s.role,
+                    "heading": s.heading,
+                    "dates": s.dates,
+                    "text": s.text,
+                }
+                for s in answer.sources
+            ],
+            # What the answer was built from: the last few earlier questions (intake),
+            # not everything a client sent along.
+            turns=[h for h in history if h.strip()][-MAX_HISTORY:],
+        )
+        # A copy of this request's context: its trace, and its trace settings.
+        self._pool.submit(contextvars.copy_context().run, self._judge, item, trace_id)
+
+    def errored(self, trace_id: str | None) -> None:
+        """A question that got no answer because the model call failed."""
+        counted = {"output": "error"}
+        if self.release:
+            counted["release"] = self.release
+        self._counts.submit(self._count, counted)
+        if self.scores is not None:
+            self.scores.add(trace_id, "output_valid", False)
 
     def rated(self, trace_id: str | None, helpful: bool) -> bool:
         """A click under an answer; whether it was counted. The count is of clicks: a
@@ -184,67 +269,98 @@ class Online:
 
     def close(self, wait_s: float = STOP_WAIT_S) -> None:
         """Shutdown: write the counts, give a judge call under way a few seconds (answers
-        still waiting for the judge are dropped), then send the scores. Bounded, so the
-        traces can still be flushed before the process is stopped."""
+        still waiting for the judge are dropped, and counted nowhere), then send the scores.
+        Bounded, so the traces can still be flushed before the process is stopped."""
         self._pool.shutdown(wait=False, cancel_futures=True)
-        self._counts.shutdown(wait=True)  # each bounded by the connect timeout
         deadline = time.monotonic() + wait_s
         while self._judging and time.monotonic() < deadline:
             time.sleep(0.02)
+        self._counts.shutdown(wait=True)  # each bounded by the connect timeout
         if self.scores is not None:
             self.scores.flush(wait_s)
 
-    def _to_judge(self, answer: Answer) -> bool:
-        """Whether this answer goes to the judge; if so it is counted as waiting."""
-        if self.judge is None or answer.kind not in JUDGED_KINDS or not answer.sources:
-            return False
+    def _judge_status(self, answer: Answer) -> str:
+        """Whether this answer goes to the judge ("queued": it is then counted as waiting),
+        or why not."""
+        if self.judge is None:
+            return "off"
+        if answer.kind not in JUDGED_KINDS or not answer.sources:
+            return "ineligible"
         if self.pick() >= self.judge_share:
-            return False
+            return "not_sampled"
         with self._lock:
             if self._waiting >= MAX_JUDGES_WAITING:
                 log.warning("live judge skipped: %d answers already waiting", self._waiting)
-                return False
+                return "queue_full"
             self._waiting += 1
-        return True
+        return "queued"
+
+    def _judge_metadata(self) -> dict[str, str] | None:
+        return {"judge_version": self.judge_version} if self.judge_version else None
 
     def _judge(self, item: CalibrationItem, trace_id: str | None) -> None:
+        """One answer's judgement, and what became of it: "completed" with a verdict,
+        "failed" without one, "capped" when the day's spend cap forbade the call. Only a
+        completed judgement gives a `faithful` verdict."""
         self._judging = True
+        status, faithful = "failed", None
         try:
-            if self.judge is None or self._at_cap():
+            if self.judge is None:
+                return
+            at_cap = self._at_cap()
+            if at_cap is None:
+                return  # the day's spend cannot be read: no call, and "failed", not "capped"
+            if at_cap:
+                status = "capped"
                 return
             with tracing.span("live_judge", "evaluator") as current:
                 verdict = self.judge.faithfulness(item)
-                value = "unread" if verdict.faithful is None else _yes_no(verdict.faithful)
+                faithful = verdict.faithful
+                status = "failed" if faithful is None else "completed"
                 tracing.set_attributes(
                     current,
                     **{
-                        "permitnav.faithful": value,
+                        "permitnav.judge_status": status,
+                        "permitnav.judge_version": self.judge_version,
+                        "permitnav.faithful": None if faithful is None else _yes_no(faithful),
                         "permitnav.unsupported_claims": len(verdict.unsupported),
                     },
                 )
-                if verdict.faithful is not None:  # an unread verdict's reason is an error text
+                if faithful is not None:  # a failed judgement's reason is an error text
                     tracing.text(
                         current,
                         output={"unsupported": list(verdict.unsupported), "reason": verdict.reason},
                     )
-            self._count({"faithful": value})
-            if verdict.faithful is not None and self.scores is not None:
-                self.scores.add(trace_id, "faithful", verdict.faithful)
         except Exception as error:  # the answer is long gone; never the text, only the type
             log.error("live judge failed: %s", type(error).__name__)
         finally:
-            self._judging = False
-            with self._lock:
-                self._waiting -= 1
+            try:
+                counted = {"judge": status}
+                if faithful is not None:
+                    counted["faithful"] = _yes_no(faithful)
+                if self.judge_version and status != "capped":  # the judge was called
+                    counted["judge_version"] = self.judge_version
+                self._count(counted)
+                if self.scores is not None:
+                    metadata = self._judge_metadata()
+                    self.scores.add(trace_id, "judge_status", status, metadata)
+                    if faithful is not None:
+                        self.scores.add(trace_id, "faithful", faithful, metadata)
+            finally:
+                self._judging = False
+                with self._lock:
+                    self._waiting -= 1
 
-    def _at_cap(self) -> bool:
+    def _at_cap(self) -> bool | None:
+        """Whether the day's spend has reached the cap; None when that cannot be read (the
+        database is away): then nothing is spent, and it is not called the cap."""
         if self.spend_cap_usd is None:
             return False
         try:
             with self._connect() as conn:
                 return spend.spent_today(conn) >= self.spend_cap_usd
         except psycopg.Error:
-            return True  # cannot tell: do not spend
+            return None
 
     def _count(self, counted: dict[str, str]) -> bool:
         try:
@@ -264,12 +380,15 @@ def from_environment(
     llm: Any, database_url: str | None = None, spend_cap_usd: float | None = None
 ) -> Online:
     """The production wiring. A mistyped setting stops the start."""
-    from permitnav import scores
+    from permitnav import scores, versions
 
+    settings = judge_settings()
     return Online(
         database_url=database_url,
         scores=scores.from_environment(),
         judge=live_judge(llm),
         judge_share=judge_share(),
         spend_cap_usd=spend_cap_usd,
+        release=versions.release(),
+        judge_version=versions.judge_version(*settings) if settings else None,
     )

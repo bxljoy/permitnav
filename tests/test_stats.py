@@ -63,11 +63,38 @@ def test_the_report_gives_each_values_count_and_share() -> None:
         stats.Count(day, "second_call", "no", 7),
         stats.Count(day, "second_call", "yes", 1),
         stats.Count(next_day, "faithful", "no", 1),
+        stats.Count(day, "judge", "completed", 1),
+        stats.Count(day, "judge", "not_sampled", 6),
+        stats.Count(day, "release", "0ab9798c1d2e", 5),
+        stats.Count(next_day, "release", "f4b40371aaaa", 3),
     ]
     assert stats_report(counts, 30) == [
         "last 30 days (2026-11-27 to 2026-11-28, 2 with questions)",
-        "  kind                8  answered 7 (88%), follow_up 1 (12%)",
-        "  second_call         8  yes 1 (12%), no 7 (88%)",
-        "  faithful            1  no 1 (100%)",
+        "  kind                   8  answered 7 (88%), follow_up 1 (12%)",
+        "  second_call            8  yes 1 (12%), no 7 (88%)",
+        "  judge                  7  completed 1 (14%), not_sampled 6 (86%)",
+        "  faithful               1  no 1 (100%)",
+        "  release                8  0ab9798c1d2e 5, f4b40371aaaa 3",
+        "  (faithful: of the verdicts the judge reached, see `judge`; every claim is in a"
+        " source shown, which is not the same as the answer being right)",
     ]
     assert stats_report([], 7) == ["no questions counted in the last 7 days"]
+    # A judge that failed (written as "unread" before 2026-11-28) is beside the verdicts.
+    old = [
+        stats.Count(day, "faithful", "yes", 8),
+        stats.Count(day, "faithful", "no", 1),
+        stats.Count(day, "faithful", "unread", 3),
+    ]
+    assert stats_report(old, 30)[1] == (
+        "  faithful               9  yes 8 (89%), no 1 (11%), and 3 without a verdict"
+    )
+
+
+@pytest.mark.db
+def test_a_version_is_a_short_hex_name_and_nothing_else(conn: psycopg.Connection) -> None:
+    stats.add(conn, {"release": "0ab9798c1d2e", "judge_version": "abcdef012345"})
+    stats.add(conn, {"release": "unknown"})
+    assert stats.totals(stats.since(conn, 1))["release"] == {"0ab9798c1d2e": 1, "unknown": 1}
+    for text in ("Can I change employer?", "0ab9798; DROP TABLE", "0AB9798C1D2E", "abc", ""):
+        with pytest.raises(ValueError, match="not a known count"):
+            stats.add(conn, {"release": text})

@@ -19,6 +19,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 class FakeService:
     counts = True  # whether a rating is counted (False: the database was away)
+    judge: str | None = "queued"  # what record() says became of the live judge
 
     def __init__(self, answer: Answer | Exception | None = None, healthy: bool = True) -> None:
         self._answer = answer
@@ -39,8 +40,12 @@ class FakeService:
     def healthy(self) -> bool:
         return self._healthy
 
-    def record(self, answer, question, history, trace_id) -> None:
+    def record(self, answer, question, history, trace_id) -> str | None:
         self.recorded = [*getattr(self, "recorded", []), (answer.kind, question, trace_id)]
+        return self.judge
+
+    def record_failure(self, trace_id) -> None:
+        self.failures = [*getattr(self, "failures", []), trace_id]
 
     def rate(self, trace_id, helpful) -> bool:
         self.ratings = [*getattr(self, "ratings", []), (trace_id, helpful)]
@@ -767,3 +772,46 @@ def test_a_caller_cannot_choose_whether_or_under_which_parent_it_is_traced(spans
     with client() as c:
         c.post("/ask", json={"question": "Lönekrav?"}, headers={**AUTH, **unsampled})
     assert "ask" in [s.name for s in spans.get_finished_spans()]  # nor can it opt out
+
+
+def test_the_kind_is_a_tag_on_the_trace_and_the_judges_fate_an_attribute(spans) -> None:
+    from permitnav.llm.port import LLMError
+
+    with client() as c:
+        c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH)
+    service = FakeService(LLMError("OpenRouter HTTP 500: upstream"))
+    with client(service) as c:
+        c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH)
+    failed = FakeService(Answer(kind="failed", text="", problem="not JSON"))
+    failed.judge = "ineligible"
+    with client(failed) as c:
+        c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH)
+    finished = spans.get_finished_spans()
+    asks = [dict(s.attributes or {}) for s in finished if s.name == "ask"]
+    tops = [dict(s.attributes or {}) for s in finished if s.parent is None]
+    expected = [["kind:answered"], ["kind:error"], ["kind:failed"]]
+    assert [list(a["langfuse.trace.tags"]) for a in asks] == expected
+    assert [list(t["langfuse.trace.tags"]) for t in tops] == expected  # the first row too
+    assert [a.get("permitnav.judge") for a in asks] == ["queued", None, "ineligible"]
+    assert len(service.failures) == 1 and not hasattr(service, "recorded")  # counted as an error
+
+
+def test_a_failure_that_cannot_be_recorded_still_gets_its_error_reply(caplog) -> None:
+    from permitnav.llm.port import LLMError
+
+    class Broken(FakeService):
+        def record_failure(self, trace_id) -> None:
+            raise RuntimeError("database away")
+
+    with client(Broken(LLMError("OpenRouter HTTP 500: upstream"))) as c:
+        assert c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH).status_code == 502
+    assert "failure not recorded for online evals: RuntimeError" in caplog.text
+
+
+def test_any_crash_while_answering_is_counted_as_a_question_without_an_answer(spans) -> None:
+    service = FakeService(RuntimeError("database away"))
+    with TestClient(create_app(service, token=TOKEN), raise_server_exceptions=False) as c:
+        assert c.post("/ask", json={"question": "Lönekrav?"}, headers=AUTH).status_code == 500
+    (ask,) = [dict(s.attributes or {}) for s in spans.get_finished_spans() if s.name == "ask"]
+    assert list(ask["langfuse.trace.tags"]) == ["kind:error"]
+    assert len(service.failures) == 1  # or an outage would show as a day of valid outputs

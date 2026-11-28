@@ -900,13 +900,28 @@ def stats_report(counts: list, days: int) -> list[str]:
         of_measure = summed.get(measure)
         if not of_measure:
             continue
+        # "unread" (a judge that failed, before 2026-11-28) is no verdict: beside the
+        # verdicts, never among them.
+        apart = of_measure.pop("unread", 0) if measure == "faithful" else 0
         total = sum(of_measure.values())
         parts = [
             f"{value} {of_measure[value]} ({of_measure[value] / total:.0%})"
             for value in values
             if of_measure.get(value)
         ]
-        lines.append(f"  {measure:<15} {total:>5}  " + ", ".join(parts))
+        if apart:
+            parts.append(f"and {apart} without a verdict")
+        lines.append(f"  {measure:<18} {total:>5}  " + ", ".join(parts))
+    for measure in stats.VERSIONS:  # which versions the questions ran on, most used first
+        of_measure = summed.get(measure)
+        if of_measure:
+            parts = [f"{v} {n}" for v, n in sorted(of_measure.items(), key=lambda x: -x[1])]
+            lines.append(f"  {measure:<18} {sum(of_measure.values()):>5}  " + ", ".join(parts))
+    if summed.get("faithful"):
+        lines.append(
+            "  (faithful: of the verdicts the judge reached, see `judge`; every claim is in a"
+            " source shown, which is not the same as the answer being right)"
+        )
     return lines
 
 
